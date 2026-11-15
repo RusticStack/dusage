@@ -179,6 +179,28 @@ table (about 2 GB/s here); parsing runs on up to 16 threads alongside the reads.
 Version 0.1 deleted each top-level candidate on a single thread. Version 0.2 spreads
 one big subtree, or one huge flat folder, across every worker.
 
+## Use it from an AI agent
+
+[`skills/dusage/SKILL.md`](skills/dusage/SKILL.md) is an
+[Agent Skill](https://agentskills.io) that teaches a coding agent to find what fills a
+Windows drive, report it, and clean up only what you approve: scan, drill down, ask, run a
+`fastdel --dry`, then delete with a log. It downloads and verifies the tools if they are
+missing. Copy the `skills/dusage` folder to your agent's skills directory, for example:
+
+| Agent | Folder |
+|---|---|
+| Devin CLI (global, Windows) | `%APPDATA%\devin\skills\dusage\` |
+| Claude Code | `%USERPROFILE%\.claude\skills\dusage\` |
+| Any agent reading `.agents` skills | `%USERPROFILE%\.agents\skills\dusage\` or `<repo>\.agents\skills\dusage\` |
+
+```powershell
+$dst = "$env:APPDATA\devin\skills\dusage"; New-Item -ItemType Directory -Force $dst | Out-Null
+Invoke-WebRequest https://raw.githubusercontent.com/RusticStack/dusage/main/skills/dusage/SKILL.md -OutFile "$dst\SKILL.md"
+```
+
+Then ask the agent "what is using my disk space?" or run `/dusage C:\`. The tools are
+Windows-only, so the skill is for agents running on Windows, not cloud Linux sandboxes.
+
 ## Good to know
 
 - `dusage` counts each hardlink name separately unless you pass `--dedup-hardlinks`, so
