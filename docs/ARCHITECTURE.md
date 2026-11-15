@@ -189,24 +189,29 @@ a `const fn ctl_code` and checked against winioctl.h values in tests.
 ```rust
 pub struct MftEntry { pub frn: u64 /* record index | seq<<48 */, pub parent: u64, pub name: std::ffi::OsString,
                       pub is_dir: bool, pub size: u64, pub alloc: u64, pub links: u16, pub reparse: bool,
-                      pub approx: bool /* size/links may be incomplete (attribute list) */ }
+                      pub approx: bool /* $DATA header not found (attribute list) */,
+                      pub other_names: Vec<(u64, std::ffi::OsString)> /* further hardlinks: parent, name */ }
 /// Pure parsers, testable on synthetic buffers:
 pub fn apply_fixup(record: &mut [u8], bytes_per_sector: usize) -> Result<(), String>;
 pub fn decode_runlist(data: &[u8]) -> Result<Vec<(i64 /*lcn, -1 sparse*/, u64 /*clusters*/)>, String>;
-pub fn parse_record(record: &[u8], index: u64) -> Result<Option<MftEntry>, String>; // None = not in use / extension record
-/// Read every in-use record of the volume's $MFT (FSCTL_GET_NTFS_VOLUME_DATA, $MFT runlist from record 0,
-/// large sequential reads). Needs admin. Callback per entry; per-record parse errors are counted, not fatal.
+pub fn parse_record(record: &[u8], index: u64) -> Result<Option<MftEntry>, String>; // one record alone; None = not in use / extension record
+/// Read every in-use record of the volume's $MFT (FSCTL_GET_NTFS_VOLUME_DATA, $MFT runlist from record 0
+/// and its attribute list). Needs admin. Callback per entry; per-record parse errors are counted, not fatal.
 pub fn scan_volume(letter: char, f: &mut dyn FnMut(MftEntry)) -> std::io::Result<MftStats>;
 pub struct MftStats { pub records: u64, pub in_use: u64, pub parse_errors: u64, pub approx_records: u64, pub elapsed: std::time::Duration }
 ```
-Use the WIN32/WIN32_AND_DOS `$FILE_NAME` (skip DOS-only 8.3 names) for name/parent.
-Sizes come from the unnamed `$DATA` (resident: value length; non-resident: data/allocated size).
-`$ATTRIBUTE_LIST` (files with extension records) may be handled best-effort, but it
-must be counted in stats and not silently mis-sized. Implemented: a file whose unnamed `$DATA`
-first extent lives in an extension record gets size 0 and `approx = true`; a file with an attribute
-list but its `$DATA` first extent in the base record is sized exactly; records whose `$FILE_NAME`
-lives only in an extension record are not emitted; resident `$DATA` reports `alloc = 0`.
-`scan` prints a note with the `approx_records` count.
+Every non-DOS `$FILE_NAME` is a hardlink. The first WIN32 name (else POSIX) is `name`/`parent`,
+and the rest go to `other_names`. `scan` walks one link per (parent, name), and
+`--dedup-hardlinks` keys on the record index. Sizes come from the unnamed `$DATA` (resident:
+value length, `alloc = 0`; non-resident: the VCN-0 extent's data and allocated sizes).
+
+`scan_volume` splits the `$MFT` stream into record-aligned 4 MiB jobs (sparse runs skipped) and
+runs up to 16 workers. Each worker has its own `FILE_FLAG_NO_BUFFERING` volume handle (synchronous
+I/O on one handle is serialised) and a 4 KiB-aligned buffer. Base records with an
+`$ATTRIBUTE_LIST` are held, and extension records (non-zero base reference) are collected by base
+index. Both are merged after all workers finish, so names and `$DATA` in extension records count.
+`approx` is set only when a list-bearing file still has no `$DATA` header; `scan` prints a note
+with the count.
 
 ### scan / prune (wave 2)
 

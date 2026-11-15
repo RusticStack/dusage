@@ -426,52 +426,76 @@ fn run_mft(o: &ScanOptions) -> io::Result<Scanned> {
             "dusage: note: {approx} MFT records have approximate sizes (attribute lists); counted as read"
         );
     }
-    let parent_of = |e: &mft::MftEntry| e.parent & MFT_INDEX_MASK;
-    ents.sort_unstable_by_key(parent_of);
-    let children = |r: u64| -> &[mft::MftEntry] {
-        let lo = ents.partition_point(|e| parent_of(e) < r);
-        let hi = ents.partition_point(|e| parent_of(e) <= r);
-        &ents[lo..hi]
+    // One link per (parent, name): a file with several hardlinks appears under every
+    // directory that names it, like a directory walk sees it; --dedup-hardlinks then
+    // counts it once, keyed by its record number.
+    struct Link<'a> {
+        parent: u64,
+        name: &'a OsStr,
+        e: &'a mft::MftEntry,
+    }
+    let mut links: Vec<Link> = Vec::with_capacity(ents.len());
+    for e in &ents {
+        links.push(Link {
+            parent: e.parent & MFT_INDEX_MASK,
+            name: &e.name,
+            e,
+        });
+        for (p, n) in &e.other_names {
+            links.push(Link {
+                parent: p & MFT_INDEX_MASK,
+                name: n,
+                e,
+            });
+        }
+    }
+    links.sort_unstable_by_key(|l| l.parent);
+    let children = |r: u64| -> &[Link] {
+        let lo = links.partition_point(|l| l.parent < r);
+        let hi = links.partition_point(|l| l.parent <= r);
+        &links[lo..hi]
     };
+    let dedup = o.dedup_hardlinks.then(Dedup::new);
     let mut tops = vec![TopData::default()];
     let mut listed = HashSet::new();
     let mut stack: Vec<(u64, PathBuf, usize)> = Vec::new();
-    fn info(e: &mft::MftEntry) -> FileInfo<'_> {
-        FileInfo {
-            name: &e.name,
-            size: e.size,
-            alloc: e.alloc,
-            id: 0,
-            plain: false,
-        }
-    }
-    let mut visit = |tops: &mut Vec<TopData>,
-                     stack: &mut Vec<_>,
-                     dir: &Path,
-                     top: Option<usize>,
-                     e: &mft::MftEntry| {
-        if e.frn & MFT_INDEX_MASK == e.parent & MFT_INDEX_MASK {
-            return; // the root record is its own parent
-        }
-        let t = top.unwrap_or(tops.len());
-        if e.is_dir && e.reparse {
-            tops[0].skipped += 1;
-            return;
-        }
-        if top.is_none() {
-            listed.insert(key(&e.name));
-            tops.push(TopData {
-                name: e.name.clone(),
-                is_dir: e.is_dir,
-                ..Default::default()
-            });
-        }
-        if e.is_dir {
-            stack.push((e.frn & MFT_INDEX_MASK, dir.join(&e.name), t));
-        } else {
-            count_file(o, None, &mut tops[t], dir, &info(e));
-        }
-    };
+    let mut visit =
+        |tops: &mut Vec<TopData>, stack: &mut Vec<_>, dir: &Path, top: Option<usize>, l: &Link| {
+            let e = l.e;
+            if e.frn & MFT_INDEX_MASK == l.parent {
+                return; // the root record is its own parent
+            }
+            let t = top.unwrap_or(tops.len());
+            if e.is_dir && e.reparse {
+                tops[0].skipped += 1;
+                return;
+            }
+            if top.is_none() {
+                listed.insert(key(l.name));
+                tops.push(TopData {
+                    name: l.name.to_os_string(),
+                    is_dir: e.is_dir,
+                    ..Default::default()
+                });
+            }
+            if e.is_dir {
+                stack.push((e.frn & MFT_INDEX_MASK, dir.join(l.name), t));
+            } else {
+                let id = if e.other_names.is_empty() {
+                    0 // single link: nothing to dedup
+                } else {
+                    (e.frn & MFT_INDEX_MASK) as u128 + 1
+                };
+                let info = FileInfo {
+                    name: l.name,
+                    size: e.size,
+                    alloc: e.alloc,
+                    id,
+                    plain: false,
+                };
+                count_file(o, dedup.as_ref(), &mut tops[t], dir, &info);
+            }
+        };
     for e in children(root_idx) {
         visit(&mut tops, &mut stack, &o.root, None, e);
     }

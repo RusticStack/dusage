@@ -21,7 +21,7 @@
 | 7 | fastdel: parallel removal inside large subtrees | Done: `prune` (chunked `Work::Files`), `win::delete`; speedup unmeasured | Speed on skewed trees; unmeasured | No | M | Medium-high |
 | 8 | Opt-in named-stream (ADS) accounting | Done: `--streams`, `enumerate::named_stream_bytes` | Accuracy for ADS-heavy trees | No | S-M | Low |
 | 9 | USN change journal for incremental `--watch` | Partial: `win::usn` + `scan::watch`; not validated on a real journal (admin) | Feature; faster repeat scans | Expected yes (unverified) | L | Medium |
-| 10 | Elevated whole-volume fast path (USN enum plus MFT parsing) | Partial: `win::mft` + `--mft`; not validated on a real volume (admin), benchmark gate not run | Speed for whole-volume scans; unmeasured | Expected yes (unverified) | L | High |
+| 10 | Elevated whole-volume fast path (USN enum plus MFT parsing) | Done: `win::mft` + `--mft`, validated against the batched backend on two real volumes | Whole-drive scan 6.2x faster (10.6 s vs 65.8 s) | Yes (measured) | L | High |
 | 11 | Dev Drive guidance for scratch trees (docs only) | Open: docs only, not written | Unmeasured | Setup only | S | None |
 
 ### 1. Skip reparse-point directories on the raw attribute (dusage and fastdel)
@@ -111,7 +111,7 @@
 
 ### 10. Elevated whole-volume fast path (USN enumeration plus MFT parsing)
 
-**Status: Partially done.** `win::mft` (fixup, runlists, record parser, volume reader) backs `--backend mft`. Attribute-list files can be approximate (`MftEntry.approx`, reported in the scan note). Tested on synthetic records only; the benchmark gate has not been run.
+**Status: Done.** `win::mft` (fixup, runlists, record parser, parallel unbuffered volume reader, extension-record merge) backs `--backend mft`. It was validated in an elevated shell on two NTFS volumes. Its totals match the batched backend, with and without `--dedup-hardlinks`, plus the NTFS metadata files on a volume root. Benchmarked in the README: 10.6 s against 65.8 s for a whole system drive with 8.6M files. Reading the table (about 2 GB/s) dominates.
 
 - **Verified.** `FSCTL_ENUM_USN_DATA` on `\\.\X:` is NTFS-only. You loop on `StartFileReferenceNumber` (https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_enum_usn_data). It yields names and parents, not sizes.
 - **Sizes need MFT parsing.** That means the FILE-record header, update-sequence fixup and runlists. Only the struct members and the NTFS 3.0/3.1 version gate are verified (https://learn.microsoft.com/en-us/windows/win32/devnotes/file-record-segment-header). The byte offsets are community NTFS documentation and unverified.

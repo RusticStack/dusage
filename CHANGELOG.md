@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- `dusage --mft` is no longer experimental. It reads the master file table on up to 16
+  threads, each with its own unbuffered volume handle, and scans a whole system drive about
+  6x faster than the default backend (11 s against 66 s in the README benchmark).
+
+### Fixed
+
+- `--mft` failed on volumes whose `$MFT` has a non-resident attribute list, and on reads
+  that were not sector aligned.
+- `--mft` undercounted files with several hardlinks, and files whose attributes spill into
+  extension records (extra names, or the data size of a fragmented file). Extension records
+  are now merged into their base record, and the totals match the default backend.
+
 ## [0.2.0] - 2026-11-15
 
 The first public release. `dusage` gains native Windows backends and accurate

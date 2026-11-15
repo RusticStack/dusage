@@ -35,8 +35,9 @@ A fast disk-usage scanner and a safe parallel pruner for Windows. Two small exes
   (pnpm stores, `.git` objects) can be counted once (`--dedup-hardlinks`).
 - **Fast.** Directory entries come from Windows in large batches, with size on disk and file
   ids included, so there is no per-file call: up to millions of files per second on a warm
-  cache, and a whole 8.4-million-file system drive in about 70 seconds (see
-  [Benchmarks](#benchmarks)).
+  cache, and a whole 8.4-million-file system drive in about 70 seconds. In an elevated shell
+  `--mft` reads the NTFS master file table instead and does the same drive in about 11 seconds
+  (see [Benchmarks](#benchmarks)).
 - **`fastdel` gets it back.** It deletes the children of a folder that match a name prefix
   and are older than an age (`7d`, `2h`), in parallel, including inside one huge subtree.
 - **Safe by design.** Volume roots, Windows, Program Files, ProgramData and your profile are
@@ -87,9 +88,12 @@ dusage <root> [min_big] [threads] [top_n]      (positional form, still supported
 
 **Backends.** `auto` uses `batched` and falls back to `readdir` on file systems that
 don't support it. `batched` is the default fast path. `readdir` uses the Rust standard
-library and can't report size on disk. `mft` reads the NTFS master file table directly. It
-needs an elevated shell and is **experimental**: it has only been validated on synthetic
-records so far, so compare it with the default backend before relying on it.
+library and can't report size on disk. `mft` reads the NTFS master file table directly, in
+parallel, and builds the tree in memory. It needs an elevated shell and an NTFS volume. It
+always reads the whole volume's table, so a folder takes about as long as the whole drive:
+use it for big trees and the default backend for small ones. Its totals match the default
+backend, plus the NTFS metadata files (`$MFT`, `$LogFile`, `$Extend`) that a directory walk
+cannot see.
 
 **Watch.** In an elevated shell, `--watch` reads the NTFS change journal and rescans only
 the top-level entries that changed. Without admin rights every tick is a full rescan. An
@@ -150,8 +154,20 @@ warm-up pass):
 
 Version 0.2 scans as fast as 0.1 (the differences are within run-to-run noise on a live
 system) while the default backend also returns size on disk and file ids. For scale, a
-sequential `Get-ChildItem` or robocopy pass over a similar drive took 15-20 minutes. The
-experimental MFT backend has not been benchmarked yet.
+sequential `Get-ChildItem` or robocopy pass over a similar drive took 15-20 minutes.
+
+**MFT backend** (`dusage <root> --mft`, elevated shell, same machine; the system drive is a
+PCIe 3 NVMe SSD with a 13.6 GB master file table):
+
+| Workload | default backend | `--mft` | Speed-up |
+|---|---|---|---|
+| Whole system drive, 8.6M files / 3.4M folders | 65.8 s (64.3-119.6) | 10.6 s (10.5-11.7) | 6.2x |
+| Cache folder, 6.4M files / 3.0M folders | 55.8 s (49.4-60.8) | 10.2 s (10.2-10.3) | 5.5x |
+
+The MFT runs were back to back. Straight after a full directory walk they took 19-32 s,
+because the drive was still busy. On the cache folder the two backends agree to within 0.01%
+on bytes and a handful of files (the folder is live). Most of the MFT time goes on reading the
+table (about 2 GB/s here); parsing runs on up to 16 threads alongside the reads.
 
 **Deleting** (`fastdel <root> -1 <prefix> 96`, one candidate folder each):
 

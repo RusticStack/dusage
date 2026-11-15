@@ -87,8 +87,8 @@ accounting (`--streams`), USN-assisted `--watch`, MFT backend (`--mft`),
 parsing, CI.
 
 Open:
-- Validate MFT and USN paths on real volumes in an elevated shell (tests skip
-  without admin; only synthetic buffers are covered).
+- Validate the USN `--watch` path on a real volume in an elevated shell (the
+  MFT backend is validated and benchmarked; see README).
 - Run the benchmark questions in `docs/ROADMAP.md` (no speedup is measured yet).
 - Merge to one binary with subcommands (`dusage scan|prune|big`) if more tools
   appear — keep `fastdel` as an alias for `prune`.

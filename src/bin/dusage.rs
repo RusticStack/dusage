@@ -45,7 +45,7 @@ BACKENDS:
               per syscall; the default and fastest portable path
     readdir   std::fs::read_dir; on-disk size unknown (shown as 0), no hardlink dedup
     mft       raw NTFS $MFT read of a local drive letter (needs an elevated shell);
-              experimental (validated on synthetic records), each record counted once
+              reads the whole volume's table, so it pays off on big trees
 
 Symlinks, junctions and other name-surrogate reparse points are never followed.
 A root that is itself a junction or symlink is refused; pass its target.

@@ -22,11 +22,15 @@
 //! whose `$FILE_NAME` lives only in an extension record are not emitted.
 //! Resident `$DATA` reports `alloc = 0` (the bytes live inside the MFT record).
 
+use std::collections::HashMap;
 use std::ffi::{c_void, OsStr, OsString};
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::fs::FileExt;
 use std::os::windows::io::AsRawHandle;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::sys;
@@ -45,6 +49,8 @@ pub struct MftEntry {
     pub reparse: bool,
     /// True when size/links may be incomplete because of an `$ATTRIBUTE_LIST`.
     pub approx: bool,
+    /// Further hardlink names (parent reference, name) beyond `parent`/`name`.
+    pub other_names: Vec<(u64, OsString)>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -73,7 +79,9 @@ const FIXUP_STRIDE: usize = 512;
 const CHUNK: usize = 4 << 20;
 
 const FSCTL_GET_NTFS_VOLUME_DATA: u32 = ctl_code(9, 25, 0, 0);
-const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
+/// Bypass the cache: the MFT is read once, and cached reads cap throughput.
+/// Offsets, lengths and buffer addresses must then be sector aligned.
+const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
 
 const fn ctl_code(device: u32, function: u32, method: u32, access: u32) -> u32 {
     (device << 16) | (access << 14) | (function << 2) | method
@@ -315,9 +323,33 @@ impl<'a> Iterator for AttrIter<'a> {
 
 // ---- record parsing -----------------------------------------------------
 
-/// Parse one fixed-up FILE record. `Ok(None)` for records that are not in use,
-/// extension records (non-zero base reference) and records with no usable name.
-pub fn parse_record(record: &[u8], index: u64) -> Result<Option<MftEntry>, String> {
+/// Attributes of one in-use FILE record that matter for sizing. A file whose
+/// attributes overflow its base record keeps an `$ATTRIBUTE_LIST` there and spills
+/// further attributes (extra hardlink names, the `$DATA` header) into extension
+/// records, which point back at the base through `base`.
+struct Parts {
+    seq: u64,
+    /// Base record index for an extension record, 0 for a base record.
+    base: u64,
+    is_dir: bool,
+    names: Vec<(u64, OsString, bool)>, // parent, name, is_win32
+    data: Option<(u64, u64)>,          // size, allocated
+    has_list: bool,
+    reparse: bool,
+}
+
+impl Parts {
+    /// Fold an extension record's attributes into its base record.
+    fn merge(&mut self, ext: Parts) {
+        self.names.extend(ext.names);
+        if self.data.is_none() {
+            self.data = ext.data;
+        }
+        self.reparse |= ext.reparse;
+    }
+}
+
+fn parse_parts(record: &[u8]) -> Result<Option<Parts>, String> {
     if record.len() < 0x30 {
         return Err("record too small".into());
     }
@@ -328,18 +360,15 @@ pub fn parse_record(record: &[u8], index: u64) -> Result<Option<MftEntry>, Strin
     if flags & FLAG_IN_USE == 0 {
         return Ok(None);
     }
-    if u64_at(record, 0x20).ok_or("short header")? & 0x0000_FFFF_FFFF_FFFF != 0 {
-        return Ok(None);
-    }
-    let seq = u16_at(record, 0x10).ok_or("short header")? as u64;
-    let is_dir = flags & FLAG_DIR != 0;
-
-    let mut best: Option<(u64, OsString, bool)> = None; // parent, name, is_win32
-    let mut links = 0u16;
-    let mut data: Option<(u64, u64)> = None;
-    let mut has_list = false;
-    let mut reparse = false;
-
+    let mut p = Parts {
+        seq: u16_at(record, 0x10).ok_or("short header")? as u64,
+        base: u64_at(record, 0x20).ok_or("short header")? & 0x0000_FFFF_FFFF_FFFF,
+        is_dir: flags & FLAG_DIR != 0,
+        names: Vec::new(),
+        data: None,
+        has_list: false,
+        reparse: false,
+    };
     for a in AttrIter::new(record)? {
         let a = a?;
         match a.ty {
@@ -353,51 +382,74 @@ pub fn parse_record(record: &[u8], index: u64) -> Result<Option<MftEntry>, Strin
                 if ns == NS_DOS {
                     continue;
                 }
-                links = links.saturating_add(1);
-                let win32 = ns != 0;
-                if best.as_ref().is_none_or(|b| win32 && !b.2) {
-                    let wide: Vec<u16> = (0..nlen)
-                        .map(|i| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]]))
-                        .collect();
-                    let parent = u64_at(v, 0).ok_or("short $FILE_NAME")?;
-                    best = Some((parent, OsString::from_wide(&wide), win32));
-                }
+                // Every non-DOS name is a separate hardlink (a WIN32 name's 8.3 alias
+                // is the DOS-only attribute skipped above).
+                let wide: Vec<u16> = (0..nlen)
+                    .map(|i| u16::from_le_bytes([raw[2 * i], raw[2 * i + 1]]))
+                    .collect();
+                let parent = u64_at(v, 0).ok_or("short $FILE_NAME")?;
+                p.names.push((parent, OsString::from_wide(&wide), ns != 0));
             }
-            ATTR_DATA if a.name_len == 0 && data.is_none() => {
+            ATTR_DATA if a.name_len == 0 && p.data.is_none() => {
                 if a.non_resident {
+                    // Only the first extent (VCN 0) carries the stream's sizes.
                     if a.start_vcn() == 0 {
-                        data = Some((a.data_size(), a.disk_alloc()));
+                        p.data = Some((a.data_size(), a.disk_alloc()));
                     }
                 } else {
                     let v = a.resident_value().ok_or("bad resident $DATA")?;
-                    data = Some((v.len() as u64, 0));
+                    p.data = Some((v.len() as u64, 0));
                 }
             }
-            ATTR_ATTRIBUTE_LIST => has_list = true,
-            ATTR_REPARSE_POINT => reparse = true,
+            ATTR_ATTRIBUTE_LIST => p.has_list = true,
+            ATTR_REPARSE_POINT => p.reparse = true,
             _ => {}
         }
     }
+    Ok(Some(p))
+}
 
-    let Some((parent, name, _)) = best else {
-        return Ok(None);
-    };
-    let (size, alloc) = if is_dir {
+/// Turn a (merged) base record into an entry; `None` when it has no usable name.
+fn build_entry(mut p: Parts, index: u64) -> Option<MftEntry> {
+    // Primary name: the first WIN32 one, else the first POSIX one.
+    let first = p
+        .names
+        .iter()
+        .position(|n| n.2)
+        .or((!p.names.is_empty()).then_some(0))?;
+    let links = p.names.len().min(u16::MAX as usize) as u16;
+    let (parent, name, _) = p.names.swap_remove(first);
+    let other_names = p.names.into_iter().map(|(pr, n, _)| (pr, n)).collect();
+    let (size, alloc) = if p.is_dir {
         (0, 0)
     } else {
-        data.unwrap_or((0, 0))
+        p.data.unwrap_or((0, 0))
     };
-    Ok(Some(MftEntry {
-        frn: (index & 0x0000_FFFF_FFFF_FFFF) | (seq << 48),
+    Some(MftEntry {
+        frn: (index & 0x0000_FFFF_FFFF_FFFF) | (p.seq << 48),
         parent,
         name,
-        is_dir,
+        is_dir: p.is_dir,
         size,
         alloc,
         links,
-        reparse,
-        approx: has_list && !is_dir && data.is_none(),
-    }))
+        reparse: p.reparse,
+        approx: p.has_list && !p.is_dir && p.data.is_none(),
+        other_names,
+    })
+}
+
+/// Parse one fixed-up FILE record on its own. `Ok(None)` for records that are not in
+/// use, extension records (non-zero base reference) and records with no usable name.
+/// Attributes that live in extension records are only merged by [`scan_volume`].
+pub fn parse_record(record: &[u8], index: u64) -> Result<Option<MftEntry>, String> {
+    let Some(p) = parse_parts(record)? else {
+        return Ok(None);
+    };
+    if p.base != 0 {
+        return Ok(None);
+    }
+    Ok(build_entry(p, index))
 }
 
 // ---- volume scan --------------------------------------------------------
@@ -406,14 +458,67 @@ fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
-fn read_exact_at(f: &mut File, off: u64, buf: &mut [u8]) -> io::Result<()> {
-    f.seek(SeekFrom::Start(off))?;
-    f.read_exact(buf)
+/// Raw volume reads must start and end on sector boundaries; 4 KiB covers both
+/// 512-byte and 4Kn sectors. Unaligned requests go through an aligned bounce buffer
+/// (a short read at the end of a plain file is fine as long as `buf` is covered).
+const IO_ALIGN: u64 = 4096;
+
+fn read_exact_at(f: &File, off: u64, buf: &mut [u8]) -> io::Result<()> {
+    let end = off + buf.len() as u64;
+    if off.is_multiple_of(IO_ALIGN)
+        && end.is_multiple_of(IO_ALIGN)
+        && (buf.as_ptr() as usize).is_multiple_of(IO_ALIGN as usize)
+    {
+        let n = read_at(f, off, buf)?;
+        return if n == buf.len() {
+            Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::UnexpectedEof))
+        };
+    }
+    let start = off / IO_ALIGN * IO_ALIGN;
+    let mut store = Vec::new();
+    let tmp = aligned_mut(
+        &mut store,
+        (end.next_multiple_of(IO_ALIGN) - start) as usize,
+    );
+    let got = read_at(f, start, tmp)?;
+    let lo = (off - start) as usize;
+    if got < lo + buf.len() {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+    }
+    buf.copy_from_slice(&tmp[lo..lo + buf.len()]);
+    Ok(())
+}
+
+/// A `len`-byte window of `v` that starts on an `IO_ALIGN` boundary.
+fn aligned_mut(v: &mut Vec<u8>, len: usize) -> &mut [u8] {
+    let a = IO_ALIGN as usize;
+    v.resize(len + a, 0);
+    let skip = (a - v.as_ptr() as usize % a) % a;
+    &mut v[skip..skip + len]
+}
+
+/// Positional read until `buf` is full or EOF; returns the bytes read.
+fn read_at(f: &File, mut off: u64, buf: &mut [u8]) -> io::Result<usize> {
+    let mut got = 0;
+    while got < buf.len() {
+        match f.seek_read(&mut buf[got..], off) {
+            Ok(0) => break,
+            Ok(n) => {
+                got += n;
+                off += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(got)
 }
 
 /// Read `buf.len()` bytes at logical `offset` of a file described by `runs`.
 fn read_mapped(
-    f: &mut File,
+    f: &File,
     runs: &[(i64, u64)],
     bpc: u64,
     mut offset: u64,
@@ -443,25 +548,30 @@ fn read_mapped(
 /// Runs and data size of `$MFT`'s unnamed `$DATA`, gathered from record 0 and,
 /// when `$ATTRIBUTE_LIST` is present, from the extension records it names.
 fn mft_extents(
-    f: &mut File,
+    f: &File,
     rec0: &[u8],
     bpc: u64,
     rec_size: u64,
 ) -> io::Result<(Vec<(i64, u64)>, u64)> {
-    let mut runs = Vec::new();
+    // Unnamed $DATA extents keyed by start VCN; joined in VCN order at the end.
+    let mut extents: Vec<(u64, Vec<(i64, u64)>)> = Vec::new();
     let mut size = None;
     let mut list: Option<Vec<u8>> = None;
     for a in AttrIter::new(rec0).map_err(invalid)? {
         let a = a.map_err(invalid)?;
-        if a.ty == ATTR_DATA && a.name_len == 0 && a.non_resident && a.start_vcn() == 0 {
-            runs = a.runlist().map_err(invalid)?;
-            size = Some(a.data_size());
+        if a.ty == ATTR_DATA && a.name_len == 0 && a.non_resident {
+            if a.start_vcn() == 0 {
+                size = Some(a.data_size());
+            }
+            extents.push((a.start_vcn(), a.runlist().map_err(invalid)?));
         } else if a.ty == ATTR_ATTRIBUTE_LIST {
-            list = Some(
-                a.resident_value()
-                    .ok_or_else(|| invalid("non-resident $MFT attribute list"))?
-                    .to_vec(),
-            );
+            list = Some(match a.resident_value() {
+                Some(v) => v.to_vec(),
+                // Large or fragmented volumes keep $MFT's attribute list in its own
+                // clusters; raw volume reads must be sector multiples, so read whole
+                // clusters and truncate to the list's data size.
+                None => read_non_resident(f, &a, bpc)?,
+            });
         }
     }
     let size = size.ok_or_else(|| invalid("$MFT has no non-resident $DATA"))?;
@@ -476,6 +586,7 @@ fn mft_extents(
             }
             let vcn = u64_at(&list, o + 8).unwrap_or(0);
             let fref = u64_at(&list, o + 0x10).unwrap_or(0) & 0x0000_FFFF_FFFF_FFFF;
+            // fref 0 is record 0 itself, whose extents were collected above.
             if ty == ATTR_DATA && list[o + 6] == 0 && vcn > 0 && fref != 0 {
                 exts.push((vcn, fref));
             }
@@ -484,14 +595,19 @@ fn mft_extents(
         exts.sort_unstable();
         exts.dedup();
         for (vcn, idx) in exts {
+            if extents.iter().any(|(v, _)| *v == vcn) {
+                continue;
+            }
+            // Extension records sit in already-known extents (low VCNs come first).
+            let known = join_extents(&mut extents.clone())?;
             let mut rec = vec![0u8; rec_size as usize];
-            read_mapped(f, &runs, bpc, idx * rec_size, &mut rec)?;
+            read_mapped(f, &known, bpc, idx * rec_size, &mut rec)?;
             apply_fixup(&mut rec, FIXUP_STRIDE).map_err(invalid)?;
             let mut found = false;
             for a in AttrIter::new(&rec).map_err(invalid)? {
                 let a = a.map_err(invalid)?;
                 if a.ty == ATTR_DATA && a.name_len == 0 && a.non_resident && a.start_vcn() == vcn {
-                    runs.extend(a.runlist().map_err(invalid)?);
+                    extents.push((vcn, a.runlist().map_err(invalid)?));
                     found = true;
                     break;
                 }
@@ -503,37 +619,156 @@ fn mft_extents(
             }
         }
     }
-    Ok((runs, size))
+    Ok((join_extents(&mut extents)?, size))
 }
 
-struct Scanner<'a> {
-    f: &'a mut dyn FnMut(MftEntry),
+/// Concatenate extents in VCN order, checking that each starts where the last ended.
+fn join_extents(extents: &mut [(u64, Vec<(i64, u64)>)]) -> io::Result<Vec<(i64, u64)>> {
+    extents.sort_by_key(|(vcn, _)| *vcn);
+    let mut runs = Vec::new();
+    let mut next_vcn = 0u64;
+    for (vcn, r) in extents.iter() {
+        if *vcn != next_vcn {
+            return Err(invalid(format!(
+                "$MFT extents not contiguous: expected VCN {next_vcn}, found {vcn}"
+            )));
+        }
+        next_vcn += r.iter().map(|&(_, c)| c).sum::<u64>();
+        runs.extend_from_slice(r);
+    }
+    Ok(runs)
+}
+
+/// Read a (small) non-resident attribute's value, e.g. `$MFT`'s `$ATTRIBUTE_LIST`.
+fn read_non_resident(f: &File, a: &Attr<'_>, bpc: u64) -> io::Result<Vec<u8>> {
+    const MAX: u64 = 16 << 20;
+    let size = a.data_size();
+    if size > MAX {
+        return Err(invalid("implausibly large $MFT attribute list"));
+    }
+    let runs = a.runlist().map_err(invalid)?;
+    let mapped: u64 = runs.iter().map(|&(_, c)| c * bpc).sum();
+    let whole = size.next_multiple_of(bpc);
+    if whole > mapped {
+        return Err(invalid("$MFT attribute list larger than its runs"));
+    }
+    let mut v = vec![0u8; whole as usize];
+    read_mapped(f, &runs, bpc, 0, &mut v)?;
+    v.truncate(size as usize);
+    Ok(v)
+}
+
+/// Per-worker parse state; workers' results are folded together with `absorb`.
+#[derive(Default)]
+struct Scanner {
     stats: MftStats,
-    scratch: Vec<u8>,
+    out: Vec<MftEntry>,
+    /// Base records with an `$ATTRIBUTE_LIST`, held until every extension is read.
+    held: HashMap<u64, Parts>,
+    /// Extension records by base index (an extension may precede its base).
+    exts: HashMap<u64, Vec<Parts>>,
 }
 
-impl Scanner<'_> {
-    fn process(&mut self, rec: &[u8], index: u64) {
+impl Scanner {
+    /// Parse one raw record in place (the fixup rewrites it).
+    fn process(&mut self, rec: &mut [u8], index: u64) {
         self.stats.records += 1;
         if rec[..4] == [0, 0, 0, 0] {
             return; // never-used slot
         }
-        self.scratch.clear();
-        self.scratch.extend_from_slice(rec);
-        let r = apply_fixup(&mut self.scratch, FIXUP_STRIDE)
-            .and_then(|_| parse_record(&self.scratch, index));
-        match r {
-            Ok(Some(e)) => {
-                self.stats.in_use += 1;
-                if e.approx {
-                    self.stats.approx_records += 1;
-                }
-                (self.f)(e);
+        match apply_fixup(rec, FIXUP_STRIDE).and_then(|_| parse_parts(rec)) {
+            Ok(Some(p)) if p.base != 0 => self.exts.entry(p.base).or_default().push(p),
+            Ok(Some(p)) if p.has_list => {
+                self.held.insert(index, p);
             }
+            Ok(Some(p)) => self.emit(p, index),
             Ok(None) => {}
             Err(_) => self.stats.parse_errors += 1,
         }
     }
+
+    fn emit(&mut self, p: Parts, index: u64) {
+        if let Some(e) = build_entry(p, index) {
+            self.stats.in_use += 1;
+            if e.approx {
+                self.stats.approx_records += 1;
+            }
+            self.out.push(e);
+        }
+    }
+
+    fn absorb(&mut self, o: Scanner) {
+        self.stats.records += o.stats.records;
+        self.stats.in_use += o.stats.in_use;
+        self.stats.parse_errors += o.stats.parse_errors;
+        self.stats.approx_records += o.stats.approx_records;
+        if self.out.is_empty() {
+            self.out = o.out;
+        } else {
+            self.out.extend(o.out);
+        }
+        self.held.extend(o.held);
+        for (k, v) in o.exts {
+            self.exts.entry(k).or_default().extend(v);
+        }
+    }
+
+    /// Merge held base records with their extension records and emit them.
+    /// Extensions whose base is not in use are orphans and are dropped.
+    fn finish(&mut self) {
+        let mut held: Vec<(u64, Parts)> = std::mem::take(&mut self.held).into_iter().collect();
+        held.sort_unstable_by_key(|(i, _)| *i);
+        for (index, mut p) in held {
+            for ext in self.exts.remove(&index).unwrap_or_default() {
+                p.merge(ext);
+            }
+            self.emit(p, index);
+        }
+        self.exts.clear();
+    }
+}
+
+/// Threads that read and parse `$MFT` chunks.
+fn parse_workers() -> usize {
+    std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 16)
+}
+
+/// Logical `(offset, len)` reads covering every whole record of the `$MFT` stream:
+/// record aligned, at most `CHUNK` bytes, never touching a sparse run (a record
+/// split by one is dropped, as it cannot be read).
+fn read_jobs(runs: &[(i64, u64)], bpc: u64, data_size: u64, rec_size: u64) -> Vec<(u64, usize)> {
+    let step = (CHUNK as u64 / rec_size).max(1) * rec_size;
+    let mut jobs = Vec::new();
+    let mut split = |a: u64, b: u64| {
+        let (mut a, b) = (a.next_multiple_of(rec_size), b / rec_size * rec_size);
+        while a < b {
+            let n = step.min(b - a);
+            jobs.push((a, n as usize));
+            a += n;
+        }
+    };
+    let (mut logical, mut range_start) = (0u64, None);
+    for &(lcn, clusters) in runs {
+        if logical >= data_size {
+            break;
+        }
+        let end = (logical + clusters * bpc).min(data_size);
+        match (lcn < 0, range_start) {
+            (true, Some(a)) => {
+                split(a, logical);
+                range_start = None;
+            }
+            (false, None) => range_start = Some(logical),
+            _ => {}
+        }
+        logical = end;
+    }
+    if let Some(a) = range_start {
+        split(a, logical);
+    }
+    jobs
 }
 
 /// Read every in-use record of the volume's `$MFT`. Needs admin. Per-record
@@ -547,11 +782,9 @@ pub fn scan_volume(letter: char, f: &mut dyn FnMut(MftEntry)) -> io::Result<MftS
     }
     let start = Instant::now();
     let dev = format!(r"\\.\{}:", letter.to_ascii_uppercase());
-    let handle = sys::open_wide(
-        &sys::wide_plain(OsStr::new(&dev)),
-        sys::GENERIC_READ,
-        FILE_FLAG_SEQUENTIAL_SCAN,
-    )?;
+    let dev = sys::wide_plain(OsStr::new(&dev));
+    let open = || sys::open_wide(&dev, sys::GENERIC_READ, FILE_FLAG_NO_BUFFERING);
+    let handle = open()?;
 
     let mut vd = [0u64; 16]; // 128 bytes, 8-aligned, >= sizeof(NtfsVolumeData)
     let mut ret = 0u32;
@@ -586,68 +819,82 @@ pub fn scan_volume(letter: char, f: &mut dyn FnMut(MftEntry)) -> io::Result<MftS
         return Err(invalid("negative MftStartLcn"));
     }
 
-    let mut file = File::from(handle);
+    let file = File::from(handle);
     let mut rec0 = vec![0u8; rec_size as usize];
-    read_exact_at(&mut file, v.mft_start_lcn as u64 * bpc, &mut rec0)?;
+    let rec0_off = v.mft_start_lcn as u64 * bpc;
+    read_exact_at(&file, rec0_off, &mut rec0).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("reading $MFT record 0 ({rec_size} bytes at {rec0_off}, cluster {bpc}): {e}"),
+        )
+    })?;
     apply_fixup(&mut rec0, FIXUP_STRIDE).map_err(|e| invalid(format!("$MFT record 0: {e}")))?;
-    let (runs, data_size) = mft_extents(&mut file, &rec0, bpc, rec_size)?;
+    let (runs, data_size) = mft_extents(&file, &rec0, bpc, rec_size)
+        .map_err(|e| io::Error::new(e.kind(), format!("mapping $MFT extents: {e}")))?;
 
-    let mut sc = Scanner {
-        f,
-        stats: MftStats::default(),
-        scratch: Vec::with_capacity(rec_size as usize),
-    };
     let rs = rec_size as usize;
-    let mut buf = vec![0u8; CHUNK];
-    let mut pending: Vec<u8> = Vec::new();
-    let mut remaining = data_size;
-    let mut index = 0u64;
-    for (lcn, clusters) in runs {
-        if remaining == 0 {
-            break;
-        }
-        let mut take = (clusters * bpc).min(remaining);
-        remaining -= take;
-        if lcn < 0 {
-            // Sparse MFT runs hold no records; skip their slots.
-            pending.clear();
-            index += take / rec_size;
-            continue;
-        }
-        let mut pos = lcn as u64 * bpc;
-        while take > 0 {
-            let n = (take as usize).min(CHUNK);
-            // Round the read up to a whole cluster (sector aligned); trailing bytes
-            // beyond `take` are ignored.
-            let rd = (n as u64).next_multiple_of(bpc) as usize;
-            if rd > buf.len() {
-                buf.resize(rd, 0);
-            }
-            read_exact_at(&mut file, pos, &mut buf[..rd])?;
-            let mut data = &buf[..n];
-            if !pending.is_empty() {
-                let k = (rs - pending.len()).min(data.len());
-                pending.extend_from_slice(&data[..k]);
-                data = &data[k..];
-                if pending.len() == rs {
-                    let p = std::mem::take(&mut pending);
-                    sc.process(&p, index);
-                    index += 1;
-                    pending = p;
-                    pending.clear();
-                }
-            }
-            while data.len() >= rs {
-                sc.process(&data[..rs], index);
-                index += 1;
-                data = &data[rs..];
-            }
-            pending.extend_from_slice(data);
-            pos += n as u64;
-            take -= n as u64;
-        }
+    let jobs = read_jobs(&runs, bpc, data_size, rec_size);
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let failed: Mutex<Option<io::Error>> = Mutex::new(None);
+    // Each worker reads record-aligned chunks through its own handle (synchronous I/O
+    // on one handle is serialised) and parses them, so reads overlap.
+    let mut files = vec![file];
+    for _ in 1..parse_workers() {
+        files.push(File::from(open()?));
     }
+    let (jobs, runs, next, stop, failed) = (&jobs, &runs, &next, &stop, &failed);
+    let done: Vec<Scanner> = std::thread::scope(|s| {
+        let handles: Vec<_> = files
+            .into_iter()
+            .map(|file| {
+                s.spawn(move || {
+                    let mut sc = Scanner::default();
+                    let mut store = Vec::new();
+                    while !stop.load(Relaxed) {
+                        let Some(&(off, len)) = jobs.get(next.fetch_add(1, Relaxed)) else {
+                            break;
+                        };
+                        let buf = aligned_mut(&mut store, len);
+                        if let Err(e) = read_mapped(&file, runs, bpc, off, buf) {
+                            stop.store(true, Relaxed);
+                            let e = io::Error::new(
+                                e.kind(),
+                                format!("reading $MFT at offset {off} ({len} bytes): {e}"),
+                            );
+                            // Poisoning is impossible: nothing panics while holding it.
+                            failed
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .get_or_insert(e);
+                            break;
+                        }
+                        let first = off / rec_size;
+                        for (i, rec) in buf.chunks_exact_mut(rs).enumerate() {
+                            sc.process(rec, first + i as u64);
+                        }
+                    }
+                    sc
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+            .collect()
+    });
+    if let Some(e) = failed.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        return Err(e);
+    }
+    let mut sc = Scanner::default();
+    for w in done {
+        sc.absorb(w);
+    }
+    sc.finish();
     sc.stats.elapsed = start.elapsed();
+    for e in std::mem::take(&mut sc.out) {
+        f(e);
+    }
     Ok(sc.stats)
 }
 
@@ -990,21 +1237,177 @@ mod tests {
         let p = dir.join("img.bin");
         let img: Vec<u8> = (0..64u32).flat_map(|i| [i as u8; 16]).collect(); // 1024 bytes, 16-byte "clusters"
         std::fs::write(&p, &img).unwrap();
-        let mut f = File::open(&p).unwrap();
+        let f = File::open(&p).unwrap();
         let runs = [(10i64, 2u64), (-1, 1), (2, 1)];
         let mut b = [0u8; 8];
-        read_mapped(&mut f, &runs, 16, 24, &mut b).unwrap();
+        read_mapped(&f, &runs, 16, 24, &mut b).unwrap();
         assert_eq!(b, [11; 8]);
-        assert!(read_mapped(&mut f, &runs, 16, 28, &mut b).is_err()); // runs into sparse
+        assert!(read_mapped(&f, &runs, 16, 28, &mut b).is_err()); // runs into sparse
         let mut c = [0u8; 16];
-        assert!(read_mapped(&mut f, &runs, 16, 32, &mut c).is_err()); // sparse
-        read_mapped(&mut f, &runs, 16, 48, &mut c).unwrap();
+        assert!(read_mapped(&f, &runs, 16, 32, &mut c).is_err()); // sparse
+        read_mapped(&f, &runs, 16, 48, &mut c).unwrap();
         assert_eq!(c, [2u8; 16]);
         let adj = [(10i64, 2u64), (2, 1)];
-        read_mapped(&mut f, &adj, 16, 28, &mut b).unwrap();
+        read_mapped(&f, &adj, 16, 28, &mut b).unwrap();
         assert_eq!(b, [11, 11, 11, 11, 2, 2, 2, 2]);
-        assert!(read_mapped(&mut f, &runs, 16, 60, &mut [0u8; 16]).is_err()); // past the end
+        assert!(read_mapped(&f, &runs, 16, 60, &mut [0u8; 16]).is_err()); // past the end
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hardlink_names_are_all_kept() {
+        // Two WIN32 names in different directories plus a DOS alias: two links.
+        let r = build(
+            FLAG_IN_USE,
+            3,
+            0,
+            &[
+                file_name(100, "LONGNAME.TXT", NS_DOS),
+                file_name(100, "long name.txt", 1),
+                file_name(200, "other.txt", 1),
+                resident(ATTR_DATA, b"hello"),
+            ],
+        );
+        let e = parse(r).unwrap().unwrap();
+        assert_eq!(e.links, 2);
+        assert_eq!((e.parent, e.name.to_str().unwrap()), (100, "long name.txt"));
+        assert_eq!(e.other_names.len(), 1);
+        assert_eq!(e.other_names[0].0, 200);
+        assert_eq!(e.other_names[0].1.to_str().unwrap(), "other.txt");
+        assert_eq!(e.size, 5);
+    }
+
+    #[test]
+    fn aligned_window() {
+        let mut v = Vec::new();
+        for len in [1, 4096, 10_000] {
+            let w = aligned_mut(&mut v, len);
+            assert_eq!(w.len(), len);
+            assert!((w.as_ptr() as usize).is_multiple_of(IO_ALIGN as usize));
+        }
+    }
+
+    #[test]
+    fn read_jobs_skip_sparse_and_align_to_records() {
+        // 4 KiB clusters, 1 KiB records: 2 clusters, a sparse cluster, 1 cluster.
+        let runs = [(10i64, 2u64), (-1, 1), (20, 1)];
+        assert_eq!(
+            read_jobs(&runs, 4096, 16384, 1024),
+            vec![(0, 8192), (12288, 4096)]
+        );
+        // data_size clips the last run and adjacent runs read as one range.
+        assert_eq!(
+            read_jobs(&[(1, 1), (5, 1)], 4096, 6144, 1024),
+            vec![(0, 6144)]
+        );
+        // 512-byte clusters with 1 KiB records: a record split by a hole is dropped.
+        assert_eq!(
+            read_jobs(&[(1, 3), (-1, 1), (9, 4)], 512, 4096, 1024),
+            vec![(0, 1024), (2048, 2048)]
+        );
+        // Long ranges are split into CHUNK-sized reads.
+        let big = read_jobs(&[(1, (CHUNK as u64 / 4096) * 3)], 4096, u64::MAX, 1024);
+        assert_eq!(big.len(), 3);
+        assert!(big.iter().all(|&(_, n)| n == CHUNK));
+    }
+
+    #[test]
+    fn extension_records_merge_into_base() {
+        let list = resident(ATTR_ATTRIBUTE_LIST, &[0; 32]);
+        let base = build(FLAG_IN_USE, 4, 0, &[file_name(100, "a.bin", 1), list]);
+        // The extension (base reference = record 10, seq 4) carries a second hardlink
+        // and the $DATA header; it is read before its base here.
+        let ext = build(
+            FLAG_IN_USE,
+            1,
+            10 | (4 << 48),
+            &[
+                file_name(200, "b.bin", 1),
+                non_resident(ATTR_DATA, &[0], 8192, 5000, None),
+            ],
+        );
+        let lone = build(FLAG_IN_USE, 1, 0, &[file_name(100, "c", 1)]);
+        // Base and extension land in different workers; absorb joins them.
+        let (mut w1, mut w2) = (Scanner::default(), Scanner::default());
+        w1.process(&mut ext.clone(), 11);
+        w2.process(&mut base.clone(), 10);
+        w2.process(&mut lone.clone(), 12);
+        w1.process(
+            &mut build(FLAG_IN_USE, 1, 77, &[file_name(1, "orphan", 1)]),
+            13,
+        );
+        let mut sc = Scanner::default();
+        sc.absorb(w1);
+        sc.absorb(w2);
+        sc.finish();
+        let (stats, got) = (sc.stats, sc.out);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name.to_str().unwrap(), "c");
+        assert!(!got[0].approx); // no list, no $DATA: an empty file, not approximate
+        let e = &got[1];
+        assert_eq!(e.frn, 10 | (4 << 48));
+        assert_eq!((e.size, e.alloc, e.links, e.approx), (5000, 8192, 2, false));
+        assert_eq!(e.other_names[0].0, 200);
+        assert_eq!(
+            (stats.in_use, stats.approx_records, stats.records),
+            (2, 0, 4)
+        );
+    }
+
+    fn list_entry(ty: u32, vcn: u64, fref: u64) -> Vec<u8> {
+        let mut e = vec![0u8; 0x20];
+        e[0..4].copy_from_slice(&ty.to_le_bytes());
+        e[4..6].copy_from_slice(&0x20u16.to_le_bytes());
+        e[8..16].copy_from_slice(&vcn.to_le_bytes());
+        e[0x10..0x18].copy_from_slice(&fref.to_le_bytes());
+        e
+    }
+
+    #[test]
+    fn mft_extents_follow_non_resident_attribute_list() {
+        // Fake volume, 1 KiB clusters = 1 KiB records:
+        //   cluster 0-1: $MFT records 0 and 1 (first extent, VCN 0-1)
+        //   cluster 3:   $MFT's non-resident $ATTRIBUTE_LIST
+        //   cluster 5:   $MFT record 2 (second extent, VCN 2, described in record 1)
+        let bpc = REC as u64;
+        let mut list = list_entry(ATTR_DATA, 0, 0);
+        list.extend(list_entry(ATTR_DATA, 2, 1));
+        let list_attr = non_resident(
+            ATTR_ATTRIBUTE_LIST,
+            &[0x11, 1, 3, 0],
+            bpc,
+            list.len() as u64,
+            None,
+        );
+        let data0 = non_resident(ATTR_DATA, &[0x11, 2, 0, 0], 3 * bpc, 3 * bpc, None);
+        let rec0 = build(FLAG_IN_USE, 1, 0, &[list_attr, data0]);
+        let mut data2 = non_resident(ATTR_DATA, &[0x11, 1, 5, 0], bpc, bpc, None);
+        data2[0x10..0x18].copy_from_slice(&2u64.to_le_bytes()); // start VCN 2
+        let rec1 = build(FLAG_IN_USE, 1, 0, &[data2]);
+
+        let mut img = vec![0u8; 6 * REC];
+        img[..REC].copy_from_slice(&rec0);
+        img[REC..2 * REC].copy_from_slice(&rec1);
+        img[3 * REC..3 * REC + list.len()].copy_from_slice(&list);
+        let dir = std::env::temp_dir().join(format!("dusage_mftlist_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("vol.bin");
+        std::fs::write(&p, &img).unwrap();
+        let f = File::open(&p).unwrap();
+        let mut r0 = rec0.clone();
+        apply_fixup(&mut r0, 512).unwrap();
+        let (runs, size) = mft_extents(&f, &r0, bpc, bpc).unwrap();
+        assert_eq!(runs, vec![(0, 2), (5, 1)]);
+        assert_eq!(size, 3 * bpc);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn join_extents_rejects_gaps() {
+        let mut ok = vec![(2u64, vec![(9i64, 1u64)]), (0, vec![(4, 2)])];
+        assert_eq!(join_extents(&mut ok).unwrap(), vec![(4, 2), (9, 1)]);
+        let mut gap = vec![(0u64, vec![(4i64, 2u64)]), (3, vec![(9, 1)])];
+        assert!(join_extents(&mut gap).is_err());
     }
 
     #[test]
