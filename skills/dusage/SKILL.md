@@ -66,7 +66,7 @@ children. Treat this as a hint and confirm with the user.
 ## 3. Report, then ask
 
 Do not delete anything during the investigation. Present one table sorted by size, with:
-- path (or a group, e.g. `forge-target-*`, 26 folders),
+- path (or a group, e.g. `build-*`, 26 folders),
 - size (use `--dedup-hardlinks` figures where they differ),
 - last modified,
 - what it is and whether it regenerates: build output, package cache, temp, logs, user data,
@@ -91,14 +91,14 @@ For whole folders of approved items, use `fastdel`, always as a dry run first:
 
 ```powershell
 fastdel C:\dev\cache --age 7d --dry                            # entries idle for 7+ days
-fastdel C:\dev --age -1 --prefix forge-target,cargo-target --dry   # by name, any age
+fastdel C:\dev --age -1 --prefix build-,target- --dry   # by name, any age
 ```
 
 Show the user the dry-run plan. Run the real command only after they confirm that exact
 plan, and always with a log:
 
 ```powershell
-fastdel C:\dev --age -1 --prefix forge-target --log "$env:TEMP\fastdel.log"
+fastdel C:\dev --age -1 --prefix build- --log "$env:TEMP\fastdel.log"
 ```
 
 Rules:
