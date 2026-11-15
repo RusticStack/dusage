@@ -1,0 +1,179 @@
+# dusage / fastdel: status-tracked roadmap
+
+**Origin.** This began as a research report written from `src/lib.rs`, `src/bin/dusage.rs` and `src/bin/fastdel.rs` before any change (four research lanes plus skeptic verdicts; refuted items dropped or corrected, unconfirmed items marked unverified). The "Problem" and "Fix" text below describes the original code and is kept as written; the status line under each item says what was built. Gains stay unmeasured unless stated: no benchmark has been run on the implementation.
+
+**Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are all still open.
+
+**FFI audit (wave 2).** Every FFI declaration, struct layout and constant under `src/win/` was audited against Microsoft Learn: 34 items, none wrong, 3 unverifiable (no authoritative source reachable).
+
+**Wave 3 safety fixes.** Found by review after wave 2 and fixed: guard bypass via loopback admin shares (`\\localhost\C$`), empty `--prefix` meaning match-all (positional `""` kept as "all" for back-compat), junction roots scanning or pruning as empty, watch journal path via junction or `subst` root, partial watch rescans double counting hardlinks, and one worker deleting a huge flat directory.
+
+## 1. Ranked roadmap
+
+| Rank | Improvement | Status | Gain type | Admin | Effort | Risk |
+|---|---|---|---|---|---|---|
+| 1 | Skip reparse-point directories on the raw attribute | Done: `win::enumerate` (`Entry::is_reparse`, `refuse_reparse_root`), used by `scan`, `prune` | Safety (invariant 3) | No | S | Low |
+| 2 | Verbatim- and UNC-aware protected-root guard in fastdel | Done: `guard` | Safety (invariant 4) | No | S | None |
+| 3 | Batched enumerator via `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)` | Done: `win::enumerate::DirReader` | New metric (on-disk size) plus FileId; speed unmeasured | No | M | Medium |
+| 4 | Hardlink-aware totals keyed by FileId seen during enumeration | Done: `scan` (`--dedup-hardlinks`) | Accuracy (AGENTS says 5-10% overcount, unverified here) | No | S (after 3) | Low |
+| 5 | Condvar work queue with one lock (replace 1 ms polling and fix the inflight race) | Done: `queue` | Tail parallelism; small | No | S | Low |
+| 6 | fastdel: classify and report final error categories | Done: `model::ErrorCounts`, `prune` | Diagnosability | No | S | None |
+| 7 | fastdel: parallel removal inside large subtrees | Done: `prune` (chunked `Work::Files`), `win::delete`; speedup unmeasured | Speed on skewed trees; unmeasured | No | M | Medium-high |
+| 8 | Opt-in named-stream (ADS) accounting | Done: `--streams`, `enumerate::named_stream_bytes` | Accuracy for ADS-heavy trees | No | S-M | Low |
+| 9 | USN change journal for incremental `--watch` | Partial: `win::usn` + `scan::watch`; not validated on a real journal (admin) | Feature; faster repeat scans | Expected yes (unverified) | L | Medium |
+| 10 | Elevated whole-volume fast path (USN enum plus MFT parsing) | Partial: `win::mft` + `--mft`; not validated on a real volume (admin), benchmark gate not run | Speed for whole-volume scans; unmeasured | Expected yes (unverified) | L | High |
+| 11 | Dev Drive guidance for scratch trees (docs only) | Open: docs only, not written | Unmeasured | Setup only | S | None |
+
+### 1. Skip reparse-point directories on the raw attribute (dusage and fastdel)
+
+**Status: Done.** `win::enumerate` flags every reparse point from the raw attribute; `scan` and `prune` skip or unlink them, and a reparse-point root is refused.
+
+- **Problem.** `dusage.rs` lines 61 and 86 skip only `is_symlink()`. `fastdel.rs` line 129 uses `p.is_dir()`, which follows links. std's `FileType::new` (sys/fs/windows.rs, around lines 1181-1188) sets `is_symlink` only when the reparse tag has the name-surrogate bit (0x20000000). Symlinks (0xA000000C) and junctions (0xA0000003) are caught. DFS (0x8000000A), WIM (0x80000008), CSV (0x80000009), dedup (0x80000013) and HSM (0xC0000004) are not, so dusage recurses into them today (lane win32-enum verdict; `windows_sys.rs` lines 2835-2836). The cloud-files tag (0x9000001A) is also not caught, but its value is unverified.
+- **Fix.** On directories, test `FILE_ATTRIBUTE_REPARSE_POINT` (0x400) through the stable `MetadataExt::file_attributes` and skip. Do not skip non-directory reparse entries such as dedup'd or cloud-placeholder files. Their size comes from the find data, so no open or hydration is needed. Keep skipping symlink files.
+- **Gain.** Closes the invariant 3 gap and stops crossing into network DFS targets. No speed change.
+- **APIs and FFI.** None new. std only.
+- **Admin.** No.
+
+### 2. Verbatim- and UNC-aware protected-root guard (fastdel)
+
+**Status: Done.** `guard::is_protected_root` normalises every spelling, canonicalises junctions and maps loopback UNC admin shares; fastdel applies it regardless of filters.
+
+- **Problem.** `is_protected_root` (fastdel.rs lines 25-35) compares strings. `\\?\C:` has length 6, so `s.len() <= 2` misses it, and there is no UNC share-root rule. The guard runs only when `min_age_days < 0` and there are no prefixes (line 61). The lane 5 verdict confirmed both gaps.
+- **Fix (proposal).** Use `Path::components()`: a path with no `Normal` components is a root. This covers `C:\`, `\\?\C:\`, `\\server\share\` and `\\?\UNC\...`. Compare `USERPROFILE` after the same normalization. Add `--dry` tests for each verbatim form.
+- **Also.** Build deletion paths from an absolute root and use the `\\?\` prefix for paths over MAX_PATH. The maximum-path page was not fetched, so its details are unverified.
+- **Effort and risk.** S, no risk.
+
+### 3. Batched enumerator via `FileIdExtdDirectoryInfo` (replacing the FindFirstFileExW walk)
+
+**Status: Done.** `win::enumerate::DirReader` uses `FileIdExtdDirectoryInfo` with a `FileIdBothDirectoryInfo` fallback. Speed unmeasured.
+
+- **What it returns.** One batch per buffer gives `EndOfFile`, `AllocationSize` (on-disk size), `FileAttributes`, `ReparsePointTag` and a 128-bit `FileId` per entry, with no per-file open. Field order is verified (https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_extd_dir_info). Class values are `FileIdExtdDirectoryInfo` = 0x13 and `FileIdExtdDirectoryRestartInfo` = 0x14 (https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ne-minwinbase-file_info_by_handle_class). Minimum server is Windows Server 2012 / Windows 8, desktop only.
+- **Correction on gain.** A batch call does not cut round trips compared with FindNextFileW. The real gain is the extra fields (allocated size and FileId), which otherwise need an open per file. Speed is unmeasured.
+- **APIs (kernel32).** `CreateFileW(dir, FILE_LIST_DIRECTORY, FILE_SHARE_READ|WRITE|DELETE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT)`, `GetFileInformationByHandleEx(h, class, buf, len) -> BOOL`, `CloseHandle`, `GetLastError`. The flag constants are standard values, to be checked against winbase.h.
+- **Fallback.** `FileIdBothDirectoryInfo` (Vista) gives `AllocationSize` and a 64-bit `FileId`. Its class number is by enum order and unverified here.
+- **Implementation notes.** Store the buffer as `Vec<u64>` for alignment. Bounds-check `NextEntryOffset` and `FileNameLength` (bytes, not characters). Do not use `FileIndex` (undefined on NTFS). Keep all `unsafe` in one module, as AGENTS.md asks.
+- **Risk.** Medium. A wrong struct layout misreads memory silently, so compare the output to the current walker on a fixture.
+- **Effort.** M. **Admin.** No.
+
+### 4. Hardlink-aware totals from FileId seen during enumeration
+
+**Status: Done.** `scan` with `--dedup-hardlinks` (batched backend); links whose other name is outside the root are reported separately. Watch forces full rescans when it is on.
+
+- **Idea.** Count `AllocationSize` only once per `(volume, FileId)` within the scan. Two entries with the same FileId in one scan are hardlinks, and the enumeration record shows this without extra opens. The volume serial can be read once from the root.
+- **Gain.** Removes the overcount that AGENTS.md reports as 5-10%. That figure is the user's observation and is not verified here.
+- **Caveats.** A hardlink whose other name lies outside the scanned root is still counted once, so report that count separately. Memory is roughly tens of bytes per file (an estimate). On volumes where FileId is zero or unsupported, fall back to no dedup. The FileId identity on ReFS and FAT is unverified.
+- **Effort.** S after item 3. **Admin.** No. **Risk.** Low.
+
+### 5. Condvar work queue with one lock (`lib.rs`)
+
+**Status: Done.** `queue::par_for_each` is a single-mutex condvar queue and propagates panics.
+
+- **Verified.** The lock guard is dropped at line 39, before `inf.fetch_add(1)` at line 43. Idle workers poll with `sleep(1 ms)` (line 41). In the window between pop and increment, another worker can see an empty queue with `inflight == 0` and exit. Correctness holds, but the tail runs on fewer threads.
+- **Fix.** One `Mutex<State { queue, active }>` plus `Condvar`. Pop and `active += 1` happen in the same critical section. On finish, decrement under the lock and `notify_all` when the queue is empty and `active == 0`. `push` calls `notify_one`. Loop on the predicate to handle spurious wakeups. The `par_for_each` signature is unchanged.
+- **Gain.** Better tail parallelism on uneven trees. Small, and to be measured. Condvar is stable since Rust 1.0 (from memory).
+- **Effort.** S. **Admin.** No. **Risk.** Low.
+
+### 6. fastdel: classify and report the final error
+
+**Status: Done.** `model::ErrorKind/ErrorCounts` classify errors; `fastdel` prints category counts and the first failures. fastdel exits 1 when candidates failed.
+
+- **Correction.** std's `remove_dir_all` already retries `SHARING_VIOLATION` and `DIR_NOT_EMPTY` up to 50 times with `yield_now` (sys/fs/windows/remove_dir_all.rs, lane 1 verdict). Adding blind retries would duplicate that.
+- **Fix.** Replace the single `failed` counter with categories: access denied (which also covers delete-pending in forum reports, unverified), sharing violation (32), dir not empty (145), reparse, and other. Print counts and the first N paths per category. The numeric codes match commonly published `winerror.h` values but were not re-checked here.
+- **Effort.** S. **Admin.** No. **Risk.** None.
+
+### 7. fastdel: parallel removal inside large subtrees
+
+**Status: Done.** Files are deleted in 512-entry chunks as separate work items with per-directory pending counts, using handle-based `win::delete` (POSIX disposition with classic fallback, junctions unlinked). Speedup not measured.
+
+- **Current.** Each top-level child is one work item (fastdel.rs lines 128-142), so one very large child is deleted by one thread.
+- **Design.** Walk once and push directories and files through `par_for_each`'s `push`. Give each directory an `AtomicUsize` counting outstanding children. The last child to finish removes the now-empty directory.
+- **Gain.** Unknown. It depends on tree shape and must be benchmarked.
+- **Risk.** Medium-high. Path-based per-entry deletes lose std's handle-relative protection against reparse-point races (the CVE-2022-21658 class, https://blog.rust-lang.org/2022/01/20/cve-2022-21658/). Items 1 and 2 must land first. A `FILE_DISPOSITION_INFO_EX` POSIX delete could avoid `DIR_NOT_EMPTY` on the parent. Its flag values are verified (DELETE = 0x1, POSIX_SEMANTICS = 0x2, IGNORE_READONLY_ATTRIBUTE = 0x10, https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex). Its Windows version floors are unverified and the sources conflict. Use it only with fallback to classic `FILE_DISPOSITION_INFO`.
+- **Effort.** M. **Admin.** No.
+
+### 8. Opt-in named-stream accounting (`--streams`)
+
+**Status: Done.** `--streams` (slow, opt-in) via `FindFirstStreamW`. Whether `AllocationSize` includes named streams is still unchecked (benchmark 5).
+
+- **Verified.** `FindFirstStreamW` returns the unnamed `::$DATA` stream first. It fails with `ERROR_HANDLE_EOF` when there are no streams and `ERROR_INVALID_PARAMETER` on file systems without stream support (https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirststreamw).
+- **Unverified.** Whether named-stream bytes appear in `AllocationSize`. The `WIN32_FIND_STREAM_DATA` layout must be checked against the SDK headers before writing the FFI struct.
+- **Effort.** S-M. **Admin.** No. **Risk.** Low. Keep it opt-in: it costs one extra call per file.
+
+### 9. USN change journal for incremental `--watch`
+
+**Status: Partially done.** `win::usn` (query/read, V2/V3 records, path by reference) drives `--watch` rescans of changed top-level entries, with full-rescan fallback. Admin behaviour and journal invalidation are untested on a real volume.
+
+- **APIs.** `DeviceIoControl` on `\\.\X:` with `FSCTL_QUERY_USN_JOURNAL` and `FSCTL_READ_USN_JOURNAL`. The `USN_RECORD_V2` layout is verified: a 60-byte header, `RecordLength` for stepping, and `FileNameOffset`/`FileNameLength` in bytes (https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-usn_record_v2).
+- **Unverified.** Journal ID invalidation rules, the `ERROR_JOURNAL_ENTRY_DELETED` behaviour, and the privilege needed for query and read. The legacy page that covers these was not fetched.
+- **Fallback.** On journal truncation, do a full rescan.
+- **FFI.** Kernel32 `DeviceIoControl`. FSCTL values should be computed with a `CTL_CODE` const fn and checked against winioctl.h.
+- **Effort.** L. **Admin.** Expected yes, unverified. **Risk.** Medium. NTFS only.
+
+### 10. Elevated whole-volume fast path (USN enumeration plus MFT parsing)
+
+**Status: Partially done.** `win::mft` (fixup, runlists, record parser, volume reader) backs `--backend mft`. Attribute-list files can be approximate (`MftEntry.approx`, reported in the scan note). Tested on synthetic records only; the benchmark gate has not been run.
+
+- **Verified.** `FSCTL_ENUM_USN_DATA` on `\\.\X:` is NTFS-only. You loop on `StartFileReferenceNumber` (https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_enum_usn_data). It yields names and parents, not sizes.
+- **Sizes need MFT parsing.** That means the FILE-record header, update-sequence fixup and runlists. Only the struct members and the NTFS 3.0/3.1 version gate are verified (https://learn.microsoft.com/en-us/windows/win32/devnotes/file-record-segment-header). The byte offsets are community NTFS documentation and unverified.
+- **Admin.** Expected, not stated by the Microsoft page. Test it.
+- **Gain.** Potentially large for whole-volume scans. WizTree-style speed claims are marketing and unverified.
+- **Effort.** L. **Risk.** High (large unsafe surface). Gate it behind a benchmark that shows directory I/O dominates.
+
+### 11. Dev Drive guidance for scratch trees (documentation only)
+
+**Status: Open.** Documentation only; nothing written yet.
+
+- **Requirements (verified).** Windows 11 build 10.0.22621.2338 or later, 50 GB minimum, designation only at format time, C: not eligible, `fsutil devdrv trust` needs an elevated shell, performance mode needs a trusted volume with real-time protection on (https://learn.microsoft.com/en-us/windows/dev-drive/).
+- **Causal claim refuted.** The WinDev issue reports a 119,954-file tree delete at 58 s with protection on, 57 s with the folder excluded, and 45 s with protection disabled (https://github.com/microsoft/WinDev/issues/27). Defender does not explain the delete time. The restic thread is a backup scan, not a delete timing.
+- **Recommendation.** Documentation only. Do not recommend disabling protection.
+- **Effort.** S. **Admin.** Setup only. **Risk.** None.
+
+## 2. Facts that correct AGENTS.md
+
+1. **"`DirEntry::metadata()` is one syscall" is wrong.** On Windows it returns `Ok(self.data.into())`, a conversion from the cached `WIN32_FIND_DATAW` with no OS call (std `sys/fs/windows.rs`, around line 192; lane 1 and lane 3 verdicts). The per-directory cost is in enumeration batches and in any per-file open. Rewrite the note accordingly.
+2. **Invariant 3 is incomplete.** `FileType::is_symlink()` is true only for name-surrogate reparse tags (symlinks and junctions). Other reparse directories (DFS, WIM, CSV, dedup, HSM, and possibly cloud) are `is_dir()` and get recursed into. The rule should test `FILE_ATTRIBUTE_REPARSE_POINT` on directories (item 1).
+3. **Invariant 4's guard does not cover all forms.** The guard is right in intent, but `\\?\C:` and UNC roots pass it (item 2).
+4. **"The tool is syscall-bound, so thread count matters more than CPU work"** is a hypothesis. It rests on the wrong per-file metadata premise above and is unmeasured. Reword it as a hypothesis to test.
+5. **"Hardlinks inflate naive sums by 5-10%"** is the user's observation and is not verified here. The mechanism is right: each name is counted.
+6. **Not checked here.** "Directory mtime = last direct-child create/delete" and "`robocopy /L /E /XJ` is a decent oracle." `/XJ` addresses junctions only, so its behaviour on other reparse directories is unverified.
+7. **FFI note, not an AGENTS fact.** The crate is edition 2021, so plain `extern "system"` blocks compile. Edition 2024 requires `unsafe extern`.
+
+## 3. Lane findings dropped or corrected
+
+- **Dropped.** `NtQueryDirectoryFileEx` class 60 as a roadmap item (the value and signature are unverified and the gain is unclear). The Project Zero pool-leak claim. The WizTree 4x figure. The Defender causal explanation for delete speed.
+- **Corrected.** The lane 4 premise that `FILE_ID_BOTH_DIR_INFO` avoids metadata calls is wrong. Its real gain is `AllocationSize` without an open. The lane 4 claim that `FILE_ID_INFO` requires Windows 8 is not supported: the client minimum is "None supported" and the server minimum is Windows Server 2012 (desktop apps only).
+- **Corrected.** `FIND_FIRST_EX_LARGE_FETCH` changes buffering only. Its benefit is unmeasured, and the Raymond Chen warning about early-abort searches was not fetched.
+- **Corrected.** Item 6 is reporting, not retry, because std already retries.
+- **Not used as facts.** `FILE_DISPOSITION_INFO_EX` version floors (1607, 1709 and 1809 are cited in conflicting sources). The NTFS-only restriction. The claim that the name "disappears at once" (the sources disagree on when removal happens). The FSCTL_ENUM_USN_DATA admin requirement, which is an expectation. Zero allocation for resident files. The `GetCompressedFileSizeW`-follows-symlinks claim was verified from the doc and is kept only as a test oracle.
+
+## 4. Open questions for benchmarks on a real machine (all open)
+
+1. **Enumeration cost.** Compare FindFirstFileExW (basic) against the `FileIdExtdDirectoryInfo` batch at 64 KiB, 256 KiB and 1 MiB buffers, with and without `LARGE_FETCH`. Measure cold and warm, on a generated 1M-file tree and on a real tree. dusage already prints files/s.
+2. **Thread sweep.** Run 1x, 2x, 4x and 8x cores. Find out whether the work is syscall-bound or serialized by filter drivers.
+3. **Protection effect.** Scan and delete the same tree with real-time protection on and with the folder excluded. Measure only. Do not recommend turning protection off.
+4. **Delete strategy.** Compare serial `remove_dir_all` against the item 7 prototype, and classic against POSIX disposition. Record the error categories from item 6.
+5. **Allocation fidelity.** Compare `AllocationSize`, `GetCompressedFileSizeW` and Explorer "Size on disk" on fixtures: compressed (`compact /c`), sparse, small resident files, a named stream, a hardlink pair, and a junction. Check whether `AllocationSize` includes named streams.
+6. **FileId semantics.** Confirm that hardlinks share a FileId. Check the behaviour on ReFS, Dev Drive and FAT (zero or unsupported?). The `fsutil file queryFileID` syntax must be verified first.
+7. **Current reparse gap.** Confirm that `is_symlink()` returns true for junctions and false for a live DFS or dedup reparse directory, and that dusage currently recurses into it. Reproduce on a fixture before fixing.
+8. **Privileges.** Check whether `CreateFileW(\\.\C:, GENERIC_READ)` fails for a non-elevated token, and whether `FSCTL_QUERY_USN_JOURNAL` and `FSCTL_ENUM_USN_DATA` behave differently with and without elevation. Check the journal state on C:.
+9. **Junction at top level.** Confirm whether fastdel's `remove_dir_all` removes only the link when it is handed a top-level junction. The lane 5 claim is unverified.
+10. **POSIX delete.** Confirm whether `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` works on the target build, and when the name disappears.
+11. **Overcount.** Measure the hardlink overcount on a real pnpm store or `.git` tree, using FileId dedup as the reference.
+12. **Long paths.** Delete a path over 260 characters with and without the `\\?\` prefix.
+
+## 5. Remaining work
+
+- Validate `--mft` and the USN watch path in an elevated shell on a real NTFS volume; compare `--mft` totals against the batched backend and robocopy.
+- Run the benchmark list in section 4 and record results; decide the default thread count from the thread sweep.
+- Item 11: Dev Drive guidance in the docs.
+- Merge both binaries under subcommands (`dusage scan|prune|big`) only if more tools appear; keep `fastdel` as an alias for `prune`.
+- fastdel preset configs.
+
+## Sources
+
+- Rust std source (1.100.0): `library/std/src/sys/fs/windows.rs` and `library/std/src/sys/fs/windows/remove_dir_all.rs`
+- Repo: `src\lib.rs`, `src\bin\dusage.rs`, `src\bin\fastdel.rs`, `AGENTS.md`, `Cargo.toml`
+- Microsoft Learn: `FindFirstFileExW` (fileapi), `FILE_ID_EXTD_DIR_INFO` and `FILE_ID_BOTH_DIR_INFO` (winbase), `FILE_INFO_BY_HANDLE_CLASS` (minwinbase), `USN_RECORD_V2` and `FSCTL_ENUM_USN_DATA` (winioctl), `FILE_RECORD_SEGMENT_HEADER` (devnotes), `RemoveDirectoryA` (fileapi), `FindFirstStreamW` (fileapi), `FILE_DISPOSITION_INFO_EX` (ntddk), Dev Drive (windows/dev-drive)
+- `https://devblogs.microsoft.com/oldnewthing/20131024-00/?p=2843` (not fetched)
+- `https://github.com/microsoft/WinDev/issues/27`
+- `https://blog.rust-lang.org/2022/01/20/cve-2022-21658/`

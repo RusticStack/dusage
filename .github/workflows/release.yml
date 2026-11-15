@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Check version matches tag
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$ver" -ne $env:GITHUB_REF_NAME) { throw "Cargo.toml version v$ver does not match tag $env:GITHUB_REF_NAME" }
+          "VERSION=$ver" | Out-File -Append $env:GITHUB_ENV
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Build release
+        run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "dusage-$env:VERSION-windows-x64"
+          New-Item -ItemType Directory dist/$name | Out-Null
+          Copy-Item target/release/dusage.exe, target/release/fastdel.exe, README.md, CHANGELOG.md, LICENSE-MIT, LICENSE-APACHE dist/$name
+          Compress-Archive -Path dist/$name -DestinationPath dist/$name.zip
+          Copy-Item target/release/dusage.exe, target/release/fastdel.exe dist/
+          Push-Location dist
+          Get-FileHash -Algorithm SHA256 "$name.zip", dusage.exe, fastdel.exe |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } |
+            Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+      - name: Release notes from CHANGELOG
+        shell: pwsh
+        run: |
+          $lines = Get-Content CHANGELOG.md
+          $start = ($lines | Select-String -SimpleMatch "## [$env:VERSION]").LineNumber
+          if (-not $start) { throw "CHANGELOG.md has no section for $env:VERSION" }
+          $rest = $lines[$start..($lines.Count - 1)]
+          $end = ($rest | Select-String -Pattern '^## \[' | Select-Object -First 1).LineNumber
+          if ($end) { $rest = $rest[0..($end - 2)] }
+          $rest | Set-Content -Encoding utf8 notes.md
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = "dusage-$env:VERSION-windows-x64"
+          gh release create $env:GITHUB_REF_NAME --title "dusage $env:VERSION" --notes-file notes.md `
+            "dist/$name.zip" dist/dusage.exe dist/fastdel.exe dist/SHA256SUMS.txt

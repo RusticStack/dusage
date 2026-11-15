@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="971" height="532" viewBox="0 0 971 532" role="img" aria-label="dusage scanning a demo folder: 2.02 GB in 11,104 files, with size on disk, the biggest files and a by-extension breakdown">
+<rect width="971" height="532" rx="12" fill="#151a26"/>
+<rect width="971" height="36" rx="12" fill="#222939"/><rect y="24" width="971" height="12" fill="#222939"/>
+<circle cx="22" cy="18" r="6" fill="#cc420c"/><circle cx="42" cy="18" r="6" fill="#e8a317"/><circle cx="62" cy="18" r="6" fill="#21a397"/>
+<text x="485.5" y="23" text-anchor="middle" font-family="Segoe UI, sans-serif" font-size="13" fill="#7f89a3">dusage — real output on a demo folder</text>
+<g font-family="Cascadia Mono, Cascadia Code, Consolas, Menlo, monospace" font-size="13" xml:space="preserve">
+<text x="22" y="58" xml:space="preserve" style="white-space:pre"><tspan fill="#21a397">PS demo&gt; </tspan><tspan fill="#f3efe6">dusage . --on-disk --by-ext --top 5 --min-big 100M</tspan></text>
+<text x="22" y="77" xml:space="preserve" style="white-space:pre"><tspan fill="#7f89a3">dusage: scanning . (96 threads, backend Auto)</tspan></text>
+<text x="22" y="115" xml:space="preserve" style="white-space:pre"><tspan fill="#ffd866">=== TOTAL: 2.02 GB | on disk 1.84 GB | files 11104 | dirs 14 | elapsed 3.9138ms (2837140 files/s) | source batched ===</tspan></text>
+<text x="22" y="153" xml:space="preserve" style="white-space:pre"><tspan fill="#f0702e">--- top 5 entries under . ---</tspan></text>
+<text x="22" y="172" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.80 GB</tspan><tspan fill="#9aa4bb">        0.80 GB on disk</tspan><tspan fill="#c9cfdd">  downloads\</tspan></text>
+<text x="22" y="191" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.54 GB</tspan><tspan fill="#9aa4bb">        0.55 GB on disk</tspan><tspan fill="#c9cfdd">  build-cache\</tspan></text>
+<text x="22" y="210" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.42 GB</tspan><tspan fill="#9aa4bb">        0.42 GB on disk</tspan><tspan fill="#c9cfdd">  photos\</tspan></text>
+<text x="22" y="229" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.24 GB</tspan><tspan fill="#9aa4bb">        0.03 GB on disk</tspan><tspan fill="#c9cfdd">  logs\</tspan></text>
+<text x="22" y="248" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.02 GB</tspan><tspan fill="#9aa4bb">        0.04 GB on disk</tspan><tspan fill="#c9cfdd">  projects\</tspan></text>
+<text x="22" y="286" xml:space="preserve" style="white-space:pre"><tspan fill="#f0702e">--- files &gt;= 0.10 GB (top 5) ---</tspan></text>
+<text x="22" y="305" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.65 GB</tspan><tspan fill="#9aa4bb">        0.65 GB on disk</tspan><tspan fill="#c9cfdd">  .\downloads\ubuntu-24.04-desktop-amd64.iso</tspan></text>
+<text x="22" y="324" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.27 GB</tspan><tspan fill="#9aa4bb">        0.27 GB on disk</tspan><tspan fill="#c9cfdd">  .\build-cache\target\release\app.pdb</tspan></text>
+<text x="22" y="343" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.19 GB</tspan><tspan fill="#9aa4bb">        0.19 GB on disk</tspan><tspan fill="#c9cfdd">  .\build-cache\target\release\deps\libcore.rlib</tspan></text>
+<text x="22" y="362" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.15 GB</tspan><tspan fill="#9aa4bb">        0.15 GB on disk</tspan><tspan fill="#c9cfdd">  .\downloads\setup-x64.exe</tspan></text>
+<text x="22" y="400" xml:space="preserve" style="white-space:pre"><tspan fill="#f0702e">--- by extension (top 5) ---</tspan></text>
+<text x="22" y="419" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.65 GB</tspan><tspan fill="#9aa4bb">        0.65 GB on disk</tspan><tspan fill="#62dac6">           1 files  .iso</tspan></text>
+<text x="22" y="438" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.42 GB</tspan><tspan fill="#9aa4bb">        0.42 GB on disk</tspan><tspan fill="#62dac6">         160 files  .jpg</tspan></text>
+<text x="22" y="457" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.27 GB</tspan><tspan fill="#9aa4bb">        0.27 GB on disk</tspan><tspan fill="#62dac6">           1 files  .pdb</tspan></text>
+<text x="22" y="476" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.24 GB</tspan><tspan fill="#9aa4bb">        0.03 GB on disk</tspan><tspan fill="#62dac6">          40 files  .log</tspan></text>
+<text x="22" y="495" xml:space="preserve" style="white-space:pre"><tspan fill="#f3efe6">      0.19 GB</tspan><tspan fill="#9aa4bb">        0.19 GB on disk</tspan><tspan fill="#62dac6">           1 files  .rlib</tspan></text>
+</g></svg>
