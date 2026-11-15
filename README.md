@@ -35,7 +35,7 @@ A fast disk-usage scanner and a safe parallel pruner for Windows. Two small exes
   (pnpm stores, `.git` objects) can be counted once (`--dedup-hardlinks`).
 - **Fast.** Directory entries come from Windows in large batches, with size on disk and file
   ids included, so there is no per-file call: up to millions of files per second on a warm
-  cache, and a whole 10-million-file system drive in under 3 minutes (see
+  cache, and a whole 8.4-million-file system drive in about 70 seconds (see
   [Benchmarks](#benchmarks)).
 - **`fastdel` gets it back.** It deletes the children of a folder that match a name prefix
   and are older than an age (`7d`, `2h`), in parallel, including inside one huge subtree.
@@ -138,17 +138,20 @@ Measured on one development PC: Intel Core i7-13700KF, NVMe SSD, Windows 11, rel
 builds, 96 worker threads unless noted. Times are the median of three runs, with the
 range in brackets.
 
-**Scanning** (warm cache, `dusage <root>`):
+**Scanning** (`dusage <root> 1G 96 5`, both versions run back to back on the same day, after a
+warm-up pass):
 
-| Workload | Sequential tools | dusage 0.1 | dusage 0.2 |
-|---|---|---|---|
-| Whole system drive, ~9.7M files / 3.7M folders | 15-20 min (`Get-ChildItem`, robocopy) | ~163 s | not re-run |
-| Temp tree, 3.9M files (64 threads) | ~20 min | 71-80 s | not re-run |
-| Source tree, 4.6M files | | 156k files/s (129-169k) | 155k files/s (148-165k) |
-| Toolchain folder, 325k files | | 4.34M files/s (4.06-4.41M) | 4.29M files/s (3.89-4.55M) |
+| Workload | dusage 0.1 | dusage 0.2 |
+|---|---|---|
+| Whole system drive, 8.45M files / 3.35M folders | 69.5 s (65.3-89.4) | 73.1 s (58.9-109.1) |
+| Cache folder, 6.39M files / 3.02M folders | 45.6 s (38.5-49.5) | 45.7 s (45.0-50.7) |
+| Source tree, 4.6M files | 156k files/s (129-169k) | 155k files/s (148-165k) |
+| Toolchain folder, 325k files | 4.34M files/s (4.06-4.41M) | 4.29M files/s (3.89-4.55M) |
 
-Version 0.2 scans as fast as 0.1, and the default backend adds size on disk and file
-ids at no extra cost. Full-drive and MFT-backend timings on 0.2 are still to be measured.
+Version 0.2 scans as fast as 0.1 (the differences are within run-to-run noise on a live
+system) while the default backend also returns size on disk and file ids. For scale, a
+sequential `Get-ChildItem` or robocopy pass over a similar drive took 15-20 minutes. The
+experimental MFT backend has not been benchmarked yet.
 
 **Deleting** (`fastdel <root> -1 <prefix> 96`, one candidate folder each):
 
@@ -156,8 +159,6 @@ ids at no extra cost. Full-drive and MFT-backend timings on 0.2 are still to be 
 |---|---|---|
 | 600 folders × 100 files (60,601 entries) | 4.18 s (3.88-4.57) | **1.45 s** (1.39-1.71), 2.9× faster |
 | One flat folder, 60,000 files | 3.84 s (3.21-4.78) | **2.86 s** (2.10-3.79), 1.3× faster |
-| 142,801 temp entries (48 threads) | ~141 s | not re-run |
-| 143 GB of build outputs (64 threads) | ~58 s | not re-run |
 
 Version 0.1 deleted each top-level candidate on a single thread. Version 0.2 spreads
 one big subtree, or one huge flat folder, across every worker.
