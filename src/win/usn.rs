@@ -685,10 +685,18 @@ mod tests {
         };
         assert!(info.next_usn >= info.first_usn);
         assert!(info.max_usn > 0);
-        let start = (info.next_usn - 4096).max(info.lowest_valid_usn);
-        let (recs, next) = v.read(info.journal_id, start).unwrap();
-        assert!(next >= start);
-        assert!(recs.iter().all(|r| r.usn >= start));
+        // StartUsn must be a record boundary (an arbitrary offset is rejected with
+        // ERROR_INVALID_PARAMETER); watch mode only ever resumes from a returned USN.
+        let (tail, next) = v.read(info.journal_id, info.next_usn).unwrap();
+        assert!(next >= info.next_usn);
+        assert!(tail.iter().all(|r| r.usn >= info.next_usn));
+        let (all, end) = v.read(info.journal_id, info.first_usn).unwrap();
+        assert!(end >= info.first_usn);
+        assert!(
+            all.windows(2).all(|w| w[0].usn < w[1].usn),
+            "records in USN order"
+        );
+        assert!(all.iter().all(|r| r.usn >= info.first_usn));
     }
 
     #[test]
