@@ -47,8 +47,11 @@ struct Layer {
 /// The command-line `--glob` filters: `!` patterns exclude, the rest restrict.
 #[derive(Debug, Default, Clone)]
 pub struct GlobFilter {
-    /// Positive patterns; when any exist, a path must match one to be reported.
+    /// Positive `-g` patterns; when any exist, a path must match one to be reported, and
+    /// they switch the ignore files off (ripgrep's override rule).
     include: Vec<Glob>,
+    /// Positive `-t`/`--ext` patterns: they restrict results without touching ignore rules.
+    filter: Vec<Glob>,
     exclude: Vec<Glob>,
 }
 
@@ -67,7 +70,15 @@ impl GlobFilter {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.include.is_empty() && self.exclude.is_empty()
+        self.include.is_empty() && self.exclude.is_empty() && self.filter.is_empty()
+    }
+
+    /// Add restrict-only patterns (`-t`, `--ext`).
+    pub fn push_filter(&mut self, globs: &[String]) -> Result<(), String> {
+        for g in globs {
+            self.filter.push(Glob::new(g)?);
+        }
+        Ok(())
     }
 
     /// True when a positive pattern is present. Such a run ignores the ignore files entirely,
@@ -76,12 +87,23 @@ impl GlobFilter {
         !self.include.is_empty()
     }
 
+    /// True when a positive pattern (include or type filter) matches `rel`.
+    pub fn names(&self, rel: &str) -> bool {
+        self.include
+            .iter()
+            .chain(self.filter.iter())
+            .any(|g| g.matches(rel, false))
+    }
+
     /// Strict match: does `rel` satisfy the filters as written?
     pub fn matches(&self, rel: &str, is_dir: bool) -> bool {
         for g in &self.exclude {
             if g.matches(rel, is_dir) {
                 return false;
             }
+        }
+        if !self.filter.is_empty() && !self.filter.iter().any(|g| g.matches(rel, is_dir)) {
+            return false;
         }
         if self.include.is_empty() {
             return true;
@@ -97,7 +119,13 @@ impl GlobFilter {
                 return false;
             }
         }
-        if self.include.is_empty() || is_dir {
+        if is_dir {
+            return true;
+        }
+        if !self.filter.is_empty() && !self.filter.iter().any(|g| g.matches(rel, is_dir)) {
+            return false;
+        }
+        if self.include.is_empty() {
             return true;
         }
         self.include.iter().any(|g| g.matches(rel, is_dir))
@@ -117,6 +145,11 @@ impl IgnoreRules {
         self.globs.whitelists()
     }
 
+    /// Restrict-only patterns from `-t`/`--ext`, which never switch ignore rules off.
+    pub fn add_filters(&mut self, globs: &[String]) -> Result<(), String> {
+        self.globs.push_filter(globs)
+    }
+
     pub fn new(builtin: bool) -> Self {
         IgnoreRules {
             builtin,
@@ -134,6 +167,12 @@ impl IgnoreRules {
     /// entry is a result rather than whether to descend into it.
     pub fn glob_matches(&self, rel: &str, is_dir: bool) -> bool {
         self.globs.matches(rel, is_dir)
+    }
+
+    /// True when a positive `-g`/`-t` pattern names `rel`: such a path is searched even
+    /// though its name starts with a dot.
+    pub fn glob_named(&self, rel: &str) -> bool {
+        self.globs.names(rel)
     }
 
     /// True when `rel` (relative to the walk root) is excluded by any layer.
@@ -169,8 +208,6 @@ impl IgnoreRules {
         false
     }
 
-    /// Load the rule files of `dir` and push a layer for it. Returns a marker for
-    /// [`IgnoreRules::pop_to`], or `None` when the directory has no rule files.
     /// The current layer depth, for [`pop_to`] when nothing is pushed.
     pub fn mark(&self) -> usize {
         self.layers.len()
@@ -201,9 +238,99 @@ impl IgnoreRules {
         self.layers.truncate(mark);
     }
 
+    /// Stack the rule files of the directories above `root`, so a scan started inside a
+    /// repository honours the repository's `.gitignore`, as rg does. Patterns anchored at an
+    /// ancestor are rewritten relative to `root`; one that cannot reach `root` is dropped.
+    /// The walk up stops at the repository root (a directory holding `.git`), or after 16
+    /// levels. Returns the depth to restore with [`pop_to`].
+    pub fn push_ancestors(&mut self, root: &Path) -> usize {
+        let mark = self.layers.len();
+        // A relative root (`.` or `src`) has no usable parent path, so work from the real one.
+        let Ok(root) = std::fs::canonicalize(root) else {
+            return mark;
+        };
+        let root = root.as_path();
+        let mut chain: Vec<(PathBuf, String)> = Vec::new();
+        let mut current = root.to_path_buf();
+        for _ in 0..16 {
+            let Some(parent) = current.parent() else {
+                break;
+            };
+            let Ok(stripped) = current.strip_prefix(parent) else {
+                break;
+            };
+            let mut prefix = chain
+                .last()
+                .map(|(_, p): &(PathBuf, String)| p.clone())
+                .unwrap_or_default();
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(&stripped.to_string_lossy().replace('\\', "/"));
+            let is_repo = parent.join(".git").exists();
+            chain.push((parent.to_path_buf(), prefix));
+            if is_repo {
+                break;
+            }
+            current = parent.to_path_buf();
+        }
+        // Outermost first, so a nearer ancestor's rules win.
+        for (dir, prefix) in chain.into_iter().rev() {
+            let mut rules = Vec::new();
+            for name in RULE_FILES {
+                read_rules_anchored(&dir.join(name), &prefix, &mut rules);
+            }
+            if dir.join(".git").is_dir() {
+                read_rules_anchored(&dir.join(".git/info/exclude"), &prefix, &mut rules);
+            }
+            if !rules.is_empty() {
+                self.layers.push(Layer {
+                    base: String::new(),
+                    rules,
+                });
+            }
+        }
+        mark
+    }
+
     /// Apply the explicit `--glob` filters. `rel` is relative to the walk root.
     pub fn glob_allows(&self, rel: &str, is_dir: bool) -> bool {
         self.globs.walk_allows(rel, is_dir)
+    }
+}
+
+/// Append the rules of an ancestor's ignore file, rewritten to be relative to the scan
+/// root below `prefix`. A rule with a slash only matters when it points inside the root.
+fn read_rules_anchored(path: &Path, prefix: &str, rules: &mut Vec<Glob>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let (bang, body) = match t.strip_prefix('!') {
+            Some(rest) => ("!", rest),
+            None => ("", t),
+        };
+        if body.contains('/') {
+            let anchored = body.trim_start_matches('/');
+            let Some(rest) = anchored
+                .strip_prefix(prefix)
+                .and_then(|r| r.strip_prefix('/'))
+            else {
+                continue;
+            };
+            if rest.is_empty() {
+                continue;
+            }
+            if let Some(g) = parse_rule(&format!("{bang}{rest}")) {
+                rules.push(g);
+            }
+        } else if let Some(g) = parse_rule(t) {
+            rules.push(g);
+        }
     }
 }
 

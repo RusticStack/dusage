@@ -1,16 +1,18 @@
 ---
 name: dusage
-description: Find what is using disk space on Windows or Linux and free it safely with the dusage and fastdel CLIs. Use when the user asks what is filling a drive or folder, why a disk is full, or to clean up caches, build output, temp or agent folders. Scans are read-only; deletion only happens after the user approves an exact list.
+description: Find what is using disk space on Windows or Linux and free it safely with the dusage and fastdel CLIs, and search file contents or paths with the same binary (a grep/rg and find replacement). Use when the user asks what is filling a drive or folder, why a disk is full, to clean up caches, build output, temp or agent folders, or to grep a tree or list files by name. Scans and searches are read-only; deletion only happens after the user approves an exact list.
 argument-hint: "[drive or folder, e.g. C:\\ or /var]"
 ---
 
 # dusage: find and reclaim disk space on Windows and Linux
 
-`dusage` reports what uses space under a folder or drive and never writes anything.
-`fastdel` permanently deletes a folder's children that match a name prefix and an age.
-Both are single-file binaries from https://github.com/RusticStack/dusage, published for
-Windows 10/11 (NTFS) and Linux x86_64. macOS is not supported: tell the user and stop.
-`--mft` and `--streams` are NTFS-only features; on Linux they refuse or report zero.
+`dusage` is one binary with four jobs: `scan` reports what uses space under a folder or
+drive, `big` lists the largest files, `search` greps file contents and `find` lists paths by
+name. `fastdel` (also `dusage prune` and `dusage del`) permanently deletes a folder's
+children that match a name prefix and an age. Nothing else here writes a byte. All of it
+ships from https://github.com/RusticStack/dusage for Windows 10/11 (NTFS) and Linux
+x86_64. macOS is not supported: tell the user and stop. `--mft` and `--streams` are
+NTFS-only features; on Linux they refuse or report zero.
 
 ## 1. Make sure the tools are available
 
@@ -93,7 +95,48 @@ deleted. To see whether a tree is still in use, check `LastWriteTime` of the fol
 children (on Linux, `stat -c '%y %n' folder child...`). Treat this as a hint and confirm with
 the user.
 
-## 3. Report, then ask
+## 3. Search inside a tree (grep and find)
+
+Use `dusage search` instead of `grep`/`rg` and `dusage find` instead of `find` when the user
+wants matches in file contents or a list of paths. Both are read-only, work the same on
+Windows and Linux, and take the same filters.
+
+```bash
+dusage search -n 'TODO' src/                 # matching lines with line numbers
+dusage search -i -t rust 'url' src/          # case-insensitive, .rs files only
+dusage search -w -n 'unsafe' .               # whole words
+dusage search -C 2 -n 'panic' crates/        # two lines of context
+dusage search -c -F 'unwrap(' src/           # count per file, literal pattern
+dusage search -l 'fn main' .                 # names of matching files
+dusage search -j 8 'error' logs/             # eight worker threads
+dusage search --json 'license' .             # JSON for scripts
+dusage find '*.lock'                         # paths matching a glob
+dusage find --files --ext rs --long --size +1M '*' .   # size and mtime per file
+dusage find --dirs --older 30d 'build*' .    # directories idle for a month
+```
+
+Rules that matter:
+
+- **Exit codes** for `search` and `find`: `0` something matched, `1` nothing did, `2` bad
+  arguments or a path that does not exist. A `1` is not an error: report "no matches".
+  `-q` prints nothing and still exits `0`/`1`, so it is the cheap test in a script.
+- **A positive `-g` overrides the ignore rules.** By default the walk skips `.git`, `.hg`,
+  `.svn`, `node_modules`, `target`, `__pycache__`, the Python venv/cache directories and
+  `.gradle`, plus anything `.gitignore`/`.ignore` hides below each root.
+  `-g '*.log'` searches a file `.gitignore` hides; `-g '!*.min.js'` only excludes and leaves
+  the ignore rules on. `--no-ignore` turns them all off. `-t` and `find`'s `--ext` are globs
+  too, so they also switch the ignore rules off.
+- Hidden entries (a leading `.`) need `--hidden`.
+- **`-x` is `--one-filesystem`, not grep's whole-line match.** Short flags do not combine:
+  write `-i -n`, not `-in`.
+- The pattern is a regular expression, or plain text with `-F`. There is no lookaround, no
+  backreference and no multi-line matching; `-i` folds non-ASCII case for plain text only.
+  A file with a NUL byte is reported as `Binary file ... matches` unless `-a`.
+- UTF-16 files are detected and read; Latin-1 needs `--encoding latin1`.
+- Do not paste `rg` flags that do not exist here (`-P`, `-U`, `--follow`, `-x` for whole-line,
+  combined short flags). Check `dusage search --help` first.
+
+## 4. Report, then ask
 
 Do not delete anything during the investigation. Present one table sorted by size, with:
 - path (or a group, e.g. `build-*`, 26 folders),
@@ -111,7 +154,7 @@ Never propose deleting user documents, downloads, desktop files, game saves, dat
 running apps, credentials (`.ssh`, keys), or anything under Windows, Program Files or
 ProgramData. Name those as large items for the user to handle.
 
-## 4. Clean up only what was approved
+## 5. Clean up only what was approved
 
 Prefer the owning tool when one exists. It knows what is safe:
 `cargo clean`, `pnpm store prune`, `npm cache clean --force`, `uv cache clean`,
@@ -122,6 +165,7 @@ For whole folders of approved items, use `fastdel`, always as a dry run first:
 ```powershell
 fastdel C:\dev\cache --age 7d --dry                          # entries idle for 7+ days
 fastdel C:\dev --age -1 --prefix build-,target- --dry        # by name, any age
+fastdel C:\dev\work --preset cargo --dry                     # target/, older than a week
 ```
 
 ```bash
@@ -144,6 +188,9 @@ Rules:
   `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` and their ancestors. Do
   not try to work around a refusal; report it.
 - `--prefix` is case-sensitive. `--age` takes `30m`, `2h`, `7d`, `1w`, or `-1` for any age.
+- `--preset cargo|node|agent-temp` is a saved prefix/age bundle; `--print-presets` lists them
+  with the user's own. An explicit `--age` or `--limit` overrides the preset, `--prefix`
+  values are added to the preset's, never replacing them.
 - Junctions and symlinks are removed as links. Their targets are never touched.
 - A folder on another filesystem inside a candidate is left in place and reported: a delete
   never follows a mount point.

@@ -4,6 +4,11 @@
 
 **Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are all still open, apart from the Linux work in the last section.
 
+**Status 0.5.0 (search).** `dusage` is now a search tool as well: `search` (contents,
+a grep/rg replacement), `find` (paths, a find replacement), `prune` (the fastdel engine,
+with presets), and the 0.4.0 `scan`/`big` intact behind subcommands in one binary. The
+section at the end lists what shipped and the limits that are still open.
+
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
 tested; the NTFS-only read paths (`--mft`, `--streams`) are refused or report zero with an
@@ -171,8 +176,9 @@ explanation. Numbers measured on this machine are in the last section.
 - Validate `--mft` and the USN watch path in an elevated shell on a real NTFS volume; compare `--mft` totals against the batched backend and robocopy.
 - Run the benchmark list in section 4 and record results; decide the default thread count from the thread sweep.
 - Item 11: Dev Drive guidance in the docs.
-- Merge both binaries under subcommands (`dusage scan|prune|big`) only if more tools appear; keep `fastdel` as an alias for `prune`.
-- fastdel preset configs.
+- Done in 0.5.0: the tools merged under subcommands in one binary (`dusage
+  scan|big|search|find|prune`), with the `fastdel` binary and `dusage fastdel|del` running
+  `prune`; and fastdel presets (`--preset`, `--print-presets`).
 
 ## Sources
 
@@ -219,3 +225,60 @@ directory-entry noise.
   but has only been tested by construction, not by lowering the limit.
 - macOS would need a kqueue/FSEvents change feed and its own guard list; the crate refuses
   to compile there today, on purpose.
+
+## Search suite (0.5.0)
+
+**Done.** The main flags are covered by `tests/search_cli.rs` (built binaries, exit codes,
+output shapes) and by the unit suites in `regex`, `glob`, `ignore`, `pattern`, `encodings`
+and `preset`; every invocation in the README and the skill was run against the binary while
+those docs were written.
+
+- `search`: a walk plus a streaming line scanner, with `-i -w -v -n -H -h -l -L -c -o -q -a
+  -F -e -g -t -A -B -C -m -j --max-depth --max-filesize --max-columns --encoding --hidden
+  --no-ignore -x --json --color --stats`.
+- `find`: glob or `-F` substring over relative paths, with `-t --ext --size --older --newer
+  --dirs --files --long --json` and the same walk filters.
+- A regex engine of our own (`regex.rs`): Thompson NFA, Pike VM, no backtracking, so a
+  pathological pattern costs time, never exponential time. A plain-literal pattern skips it
+  for a byte scan, and a required literal byte prefilters lines for the rest.
+- Ignore handling close enough to ripgrep to be unsurprising: the built-in cache list, then
+  `.gitignore` and `.ignore` per directory with deeper files winning and `!` re-including,
+  then `-g`; a positive `-g` switches the ignore layers off. `--no-ignore` switches them off
+  by hand.
+- UTF-16LE/BE detection (BOM or NUL pattern) and transcoding, Latin-1 on request.
+- Unicode case folding for literal needles and non-ASCII word bytes for `-w`; the regex
+  engine folds ASCII only.
+- Binary detection by a NUL in the first 8 KiB, reported as `Binary file X matches` unless
+  `-a`.
+- `prune`: `--preset` and `--print-presets`, with `cargo`, `node` and `agent-temp` built in
+  and a `presets.conf` of the user's own.
+- One binary with subcommands and the legacy `dusage <root>` form kept.
+
+**Known limits, each an open item.**
+
+- No `-P`/PCRE2: no lookaround and no backreferences. The engine rejects them by name and
+  offset rather than silently matching something else. Adding them means a backtracking
+  engine beside the Pike VM, with the whole worst-case-cost argument that comes with it.
+- Regex `-i` folds ASCII letters only, so `-i 'CAF[É]'` misses `café` where ripgrep matches.
+  The fix is Unicode simple case folding in the compiler: every non-ASCII atom becomes a
+  class of its case variants, which costs program size but no complexity.
+- No multi-line matching (`rg -U`). Matching is per line by construction; `(?s)` only widens
+  `.`, it does not let a pattern cross a newline.
+- No `--follow`. The walker never follows a symlink, by the same invariant the scanner and
+  the pruner keep, and a followed tree needs cycle detection before it can be offered.
+- No mmap. Files are read in 64 KiB blocks; whether mmap wins on warm-cache large files is a
+  benchmark, not a certainty, and it would not change any result.
+- No `.git/info/exclude` and no global `core.excludesFile`, and ignore files are read from
+  each root down, so a `.gitignore` above the root does not apply even though ripgrep honours
+  it inside a repository.
+- No stdin, one pattern per run (`-e` is an alternative to the positional pattern, not a
+  list), and short flags do not combine.
+
+**Open questions worth measuring later.**
+
+- Where the time actually goes: read, match or walk, on a cold cache and on a tree that is
+  already in page cache.
+- Whether the literal fast path is worth a multi-byte (Two-Way or memchr-style) search for
+  needles longer than a couple of bytes.
+- `--stats` is one line today; a per-directory breakdown would make "why is this slow"
+  answerable without a profiler.

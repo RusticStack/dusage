@@ -358,3 +358,95 @@ fn a_positive_glob_overrides_ignore_rules() {
     let o = run(&["search", "-l", "-g", "*.log", "needle"], &f.root);
     assert!(stdout(&o).contains("debug.log"), "{}", stdout(&o));
 }
+
+#[test]
+fn type_filters_narrow_without_overriding_ignores() {
+    let f = Fixture::new("typefilter");
+    fs::write(f.root.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(f.root.join("debug.log"), "needle in a log\n").unwrap();
+
+    let o = run(&["search", "-l", "-t", "rust", "needle"], &f.root);
+    let out = stdout(&o);
+    assert!(out.contains("main.rs"), "{out}");
+    assert!(
+        !out.contains("debug.log"),
+        "a type filter keeps ignore rules: {out}"
+    );
+
+    let o = run(&["find", "--dirs", "*"], &f.root);
+    assert!(stdout(&o).contains("src"), "{}", stdout(&o));
+    let o = run(&["find", "-t", "rust", "*"], &f.root);
+    let out = stdout(&o);
+    assert!(out.contains("main.rs"), "{out}");
+    assert!(
+        !out.lines().any(|l| l.ends_with("/src")),
+        "a type filter implies files only: {out}"
+    );
+}
+
+#[test]
+fn depth_links_and_attached_values() {
+    let f = Fixture::new("depth");
+    fs::write(f.root.join("top.txt"), "needle at the top\n").unwrap();
+    let d = run(&["search", "-l", "--max-depth", "1", "needle"], &f.root);
+    let out = stdout(&d);
+    assert!(out.contains("top.txt"), "{out}");
+    assert!(!out.contains("main.rs"), "depth 1 stops at the root: {out}");
+    let d = run(&["search", "-l", "--max-depth", "2", "needle"], &f.root);
+    assert!(stdout(&d).contains("main.rs"), "{}", stdout(&d));
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(f.root.join("src/main.rs"), f.root.join("link.rs")).unwrap();
+        let o = run(&["search", "-l", "needle"], &f.root);
+        assert!(
+            !stdout(&o).contains("link.rs"),
+            "a walk never follows a link: {}",
+            stdout(&o)
+        );
+    }
+
+    let o = run(&["search", "-m0", "needle"], &f.root);
+    assert_eq!(code(&o), 1, "-m0 reports nothing");
+    assert!(stdout(&o).is_empty());
+    let o = run(&["search", "-C1", "-n", "needle"], &f.root);
+    assert_eq!(code(&o), 0, "an attached short value parses");
+    assert!(stdout(&o).contains("it.rs"), "{}", stdout(&o));
+}
+
+#[test]
+fn ancestor_ignore_files_apply_to_a_subdirectory_scan() {
+    let f = Fixture::new("ancestor");
+    fs::write(f.root.join(".gitignore"), "*.log\nsrc/deep/\n").unwrap();
+    fs::create_dir_all(f.root.join(".git")).unwrap();
+    fs::write(f.root.join("src/main.rs"), "needle\n").unwrap();
+    fs::write(f.root.join("src/deep/util.rs"), "needle\n").unwrap();
+    fs::write(f.root.join("src/run.log"), "needle\n").unwrap();
+
+    let sub = f.root.join("src");
+    let o = run(&["search", "-l", "needle"], &sub);
+    let out = stdout(&o);
+    assert!(out.contains("main.rs"), "{out}");
+    assert!(
+        !out.contains("util.rs"),
+        "an ancestor rule hides src/deep/: {out}"
+    );
+    assert!(
+        !out.contains("run.log"),
+        "an ancestor *.log rule applies: {out}"
+    );
+}
+
+#[test]
+fn a_positive_glob_re_includes_a_dotfile() {
+    let f = Fixture::new("dotglob");
+    fs::write(f.root.join(".hidden.rs"), "needle in a dotfile\n").unwrap();
+    let o = run(&["search", "-l", "needle"], &f.root);
+    assert!(!stdout(&o).contains(".hidden.rs"), "{}", stdout(&o));
+    let o = run(&["search", "-l", "-g", "*.rs", "needle"], &f.root);
+    assert!(
+        stdout(&o).contains(".hidden.rs"),
+        "-g names the dotfile: {}",
+        stdout(&o)
+    );
+}

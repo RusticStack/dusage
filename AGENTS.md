@@ -13,9 +13,17 @@ src/queue.rs          par_for_each: condvar work queue (one mutex, panic-safe)
 src/cli.rs            arg parser, human units (sizes, ages), thread default
 src/guard.rs          protected-root guard, one implementation per platform
 src/model.rs          shared types: Totals, TopEntry, BigFile, ErrorKind/ErrorCounts, Source, ScanResult
-src/report.rs         text / JSON rendering of ScanResult
+src/report.rs         text / JSON rendering of ScanResult, SearchReport, path listings
 src/scan.rs           scan engine (readdir / batched / mft backends) and watch
 src/prune.rs          prune engine: plan + execute, streaming --log, chunked deletes
+src/preset.rs         prune presets (built in + presets.conf)
+src/search.rs         search/find engine: tree walk, filters, streaming line scanner
+src/pattern.rs        literal vs regex dispatch, case and word rules
+src/regex.rs          Pike VM over a Thompson NFA (no backtracking)
+src/glob.rs           gitignore-style glob matcher
+src/ignore.rs         builtin caches + .gitignore/.ignore layers + -g filters
+src/bytes.rs          memmem, case folding, word boundaries
+src/encodings.rs      UTF-8/UTF-16/Latin-1 detection and transcoding
 src/win/sys.rs        shared FFI decls and helpers
 src/win/enumerate.rs  batched directory enumeration, readdir fallback, reparse/stream helpers
 src/win/delete.rs     handle-based delete that never follows reparse points
@@ -26,9 +34,10 @@ src/unix/sys.rs       errno table + inotify/poll FFI decls
 src/unix/enumerate.rs readdir + statx enumeration, symlink/reparse-root checks, mount helpers
 src/unix/delete.rs    unlink/rmdir delete that never follows symlinks
 src/unix/watch.rs     --watch change feed over inotify
-src/bin/dusage.rs     thin CLI over scan + report
-src/bin/fastdel.rs    thin CLI over prune
-tests/                dusage_cli.rs, fastdel_cli.rs (run the built binaries)
+src/cmd/              subcommand front ends: scan/big, search/find, prune/fastdel
+src/bin/dusage.rs     thin CLI over cmd::dispatch + cmd::finish
+src/bin/fastdel.rs    thin CLI over cmd::prune
+tests/                dusage_cli.rs, fastdel_cli.rs, search_cli.rs (run the built binaries)
 ```
 
 The two platform modules expose the same small surface, which is all `scan.rs`,
@@ -134,13 +143,15 @@ parsing, CI, and (0.4.0) the whole Linux port: statx enumeration, inode dedup,
 symlink handling, inotify `--watch`, Linux guard, `--one-filesystem`, Linux CI
 and release artifacts.
 
+Also done in 0.5.0: the search suite (`search`/`find` over one deterministic
+walk plus a parallel content scanner) and the single binary with subcommands
+(`dusage scan|big|search|find|prune`, `fastdel` and `del` aliases for `prune`,
+presets for the pruner). Search limits are listed in `docs/ROADMAP.md`.
+
 Open:
 - Validate the USN `--watch` path on a real volume in an elevated shell (the
   MFT backend is validated and benchmarked; see README).
 - Run the benchmark questions in `docs/ROADMAP.md` (no speedup is measured yet).
-- Merge to one binary with subcommands (`dusage scan|prune|big`) if more tools
-  appear — keep `fastdel` as an alias for `prune`.
-- Preset configs for fastdel.
 - Measure the Linux backends properly: the thread sweep and the cold-cache numbers in
   README were taken on a 2-vCPU container, and a `getdents64`-level enumerator (raw
   syscall, no `read_dir` allocation) is unexplored.

@@ -56,6 +56,8 @@ pub struct SearchOptions {
     pub hidden: bool,
     pub no_ignore: bool,
     pub globs: Vec<String>,
+    /// `-t`/`--ext` patterns: they filter results but leave the ignore rules in force.
+    pub type_globs: Vec<String>,
     pub max_depth: Option<usize>,
     pub max_file_size: Option<u64>,
     pub threads: usize,
@@ -90,6 +92,7 @@ impl SearchOptions {
             hidden: false,
             no_ignore: false,
             globs: Vec::new(),
+            type_globs: Vec::new(),
             max_depth: None,
             max_file_size: None,
             threads: crate::cli::default_threads(),
@@ -194,9 +197,24 @@ impl Walker<'_> {
             let name = e.name.to_string_lossy();
             let child_rel = join_rel(rel, &name);
             let is_dir = e.is_dir() && !e.is_reparse();
-            if !self.o.hidden && name.starts_with('.') {
+            // A walk never follows a link: a reparse point is listed as a link or not at all.
+            if e.is_reparse() {
                 self.stats.entries_ignored += 1;
                 continue;
+            }
+            // `--max-depth N` counts the path levels below the root that may be reported.
+            if self.o.max_depth.is_some_and(|m| depth + 1 > m) {
+                self.stats.entries_ignored += 1;
+                continue;
+            }
+            if !self.o.hidden && name.starts_with('.') {
+                // A positive glob re-includes a dotfile it names, as rg does; directories
+                // still need `--hidden` so the walk never wanders into `.git`.
+                let named = !is_dir && self.rules.glob_named(&child_rel);
+                if !named {
+                    self.stats.entries_ignored += 1;
+                    continue;
+                }
             }
             // A positive glob switches the ignore files off (`-g '*.log'` finds a file a
             // `.gitignore` hides), exactly as ripgrep does; exclusions always apply.
@@ -221,7 +239,7 @@ impl Walker<'_> {
                     self.out
                         .push(self.candidate(dir, &e.name, &child_rel, true, e.size, None));
                 }
-                if self.o.max_depth.is_none_or(|m| depth < m) {
+                if self.o.max_depth.is_none_or(|m| depth + 1 < m) {
                     self.dir(&dir.join(&e.name), &child_rel, depth + 1);
                 }
             } else {
@@ -270,6 +288,7 @@ fn build_walker(o: &SearchOptions) -> io::Result<Walker<'_>> {
     let mut rules = IgnoreRules::new(!o.no_ignore);
     rules
         .add_globs(&o.globs)
+        .and_then(|()| rules.add_filters(&o.type_globs))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     Ok(Walker {
         o,
@@ -304,7 +323,15 @@ fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
                     is_link: false,
                 });
             }
-            Ok(_) => w.dir(root, "", 0),
+            Ok(_) => {
+                let mark = if o.no_ignore {
+                    w.rules.mark()
+                } else {
+                    w.rules.push_ancestors(root)
+                };
+                w.dir(root, "", 0);
+                w.rules.pop_to(mark);
+            }
             Err(e) => {
                 w.stats.errors.record(&e);
             }
@@ -433,6 +460,10 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
 
 /// Scan one file. `None` means "nothing to report" (no match, or filtered out).
 fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Option<FileHits>> {
+    // `-m 0` asks for no match at all: never open the file.
+    if o.max_count == Some(0) {
+        return Ok(None);
+    }
     let mut f = File::open(path)?;
     let mut buf = vec![0u8; BLOCK];
     stats.files_scanned += 1;
@@ -442,7 +473,9 @@ fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Op
     }
     // A file that needs transcoding is read whole: UTF-16 code units straddle the block
     // boundary, so there is nothing to stream. Everything else keeps the streaming path.
-    let encoding = o.encoding.unwrap_or_else(|| encodings::detect(&buf[..n]));
+    // Sniffing reads only the prefix the binary check already looks at.
+    let sample = &buf[..n.min(BINARY_SCAN)];
+    let encoding = o.encoding.unwrap_or_else(|| encodings::detect(sample));
     if encodings::needs_transcode(encoding) {
         let mut all = buf[..n].to_vec();
         f.read_to_end(&mut all)?;
@@ -483,6 +516,8 @@ struct Scanner<'a> {
     want_lines: bool,
     limit: u64,
     stopped: bool,
+    /// One reusable buffer per file: the current line, so no line costs an allocation.
+    line: Vec<u8>,
 }
 
 impl<'a> Scanner<'a> {
@@ -499,6 +534,7 @@ impl<'a> Scanner<'a> {
             want_lines: !o.count && !o.files_with_matches && !o.files_without_matches && !o.quiet,
             limit: o.max_count.unwrap_or(u64::MAX),
             stopped: false,
+            line: Vec::new(),
         }
     }
 
@@ -513,18 +549,15 @@ impl<'a> Scanner<'a> {
         }
         let mut start = 0;
         while let Some(pos) = bytes::find_byte(chunk, b'\n', start) {
-            let mut line: Vec<u8> = Vec::new();
-            let borrow = if self.carry.is_empty() {
-                &chunk[start..pos]
-            } else {
-                self.carry.extend_from_slice(&chunk[start..pos]);
-                &self.carry
-            };
-            line.extend_from_slice(borrow);
-            self.carry.clear();
+            self.line.clear();
+            if !self.carry.is_empty() {
+                self.line.extend_from_slice(&self.carry);
+                self.carry.clear();
+            }
+            self.line.extend_from_slice(&chunk[start..pos]);
             start = pos + 1;
             self.line_no += 1;
-            if self.emit(&line) {
+            if self.emit() {
                 self.stopped = true;
                 return;
             }
@@ -542,14 +575,17 @@ impl<'a> Scanner<'a> {
         if self.done() || self.carry.is_empty() {
             return;
         }
-        let line = std::mem::take(&mut self.carry);
+        self.line.clear();
+        std::mem::swap(&mut self.line, &mut self.carry);
+        self.carry.clear();
         self.line_no += 1;
-        self.emit(&line);
+        self.emit();
     }
 
-    fn emit(&mut self, line: &[u8]) -> bool {
+    /// Run the matcher over the buffered line; true means the file is finished (`-m`).
+    fn emit(&mut self) -> bool {
         handle_line(
-            line,
+            &self.line,
             self.line_no,
             self.o,
             &mut self.history,
