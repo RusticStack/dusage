@@ -4,6 +4,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// Create `link` as a directory link to `target`: a junction on Windows, a symlink on
+/// Linux. Both are what the scanner calls a reparse point and refuses to follow.
+fn link_dir(link: &Path, target: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+}
+
 struct Fixture {
     root: PathBuf,
     outside: PathBuf,
@@ -27,13 +46,10 @@ impl Fixture {
         fs::hard_link(root.join("two/h1.dat"), root.join("two/h2.dat")).unwrap();
         fs::write(root.join("top.log"), vec![0u8; 70]).unwrap();
         fs::write(outside.join("huge.bin"), vec![0u8; 100_000]).unwrap();
-        let st = Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(root.join("junc"))
-            .arg(&outside)
-            .output()
-            .unwrap();
-        assert!(st.status.success(), "mklink failed");
+        assert!(
+            link_dir(&root.join("junc"), &outside),
+            "link creation failed"
+        );
         Fixture { root, outside }
     }
 }
@@ -211,6 +227,7 @@ fn help_lists_flags() {
         .unwrap();
     let h = stdout(&o);
     for flag in [
+        "--one-filesystem",
         "--min-big",
         "--threads",
         "--top",
@@ -252,5 +269,90 @@ fn version_flag_prints_package_version() {
     assert_eq!(
         String::from_utf8_lossy(&o.stdout).trim(),
         format!("dusage {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn one_filesystem_is_accepted() {
+    let f = Fixture::new("xdev");
+    let plain = total_bytes(&stdout(&dusage(&["--json"], &f.root)));
+    let xdev = total_bytes(&stdout(&dusage(&["--json", "--one-filesystem"], &f.root)));
+    // Nothing in the fixture is a mount point, so the totals agree.
+    assert_eq!(plain, xdev);
+    let short = total_bytes(&stdout(&dusage(&["--json", "-x"], &f.root)));
+    assert_eq!(plain, short);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mft_backend_is_refused_with_a_reason() {
+    let f = Fixture::new("mft");
+    for args in [&["--backend", "mft"][..], &["--mft"][..]] {
+        let o = dusage(args, &f.root);
+        assert_eq!(o.status.code(), Some(1), "{args:?}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("NTFS"), "{args:?}: {err}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn streams_flag_reports_ntfs_only() {
+    let f = Fixture::new("streams");
+    let o = dusage(&["--json", "--streams"], &f.root);
+    let out = stdout(&o);
+    assert_eq!(num_after(&out, 0, "stream_bytes"), 0);
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("NTFS"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn totals_match_find_and_stat() {
+    // `find -printf` is the portable oracle for a Linux scan: every name for the plain
+    // total, unique inodes for --dedup-hardlinks.
+    let f = Fixture::new("oracle");
+    let find = |fmt: &str| -> String {
+        let out = Command::new("find")
+            .arg(&f.root)
+            .args(["-type", "f", "-printf", fmt])
+            .output()
+            .expect("find");
+        assert!(out.status.success(), "find failed");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let plain: u64 = find("%s\n")
+        .lines()
+        .map(|l| l.trim().parse::<u64>().unwrap())
+        .sum();
+    let mut seen = std::collections::HashSet::new();
+    let mut dedup = 0u64;
+    for line in find("%i:%d %s\n").lines() {
+        let mut it = line.split_whitespace();
+        let (id, size) = (it.next().unwrap(), it.next().unwrap());
+        if seen.insert(id.to_string()) {
+            dedup += size.parse::<u64>().unwrap();
+        }
+    }
+    assert_eq!(plain, 15_370, "oracle sanity");
+    let json = stdout(&dusage(&["--json", "--min-big", "1G"], &f.root));
+    assert_eq!(total_bytes(&json), plain, "plain totals vs find");
+    let json = stdout(&dusage(
+        &["--json", "--dedup-hardlinks", "--min-big", "1G"],
+        &f.root,
+    ));
+    assert_eq!(
+        total_bytes(&json),
+        dedup,
+        "deduped totals vs find -printf %i:%D"
+    );
+    assert_eq!(
+        num_after(&json, json.find("\"total\"").unwrap(), "files"),
+        5,
+        "counted files (h2 is a duplicate of h1)"
     );
 }

@@ -1,10 +1,7 @@
-//! dusage: dependency-free disk tooling for Windows (NTFS-first).
-//!
-//! Module ownership and contracts are described in `docs/ARCHITECTURE.md`.
-//! All `unsafe` and FFI lives under [`win`].
+//! dusage: dependency-free disk tooling for Windows and Linux.
 
-#[cfg(not(windows))]
-compile_error!("dusage targets Windows only (it uses Win32/NTFS APIs under `win`).");
+#[cfg(not(any(windows, target_os = "linux")))]
+compile_error!("dusage supports Windows (NTFS) and Linux only.");
 
 pub mod cli;
 pub mod guard;
@@ -13,6 +10,15 @@ pub mod prune;
 pub mod queue;
 pub mod report;
 pub mod scan;
+
+#[cfg(target_os = "linux")]
+pub mod unix;
+#[cfg(windows)]
 pub mod win;
+
+#[cfg(target_os = "linux")]
+pub use unix as native;
+#[cfg(windows)]
+pub use win as native;
 
 pub use queue::par_for_each;

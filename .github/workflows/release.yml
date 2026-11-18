@@ -64,3 +64,31 @@ jobs:
           $name = "dusage-$env:VERSION-windows-x64"
           gh release create $env:GITHUB_REF_NAME --title "dusage $env:VERSION" --notes-file notes.md `
             "dist/$name.zip" dist/dusage.exe dist/fastdel.exe dist/SHA256SUMS.txt
+
+  linux:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release
+      - name: Package
+        run: |
+          set -eu
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$ver" = "$GITHUB_REF_NAME" || { echo "Cargo.toml version v$ver does not match tag $GITHUB_REF_NAME"; exit 1; }
+          name="dusage-$ver-linux-x64"
+          mkdir -p "dist/$name"
+          cp target/release/dusage target/release/fastdel README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          cp target/release/dusage target/release/fastdel dist/
+          (cd dist && sha256sum "$name.tar.gz" dusage fastdel > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+      - name: Upload Linux assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          gh release upload "$GITHUB_REF_NAME" \
+            "dist/dusage-$ver-linux-x64.tar.gz" dist/dusage dist/fastdel dist/SHA256SUMS-linux.txt --clobber

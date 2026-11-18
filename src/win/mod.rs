@@ -6,3 +6,4 @@ pub mod enumerate;
 pub mod mft;
 pub mod sys;
 pub mod usn;
+pub mod watch;

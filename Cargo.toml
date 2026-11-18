@@ -1,13 +1,13 @@
 [package]
 name = "dusage"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "Fast parallel disk-usage scanner and age-filtered pruner for Windows"
+description = "Fast parallel disk-usage scanner and age-filtered pruner for Windows and Linux"
 license = "MIT OR Apache-2.0"
 authors = ["RusticStack"]
 repository = "https://github.com/RusticStack/dusage"
 readme = "README.md"
-keywords = ["disk-usage", "ntfs", "windows", "cli", "cleanup"]
+keywords = ["disk-usage", "ntfs", "windows", "linux", "cleanup"]
 categories = ["command-line-utilities", "filesystem"]
 rust-version = "1.89"
 exclude = ["assets/", ".github/", "docs/", "EXAMPLE.md", "AGENTS.md"]

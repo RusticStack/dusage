@@ -60,17 +60,42 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    /// Classify an I/O error. Raw OS codes are read per platform (Win32 error codes
+    /// on Windows, errno on Linux); the `ErrorKind` fallback keeps the mapping sane
+    /// for errors built from `io::Error::other`.
     pub fn of(e: &io::Error) -> Self {
-        match e.raw_os_error() {
-            Some(5) => Self::AccessDenied,
-            Some(32) => Self::SharingViolation,
-            Some(2) | Some(3) => Self::NotFound,
-            Some(145) => Self::DirNotEmpty,
-            _ => match e.kind() {
-                io::ErrorKind::PermissionDenied => Self::AccessDenied,
-                io::ErrorKind::NotFound => Self::NotFound,
-                _ => Self::Other,
-            },
+        if let Some(raw) = e.raw_os_error() {
+            if let Some(k) = Self::from_raw(raw) {
+                return k;
+            }
+        }
+        match e.kind() {
+            io::ErrorKind::PermissionDenied => Self::AccessDenied,
+            io::ErrorKind::NotFound => Self::NotFound,
+            io::ErrorKind::DirectoryNotEmpty => Self::DirNotEmpty,
+            _ => Self::Other,
+        }
+    }
+
+    #[cfg(windows)]
+    fn from_raw(raw: i32) -> Option<Self> {
+        match raw {
+            5 => Some(Self::AccessDenied),
+            32 => Some(Self::SharingViolation),
+            2 | 3 => Some(Self::NotFound),
+            145 => Some(Self::DirNotEmpty),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn from_raw(raw: i32) -> Option<Self> {
+        match raw {
+            1 | 13 => Some(Self::AccessDenied),
+            26 => Some(Self::SharingViolation),
+            2 | 20 => Some(Self::NotFound),
+            39 => Some(Self::DirNotEmpty),
+            _ => None,
         }
     }
 
@@ -156,8 +181,10 @@ pub struct ScanResult {
     /// Extra hardlink names not counted again (only when dedup is on).
     pub hardlink_dupes: u64,
     pub hardlink_dupe_bytes: u64,
-    /// Bytes in named alternate data streams (only when requested).
+    /// Bytes in named alternate data streams (only when requested; NTFS only).
     pub stream_bytes: u64,
+    /// Directories on another filesystem skipped by `--one-filesystem`.
+    pub skipped_mounts: u64,
     pub errors: ErrorCounts,
     pub elapsed: Duration,
     pub threads: usize,
@@ -172,22 +199,54 @@ mod tests {
     fn classify() {
         let mut c = ErrorCounts::default();
         assert_eq!(
-            c.record(&io::Error::from_raw_os_error(5)),
+            c.record(&io::Error::from_raw_os_error(WIN_ACCESS_DENIED)),
             ErrorKind::AccessDenied
         );
         assert_eq!(
-            c.record(&io::Error::from_raw_os_error(32)),
+            c.record(&io::Error::from_raw_os_error(WIN_SHARING_VIOLATION)),
             ErrorKind::SharingViolation
         );
         assert_eq!(
-            c.record(&io::Error::from_raw_os_error(145)),
+            c.record(&io::Error::from_raw_os_error(WIN_DIR_NOT_EMPTY)),
             ErrorKind::DirNotEmpty
         );
         assert_eq!(
-            c.record(&io::Error::from_raw_os_error(3)),
+            c.record(&io::Error::from_raw_os_error(WIN_PATH_NOT_FOUND)),
             ErrorKind::NotFound
         );
         assert_eq!(c.record(&io::Error::other("x")), ErrorKind::Other);
         assert_eq!(c.total(), 5);
+    }
+
+    #[cfg(windows)]
+    const WIN_ACCESS_DENIED: i32 = 5;
+    #[cfg(windows)]
+    const WIN_SHARING_VIOLATION: i32 = 32;
+    #[cfg(windows)]
+    const WIN_DIR_NOT_EMPTY: i32 = 145;
+    #[cfg(windows)]
+    const WIN_PATH_NOT_FOUND: i32 = 3;
+
+    #[cfg(target_os = "linux")]
+    const WIN_ACCESS_DENIED: i32 = 13;
+    #[cfg(target_os = "linux")]
+    const WIN_SHARING_VIOLATION: i32 = 26;
+    #[cfg(target_os = "linux")]
+    const WIN_DIR_NOT_EMPTY: i32 = 39;
+    #[cfg(target_os = "linux")]
+    const WIN_PATH_NOT_FOUND: i32 = 2;
+
+    #[test]
+    fn counts_add_and_total() {
+        let mut a = ErrorCounts {
+            access_denied: 1,
+            ..Default::default()
+        };
+        let b = ErrorCounts {
+            other: 2,
+            ..Default::default()
+        };
+        a.add(&b);
+        assert_eq!((a.total(), a.access_denied, a.other), (3, 1, 2));
     }
 }

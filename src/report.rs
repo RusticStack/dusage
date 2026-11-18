@@ -51,7 +51,11 @@ pub fn render_text(r: &ScanResult, o: &ReportOptions, out: &mut dyn Write) -> io
 
     writeln!(out, "\n--- top {} entries under {} ---", o.top_n, r.root)?;
     for t in r.tops.iter().take(o.top_n) {
-        let slash = if t.is_dir { "\\" } else { "" };
+        let slash = if t.is_dir {
+            std::path::MAIN_SEPARATOR_STR
+        } else {
+            ""
+        };
         writeln!(
             out,
             "{}  {}{}",
@@ -112,6 +116,12 @@ pub fn render_text(r: &ScanResult, o: &ReportOptions, out: &mut dyn Write) -> io
         foot.push(format!(
             "{} GB in named alternate data streams",
             gb(r.stream_bytes)
+        ));
+    }
+    if r.skipped_mounts > 0 {
+        foot.push(format!(
+            "skipped {} mount points (--one-filesystem)",
+            r.skipped_mounts
         ));
     }
     let e = &r.errors;
@@ -203,8 +213,12 @@ pub fn render_json(r: &ScanResult, out: &mut dyn Write) -> io::Result<()> {
     s.push('}');
     let _ = write!(
         s,
-        ",\"skipped_reparse\":{},\"hardlink_dupes\":{},\"hardlink_dupe_bytes\":{},\"stream_bytes\":{}",
-        r.skipped_reparse, r.hardlink_dupes, r.hardlink_dupe_bytes, r.stream_bytes
+        ",\"skipped_reparse\":{},\"skipped_mounts\":{},\"hardlink_dupes\":{},\"hardlink_dupe_bytes\":{},\"stream_bytes\":{}",
+        r.skipped_reparse,
+        r.skipped_mounts,
+        r.hardlink_dupes,
+        r.hardlink_dupe_bytes,
+        r.stream_bytes
     );
     let e = &r.errors;
     let _ = write!(
@@ -312,16 +326,17 @@ mod tests {
     #[test]
     fn golden_plain() {
         let expect = [
-            "",
-            "=== TOTAL: 3.50 GB | files 11 | dirs 2 | elapsed 2s (6 files/s) | source batched ===",
-            "",
-            r"--- top 5 entries under C:\data ---",
-            r"      3.00 GB  big\",
-            "      0.50 GB  f.bin",
-            "",
-            "--- files >= 1.00 GB (top 5) ---",
-            r"      2.00 GB  C:\data\big\x.iso",
-            "",
+            String::new(),
+            "=== TOTAL: 3.50 GB | files 11 | dirs 2 | elapsed 2s (6 files/s) | source batched ==="
+                .to_string(),
+            String::new(),
+            r"--- top 5 entries under C:\data ---".to_string(),
+            format!("      3.00 GB  big{}", std::path::MAIN_SEPARATOR),
+            "      0.50 GB  f.bin".to_string(),
+            String::new(),
+            "--- files >= 1.00 GB (top 5) ---".to_string(),
+            r"      2.00 GB  C:\data\big\x.iso".to_string(),
+            String::new(),
         ]
         .join("\n");
         assert_eq!(text(&sample(), &opts(false, false)), expect);
@@ -331,7 +346,10 @@ mod tests {
     fn golden_alloc_and_ext() {
         let s = text(&sample(), &opts(true, true));
         assert!(s.contains("| on disk 3.60 GB |"));
-        assert!(s.contains("      3.00 GB        3.10 GB on disk  big\\\n"));
+        assert!(s.contains(&format!(
+            "      3.00 GB        3.10 GB on disk  big{}\n",
+            std::path::MAIN_SEPARATOR
+        )));
         assert!(s.contains("\n--- by extension (top 5) ---\n"));
         assert!(s.contains("  .iso\n"));
         assert!(s.contains("  (none)\n"));

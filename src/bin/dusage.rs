@@ -26,29 +26,34 @@ OPTIONS:
     --json            machine-readable output on stdout instead of the text report
     --by-ext          add a per-extension breakdown
     --on-disk         also show allocated (on-disk) size
-    --dedup-hardlinks count each hardlinked file once (batched backend; a link whose
-                      other name lies outside the root is still counted once)
-    --streams         add named alternate data streams to the report (slow: one probe per file)
+    --dedup-hardlinks count each hardlinked file once (a link whose other name lies outside
+                      the root is still counted once)
+    --streams         add named alternate data streams (NTFS only; 0 bytes elsewhere)
+    -x, --one-filesystem
+                      stay on the root's filesystem: mount points are counted as skipped,
+                      not scanned (Linux; Windows mount points are links and always skipped)
     --backend NAME    auto (default) | readdir | batched | mft
-    --mft             same as --backend mft
+    --mft             same as --backend mft (Windows/NTFS only)
     --watch SECS      rescan every SECS seconds and print each update (Ctrl+C to stop);
-                      with an admin shell the USN journal limits rescans to what changed.
-                      Partial rescans keep other top-level entries as last scanned, so a
-                      hardlink spanning a rescanned and a kept entry is counted per name;
-                      with --dedup-hardlinks every rescan is a full one to stay exact
+                      the platform change feed (NTFS USN journal on Windows, inotify on
+                      Linux) limits rescans to the entries that changed. A partial rescan
+                      keeps other top-level entries as last scanned, so a hardlink spanning
+                      a rescanned and a kept entry is counted per name; with
+                      --dedup-hardlinks every rescan is a full one
     -h, --help        show this help
     -V, --version     print the version
 
 BACKENDS:
     auto      batched, falling back to readdir if the filesystem rejects it
-    batched   GetFileInformationByHandleEx: many entries (with on-disk size and file id)
-              per syscall; the default and fastest portable path
-    readdir   std::fs::read_dir; on-disk size unknown (shown as 0), no hardlink dedup
-    mft       raw NTFS $MFT read of a local drive letter (needs an elevated shell);
-              reads the whole volume's table, so it pays off on big trees
+    batched   Windows: GetFileInformationByHandleEx returns many entries per syscall, with
+              allocation size and 128-bit file id. Linux: one statx per entry, so every row
+              still carries its on-disk size and inode; the default and fastest path
+    readdir   std::fs::read_dir only; on-disk size unknown (shown as 0), no hardlink dedup
+    mft       Windows only: raw NTFS $MFT read of a local drive letter (needs an elevated
+              shell); reads the whole volume's table, so it pays off on big trees
 
-Symlinks, junctions and other name-surrogate reparse points are never followed.
-A root that is itself a junction or symlink is refused; pass its target.
+Symlinks, junctions and other reparse points are never followed.
+A root that is itself a link is refused; pass its target.
 Errors on individual files or directories are counted, not fatal.
 The progress line goes to stderr; the report goes to stdout.
 ";
@@ -99,7 +104,9 @@ fn run(raw: Vec<String>) -> Result<(), Fail> {
             "--on-disk",
             "--dedup-hardlinks",
             "--streams",
+            "--one-filesystem",
             "--mft",
+            "-x",
             "-h",
             "--help",
             "-V",
@@ -139,7 +146,14 @@ fn run(raw: Vec<String>) -> Result<(), Fail> {
     }
     o.dedup_hardlinks = a.flag("--dedup-hardlinks");
     o.streams = a.flag("--streams");
+    if o.streams && !cfg!(windows) {
+        eprintln!(
+            "dusage: note: named alternate data streams are an NTFS feature; \
+             --streams reports 0 bytes on this platform"
+        );
+    }
     o.by_ext = a.flag("--by-ext");
+    o.one_filesystem = a.flag("--one-filesystem") || a.flag("-x");
     let interval = a.value("--watch").map(parse_secs).transpose()?;
     let json = a.flag("--json");
     let ro = ReportOptions {
