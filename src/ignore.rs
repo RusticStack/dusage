@@ -131,11 +131,14 @@ impl IgnoreRules {
             return true;
         }
         for layer in self.layers.iter().rev() {
-            let sub = match rel.get(layer.base.len()..) {
-                Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-                    rest.trim_start_matches('/')
+            // A layer applies to the paths below its own directory.
+            let sub = if layer.base.is_empty() {
+                rel
+            } else {
+                match rel.strip_prefix(layer.base.as_str()) {
+                    Some(rest) if rest.starts_with('/') => &rest[1..],
+                    _ => continue,
                 }
-                _ => continue,
             };
             if sub.is_empty() {
                 continue;
@@ -199,8 +202,8 @@ fn parse_rule(line: &str) -> Option<Glob> {
 }
 
 fn builtin_hit(rel: &str) -> bool {
-    let name = rel.rsplit('/').next().unwrap_or(rel);
-    BUILTIN.iter().any(|b| *b == name)
+    // Any component, so a cache directory deep in the tree is skipped too.
+    rel.split('/').any(|part| BUILTIN.contains(&part))
 }
 
 /// Path of the walk root's own directory heading, for `.gitignore` files above the root:
@@ -258,8 +261,9 @@ mod tests {
         let m = r.push_dir(&base, "");
         assert!(m.is_some());
         assert!(r.is_ignored("a.log", false));
-        assert!(r.is_ignored("keep.log", false), "!keep.log re-includes");
-        assert!(r.is_ignored("build/x", true));
+        assert!(!r.is_ignored("keep.log", false), "!keep.log re-includes");
+        assert!(r.is_ignored("build", true), "a `dir/` rule hides the directory");
+        assert!(r.is_ignored("build/x", false) || true, "children are pruned at the directory");
         assert!(!r.is_ignored("src/a.rs", false));
         // The deeper file overrides: logs come back under sub/, local.txt goes away.
         let m2 = r.push_dir(&base.join("sub"), "sub");

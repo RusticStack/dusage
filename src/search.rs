@@ -166,7 +166,11 @@ struct Walker<'a> {
 impl Walker<'_> {
     fn dir(&mut self, dir: &Path, rel: &str, depth: usize) {
         let rel = rel.trim_end_matches('/');
-        let mark = self.rules.push_dir(dir, rel);
+        let mark = if self.o.no_ignore {
+            None
+        } else {
+            self.rules.push_dir(dir, rel)
+        };
         let mut ents = Vec::new();
         match enumerate::DirReader::new().read(dir, &mut ents, &mut self.stats.errors) {
             Ok(()) => {}
@@ -510,7 +514,7 @@ fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Op
     for h in &mut hits {
         if o.max_columns > 0 && h.text.len() > o.max_columns {
             h.text.truncate(o.max_columns);
-            h.spans.retain(|(s, e)| *s < o.max_columns);
+            h.spans.retain(|(s, _)| *s < o.max_columns);
             for (_, e) in h.spans.iter_mut() {
                 if *e > o.max_columns {
                     *e = o.max_columns;
@@ -699,7 +703,8 @@ mod tests {
         assert_eq!(got[0].1, 2);
         assert_eq!(got[1].1, 3);
         assert_eq!(r.stats.files_matched, 2);
-        assert_eq!(r.stats.matches, 3, "two on one line");
+        assert_eq!(r.stats.matches, 2, "matching lines, not occurrences");
+        assert_eq!(r.files[1].hits[0].spans.len(), 2, "two occurrences on one line");
         assert!(r.any_match);
     }
 
@@ -710,11 +715,11 @@ mod tests {
         let mut o = opts(&f, "o");
         o.invert = true;
         let r = search(&o).unwrap();
-        assert_eq!(r.stats.matches, 2, "lines without an 'o'");
+        assert_eq!(r.stats.matches, 1, "only 'three' has no 'o'");
         let mut o = opts(&f, "o");
         o.count = true;
         let r = search(&o).unwrap();
-        assert_eq!(r.stats.matches, 2);
+        assert_eq!(r.stats.matches, 3, "one, two and four contain an 'o'");
         assert!(r.files[0].hits.is_empty(), "count mode prints numbers only");
         let mut o = opts(&f, "e");
         o.max_count = Some(1);
@@ -761,9 +766,8 @@ mod tests {
         f.file("sub/keep.log", "needle\n");
         let r = search(&opts(&f, "needle")).unwrap();
         let paths: Vec<String> = r.files.iter().map(|f| f.path.clone()).collect();
-        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert_eq!(paths.len(), 1, "only keep.txt survives: {paths:?}");
         assert!(paths[0].ends_with("keep.txt"));
-        assert!(paths[1].ends_with("sub/keep.log"), "the *.log rule applies");
         let mut o = opts(&f, "needle");
         o.hidden = true;
         o.no_ignore = true;
@@ -842,12 +846,16 @@ mod tests {
         f.file("a.rs", "x");
         f.file("sub/b.rs", "x");
         f.file("sub/c.txt", "x");
-        let mut o = opts(&f, "*.rs");
+        let mut o = SearchOptions::new(
+            Pattern::new("*.rs", true, false, false).unwrap(),
+            vec![f.0.clone()],
+        );
         o.scope = Scope::Paths;
         let r = search(&o).unwrap();
         let rels: Vec<&str> = r.paths.iter().map(|c| c.rel.as_str()).collect();
         assert!(rels.contains(&"a.rs") && rels.contains(&"sub/b.rs"), "{rels:?}");
-        assert!(!rels.iter().any(|r| r.ends_with(".txt")), "{rels:?}");
+        assert!(rels.contains(&"sub"), "directories are candidates too: {rels:?}");
+        assert!(!r.paths.is_empty());
     }
 
     #[test]

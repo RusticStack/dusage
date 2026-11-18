@@ -303,16 +303,25 @@ fn run_query(
                 .map_err(|_| Fail(2, format!("invalid {name} {v:?}"))),
         }
     };
+    // Path mode never compiles the pattern as a regex: it is a glob (or a substring
+    // with `--fixed`), so a literal placeholder is all the engine needs.
+    let fixed = a.flag("-F") || a.flag("--fixed-strings");
     let mut o = SearchOptions::new(
         Pattern::new(
             &pattern_text,
-            scope == Scope::Content && (a.flag("-F") || a.flag("--fixed-strings")),
+            scope == Scope::Paths || fixed,
             a.flag("-i") || a.flag("--ignore-case"),
             a.flag("-w") || a.flag("--word-regexp"),
         )?,
         roots,
     );
     o.scope = scope;
+    if o.with_filename.is_none() {
+        let any_dir = o.roots.iter().any(|p| p.is_dir());
+        if any_dir || o.roots.len() > 1 {
+            o.with_filename = Some(true);
+        }
+    }
     o.globs = globs.clone();
     o.hidden = a.flag("--hidden");
     o.no_ignore = a.flag("--no-ignore");

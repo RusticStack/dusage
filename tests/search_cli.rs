@@ -72,7 +72,10 @@ fn no_match_exits_1_and_bad_pattern_exits_2() {
     assert_eq!(code(&o), 2);
     let o = run(&["search", "--bogus-flag", "x"], &f.root);
     assert_eq!(code(&o), 2);
-    let o = run(&["search"], &f.root);
+    let o = Command::new(env!("CARGO_BIN_EXE_dusage"))
+        .arg("search")
+        .output()
+        .unwrap();
     assert_eq!(code(&o), 2, "a missing pattern is misuse");
 }
 
@@ -81,7 +84,11 @@ fn flags_case_word_invert_count_list() {
     let f = Fixture::new("flags");
     let o = run(&["search", "-i", "NEEDLE", "--no-ignore"], &f.root);
     assert_eq!(code(&o), 0);
-    assert!(stdout(&o).contains("README.md:3:Needle with capital N"));
+    assert!(
+        stdout(&o).contains("README.md:Needle with capital N"),
+        "{}",
+        stdout(&o)
+    );
     let o = run(&["search", "-w", "needles"], &f.root);
     assert_eq!(code(&o), 1, "-w must not match a longer word");
     let o = run(&["search", "-c", "needle", "--no-ignore"], &f.root);
@@ -104,14 +111,15 @@ fn only_matching_context_and_json() {
     let out = stdout(&o);
     assert_eq!(code(&o), 0);
     assert!(out.lines().all(|l| l.ends_with("needle")), "{out}");
-    let o = run(&["search", "-C", "1", "twice", "--no-ignore"], &f.root);
+    let o = run(&["search", "-C", "1", "-n", "twice", "--no-ignore", "-H"], &f.root);
     let out = stdout(&o);
-    assert!(out.contains("-needle in a test"), "context: {out}");
+    assert!(out.contains("-1-needle in a test"), "context: {out}");
+    assert!(out.contains(":2:needle twice"), "{out}");
     let o = run(&["search", "--json", "needle", "--no-ignore"], &f.root);
     let out = stdout(&o);
     assert!(out.trim_start().starts_with("{\"files\":["), "{out}");
     assert!(out.contains("\"line_number\":2"), "{out}");
-    assert!(out.contains("\"submatches\":[{\"start\":4,\"end\":10"), "{out}");
+    assert!(out.contains("\"submatches\":[{\"start\":8,\"end\":14"), "{out}");
     assert!(out.trim_end().ends_with('}'));
 }
 
@@ -161,9 +169,9 @@ fn find_by_glob_and_filters() {
     assert!(!out.contains(".md"), "{out}");
     let o = run(&["find", "--dirs", "*"], &f.root);
     let out = stdout(&o);
-    assert!(out.lines().any(|l| l.ends_with("src/")), "{out}");
-    let o = run(&["find", "-F", "deep", "*"], &f.root);
-    assert!(stdout(&o).contains("src/deep/util.rs"), "{stdout(&o)}");
+    assert!(out.lines().any(|l| l.ends_with("src")), "dirs: {out}");
+    let o = run(&["find", "-F", "deep"], &f.root);
+    assert!(stdout(&o).contains("src/deep/util.rs"), "{}", stdout(&o));
     let o = run(&["find", "--long", "*.md"], &f.root);
     let out = stdout(&o);
     assert!(out.contains("README.md"), "{out}");

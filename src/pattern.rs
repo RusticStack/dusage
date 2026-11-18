@@ -188,10 +188,11 @@ mod tests {
         assert_eq!(x.kind(), PatternKind::Literal);
         assert_eq!(x.fast_literal(), Some(&b"needle"[..]));
         assert!(x.is_match(b"a needle in a haystack"));
-        assert!(!x.is_match(b"needles are sharp"));
+        assert!(x.is_match(b"needles are sharp"), "a literal is a substring match");
         let fixed = Pattern::new("a.c", true, false, false).unwrap();
         assert!(fixed.is_match(b"xa.cy"));
-        assert!(!p("a.c").is_match(b"abc"), "regex dot");
+        assert!(!fixed.is_match(b"abc"), "-F is literal");
+        assert!(p("a.c").is_match(b"abc"), "without -F the dot is a wildcard");
     }
 
     #[test]

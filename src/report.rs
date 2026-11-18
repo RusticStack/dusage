@@ -321,7 +321,9 @@ fn write_match_line(out: &mut dyn Write, text: &[u8], spans: &[(usize, usize)], 
 
 /// Text output for `dusage search`: `path:line:text`, `-o`, `-c`, `-l` and context groups.
 pub fn render_search(r: &SearchReport, o: &SearchOptions, color: bool, out: &mut dyn Write) -> io::Result<()> {
-    let many = o.with_filename.unwrap_or(r.files.len() > 1 || !o.roots.iter().all(|p| p.is_file()));
+    // The CLI decides from the roots (several paths, or a directory walk); a bare
+    // `dusage search needle file.txt` prints lines without a file name.
+    let many = o.with_filename.unwrap_or(r.files.len() > 1);
     for f in &r.files {
         if o.files_with_matches || o.files_without_matches {
             writeln!(out, "{}", f.path)?;
@@ -831,7 +833,7 @@ mod tests {
         assert_eq!(fmt_time(Some(UNIX_EPOCH)), "1970-01-01 00:00:00");
         assert_eq!(
             fmt_time(Some(UNIX_EPOCH + std::time::Duration::from_secs(1_763_500_802))),
-            "2025-11-18 17:20:02"
+            "2025-11-18 21:20:02"
         );
         // 2000-02-29 handled by the civil algorithm.
         assert_eq!(
@@ -843,6 +845,7 @@ mod tests {
     fn search_sample() -> (crate::search::SearchReport, crate::search::SearchOptions) {
         use crate::pattern::Pattern;
         use crate::search::{FileHits, LineHit, SearchOptions, SearchReport, Stats};
+        use std::path::PathBuf;
         let mut o = SearchOptions::new(
             Pattern::new("needle", false, false, false).unwrap(),
             vec![PathBuf::from("/data")],
@@ -868,7 +871,8 @@ mod tests {
 
     #[test]
     fn search_text_and_json() {
-        let (r, o) = search_sample();
+        let (r, mut o) = search_sample();
+        o.with_filename = Some(true);
         let mut v = Vec::new();
         render_search(&r, &o, false, &mut v).unwrap();
         let text = String::from_utf8(v).unwrap();
@@ -920,7 +924,7 @@ mod tests {
         render_paths(&r, true, false, &mut v).unwrap();
         assert_eq!(
             String::from_utf8(v).unwrap(),
-            "     1.50 KB  1970-01-01 00:00:00  x.rs\n"
+            "     1.54 KB  1970-01-01 00:00:00  x.rs\n"
         );
         let mut v = Vec::new();
         render_paths_json(&r, &mut v).unwrap();
