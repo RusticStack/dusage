@@ -2,6 +2,7 @@
 
 use super::Fail;
 use crate::cli::{self, Args};
+use crate::preset::{self, Preset};
 use crate::prune::{self, PruneOptions};
 use std::path::PathBuf;
 
@@ -12,6 +13,7 @@ USAGE:
     fastdel <root> <min_age> [prefixes] [threads] [--dry]
     fastdel <root> --age AGE [--prefix a,b] [--threads N] [--dry] [--log FILE] [--limit N]
     dusage prune <root> --age AGE [OPTIONS]
+    fastdel <root> --preset NAME [--prefix a,b] [--age AGE]
 
 Filters apply to the direct children of <root>; matching entries are deleted recursively.
 Links (junctions, symlinks) are unlinked, never followed, and a tree is never followed into
@@ -26,6 +28,8 @@ OPTIONS:
     --dry           print the plan, delete nothing
     --log FILE      append one line per candidate (DELETED/FAILED/DRY) plus a summary
     --limit N       rows listed by --dry (default 50)
+    --preset NAME   use a saved preset for prefixes/age/limit (see --print-presets)
+    --print-presets list the presets and exit
     -h, --help      this text
     -V, --version   print the version
 
@@ -38,8 +42,22 @@ Protected roots are always refused:
 pub fn run(raw: Vec<String>) -> Result<(), Fail> {
     let a = Args::parse(
         raw,
-        &["--age", "--prefix", "--threads", "--log", "--limit"],
-        &["--dry", "-h", "--help", "-V", "--version"],
+        &[
+            "--age",
+            "--prefix",
+            "--threads",
+            "--log",
+            "--limit",
+            "--preset",
+        ],
+        &[
+            "--dry",
+            "--print-presets",
+            "-h",
+            "--help",
+            "-V",
+            "--version",
+        ],
     )?;
     if a.flag("-h") || a.flag("--help") {
         println!("{PRUNE_HELP}");
@@ -49,21 +67,60 @@ pub fn run(raw: Vec<String>) -> Result<(), Fail> {
         println!("fastdel {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    let preset = match a.value("--preset") {
+        Some(name) => {
+            let presets = preset::effective().map_err(|e| Fail(2, e))?;
+            let found = preset::find(&presets, name)
+                .map_err(|e| Fail(2, e))?
+                .clone();
+            Some(found)
+        }
+        None => None,
+    };
+    if a.flag("--print-presets") {
+        print_presets()?;
+        return Ok(());
+    }
     // Positional back-compat: <root> <min_age> [prefixes] [threads].
     let pos = a.positionals();
-    let age_pos = a.value("--age").is_none();
-    let skip = 1 + usize::from(age_pos);
     let Some(root) = pos.first() else {
         return Err("missing <root>".to_string().into());
     };
-    let age_s = match a.value("--age") {
-        Some(s) => s,
-        None => match pos.get(1) {
-            Some(s) => s.as_str(),
-            None => return Err("an age is required (positional or --age)".to_string().into()),
-        },
+    // The age may come from `--age`, from the legacy positional slot, or from a preset. A
+    // negative age means "no filter" and counts as given: it must not fall back to a preset.
+    let mut age_set = a.value("--age").is_some();
+    let mut min_age = match a.value("--age") {
+        Some(s) => cli::parse_age(s)?,
+        None => None,
     };
-    let min_age = cli::parse_age(age_s)?;
+    let mut skip = 1;
+    if !age_set {
+        if let Some(s) = pos.get(1) {
+            match cli::parse_age(s) {
+                Ok(v) => {
+                    min_age = v;
+                    age_set = true;
+                    skip = 2;
+                }
+                // With a preset, a non-age second word is a prefix instead.
+                Err(_) if preset.is_some() => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    if !age_set {
+        if let Some(p) = &preset {
+            min_age = p.age;
+            age_set = p.age.is_some();
+        }
+    }
+    if !age_set {
+        return Err(
+            "an age is required: --age, a positional age, or a preset that sets one"
+                .to_string()
+                .into(),
+        );
+    }
 
     let split = |s: &str| -> Vec<String> {
         s.split(',')
@@ -74,11 +131,17 @@ pub fn run(raw: Vec<String>) -> Result<(), Fail> {
     // Positional "" keeps its original meaning (no prefix filter) so
     // `fastdel <root> <age> "" <threads>` still works; an explicit but empty
     // --prefix is almost always an unset variable, so it is refused.
-    let mut prefixes: Vec<String> = pos.get(skip).map_or_else(Vec::new, |s| split(s));
+    let mut prefixes: Vec<String> = preset
+        .as_ref()
+        .map(|p| p.prefixes.clone())
+        .unwrap_or_default();
+    prefixes.extend(pos.get(skip).map_or_else(Vec::new, |s| split(s)));
     if let Some(s) = a.value("--prefix") {
         let p = split(s);
         if p.is_empty() {
-            return Err("--prefix is empty; omit it to match every entry".to_string().into());
+            return Err("--prefix is empty; omit it to match every entry"
+                .to_string()
+                .into());
         }
         prefixes.extend(p);
     }
@@ -93,7 +156,7 @@ pub fn run(raw: Vec<String>) -> Result<(), Fail> {
         Some(s) => s
             .parse()
             .map_err(|_| Fail(2, format!("invalid --limit {s:?}")))?,
-        None => 50,
+        None => preset.as_ref().and_then(|p| p.list_limit).unwrap_or(50),
     };
     if pos.len() > skip + 2 {
         return Err("too many positional arguments".to_string().into());
@@ -148,6 +211,26 @@ pub fn run(raw: Vec<String>) -> Result<(), Fail> {
     }
     if rep.candidates_failed > 0 {
         return Err(Fail(1, String::new()));
+    }
+    Ok(())
+}
+
+/// `--print-presets`: the effective set, one block per preset.
+fn print_presets() -> Result<(), Fail> {
+    let file = preset::config_path();
+    let presets: Vec<Preset> = preset::effective().map_err(|e| Fail(2, e))?;
+    println!("# {}", file.display());
+    for p in presets {
+        println!("[{}]", p.name);
+        if !p.prefixes.is_empty() {
+            println!("prefixes = {}", p.prefixes.join(", "));
+        }
+        if let Some(age) = p.age {
+            println!("age = {}", cli::format_age(age));
+        }
+        if let Some(n) = p.list_limit {
+            println!("list_limit = {n}");
+        }
     }
     Ok(())
 }

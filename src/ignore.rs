@@ -70,6 +70,12 @@ impl GlobFilter {
         self.include.is_empty() && self.exclude.is_empty()
     }
 
+    /// True when a positive pattern is present. Such a run ignores the ignore files entirely,
+    /// which is what ripgrep does: `-g '*.log'` searches files a `.gitignore` hides.
+    pub fn whitelists(&self) -> bool {
+        !self.include.is_empty()
+    }
+
     /// Strict match: does `rel` satisfy the filters as written?
     pub fn matches(&self, rel: &str, is_dir: bool) -> bool {
         for g in &self.exclude {
@@ -106,6 +112,11 @@ pub struct IgnoreRules {
 }
 
 impl IgnoreRules {
+    /// True when a positive `--glob` is set, which switches every ignore rule off.
+    pub fn whitelisted(&self) -> bool {
+        self.globs.whitelists()
+    }
+
     pub fn new(builtin: bool) -> Self {
         IgnoreRules {
             builtin,
@@ -160,7 +171,15 @@ impl IgnoreRules {
 
     /// Load the rule files of `dir` and push a layer for it. Returns a marker for
     /// [`IgnoreRules::pop_to`], or `None` when the directory has no rule files.
-    pub fn push_dir(&mut self, dir: &Path, rel: &str) -> Option<usize> {
+    /// The current layer depth, for [`pop_to`] when nothing is pushed.
+    pub fn mark(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Read the ignore files of `dir` and stack them. Returns the depth to restore with
+    /// [`pop_to`] afterwards, whether or not this directory contributed any rules.
+    pub fn push_dir(&mut self, dir: &Path, rel: &str) -> usize {
+        let mark = self.layers.len();
         let mut rules = Vec::new();
         for name in RULE_FILES {
             let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
@@ -172,18 +191,17 @@ impl IgnoreRules {
                 }
             }
         }
-        if rules.is_empty() {
-            return None;
+        if !rules.is_empty() {
+            self.layers.push(Layer {
+                base: rel.trim_end_matches('/').to_string(),
+                rules,
+            });
         }
-        self.layers.push(Layer {
-            base: rel.trim_end_matches('/').to_string(),
-            rules,
-        });
-        Some(self.layers.len() - 1)
+        mark
     }
 
-    pub fn pop_to(&mut self, mark: Option<usize>) {
-        self.layers.truncate(mark.unwrap_or(0));
+    pub fn pop_to(&mut self, mark: usize) {
+        self.layers.truncate(mark);
     }
 
     /// Apply the explicit `--glob` filters. `rel` is relative to the walk root.
@@ -259,17 +277,26 @@ mod tests {
         fs::write(base.join("sub/.gitignore"), "!*.log\nlocal.txt\n").unwrap();
         let mut r = IgnoreRules::new(false);
         let m = r.push_dir(&base, "");
-        assert!(m.is_some());
+        assert_eq!(m, 0, "the first layer stacks on an empty stack");
         assert!(r.is_ignored("a.log", false));
         assert!(!r.is_ignored("keep.log", false), "!keep.log re-includes");
-        assert!(r.is_ignored("build", true), "a `dir/` rule hides the directory");
-        assert!(r.is_ignored("build/x", false) || true, "children are pruned at the directory");
+        assert!(
+            r.is_ignored("build", true),
+            "a `dir/` rule hides the directory"
+        );
+        assert!(
+            r.is_ignored("build/x", false) || true,
+            "children are pruned at the directory"
+        );
         assert!(!r.is_ignored("src/a.rs", false));
         // The deeper file overrides: logs come back under sub/, local.txt goes away.
         let m2 = r.push_dir(&base.join("sub"), "sub");
         assert!(!r.is_ignored("sub/a.log", false), "deeper !*.log wins");
         assert!(r.is_ignored("sub/local.txt", false));
-        assert!(r.is_ignored("other/a.log", false), "deeper file does not leak sideways");
+        assert!(
+            r.is_ignored("other/a.log", false),
+            "deeper file does not leak sideways"
+        );
         r.pop_to(m2);
         assert!(r.is_ignored("sub/a.log", false));
         r.pop_to(m);
@@ -286,7 +313,10 @@ mod tests {
         assert!(!r.glob_allows("tests/a.rs", false));
         assert!(r.glob_allows("src", true), "directories stay walkable");
         assert!(r.glob_matches("src/main.rs", false));
-        assert!(!r.glob_matches("src", true), "strict match rejects the directory");
+        assert!(
+            !r.glob_matches("src", true),
+            "strict match rejects the directory"
+        );
         assert!(!r.glob_matches("src/main.py", false));
         let mut only_excluding = IgnoreRules::new(true);
         only_excluding.add_globs(&["!*.min.js".into()]).unwrap();
@@ -299,7 +329,11 @@ mod tests {
     fn missing_rule_files_are_fine() {
         let base = tmp("none");
         let mut r = IgnoreRules::new(true);
-        assert_eq!(r.push_dir(&base, ""), None);
+        assert_eq!(r.push_dir(&base, ""), 0);
+        assert!(
+            r.is_ignored("node_modules/x.js", true),
+            "an empty dir keeps outer rules"
+        );
         assert!(!r.is_ignored("a.txt", false));
         let _ = fs::remove_dir_all(&base);
     }

@@ -274,9 +274,7 @@ pub mod color {
 
 /// `2026-11-18 14:03:22` in UTC, or `-` when the time is unknown.
 pub fn fmt_time(t: Option<SystemTime>) -> String {
-    let Some(t) = t else {
-        return "-".to_string()
-    };
+    let Some(t) = t else { return "-".to_string() };
     let secs = t
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -301,7 +299,12 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-fn write_match_line(out: &mut dyn Write, text: &[u8], spans: &[(usize, usize)], color: bool) -> io::Result<()> {
+fn write_match_line(
+    out: &mut dyn Write,
+    text: &[u8],
+    spans: &[(usize, usize)],
+    color: bool,
+) -> io::Result<()> {
     if !color || spans.is_empty() {
         return out.write_all(text);
     }
@@ -320,7 +323,12 @@ fn write_match_line(out: &mut dyn Write, text: &[u8], spans: &[(usize, usize)], 
 }
 
 /// Text output for `dusage search`: `path:line:text`, `-o`, `-c`, `-l` and context groups.
-pub fn render_search(r: &SearchReport, o: &SearchOptions, color: bool, out: &mut dyn Write) -> io::Result<()> {
+pub fn render_search(
+    r: &SearchReport,
+    o: &SearchOptions,
+    color: bool,
+    out: &mut dyn Write,
+) -> io::Result<()> {
     // The CLI decides from the roots (several paths, or a directory walk); a bare
     // `dusage search needle file.txt` prints lines without a file name.
     let many = o.with_filename.unwrap_or(r.files.len() > 1);
@@ -378,7 +386,11 @@ pub fn render_search(r: &SearchReport, o: &SearchOptions, color: bool, out: &mut
 }
 
 /// One JSON document for `dusage search --json`, with the report's stats appended.
-pub fn render_search_json(r: &SearchReport, o: &SearchOptions, out: &mut dyn Write) -> io::Result<()> {
+pub fn render_search_json(
+    r: &SearchReport,
+    o: &SearchOptions,
+    out: &mut dyn Write,
+) -> io::Result<()> {
     let mut s = String::new();
     s.push_str("{\"files\":[");
     for (i, f) in r.files.iter().enumerate() {
@@ -397,7 +409,11 @@ pub fn render_search_json(r: &SearchReport, o: &SearchOptions, out: &mut dyn Wri
             if j > 0 {
                 s.push(',');
             }
-            let _ = write!(s, "{{\"line_number\":{},\"context\":{},", h.number, !h.matched);
+            let _ = write!(
+                s,
+                "{{\"line_number\":{},\"context\":{},",
+                h.number, !h.matched
+            );
             s.push_str("\"text\":");
             jstr(&String::from_utf8_lossy(&h.text), &mut s);
             s.push_str(",\"submatches\":[");
@@ -406,7 +422,10 @@ pub fn render_search_json(r: &SearchReport, o: &SearchOptions, out: &mut dyn Wri
                     s.push(',');
                 }
                 let _ = write!(s, "{{\"start\":{a},\"end\":{b},\"text\":");
-                jstr(&String::from_utf8_lossy(&h.text[a.min(h.text.len())..b.min(h.text.len())]), &mut s);
+                jstr(
+                    &String::from_utf8_lossy(&h.text[a.min(h.text.len())..b.min(h.text.len())]),
+                    &mut s,
+                );
                 s.push('}');
             }
             s.push_str("]}");
@@ -414,9 +433,9 @@ pub fn render_search_json(r: &SearchReport, o: &SearchOptions, out: &mut dyn Wri
         s.push_str("]}");
     }
     let st = &r.stats;
-    let _ = write!(
+    let _ = writeln!(
         s,
-        "],\"stats\":{{\"files_scanned\":{},\"files_matched\":{},\"files_binary\":{},\"bytes_scanned\":{},\"matches\":{},\"errors\":{},\"elapsed_secs\":{}}}}}\n",
+        "],\"stats\":{{\"files_scanned\":{},\"files_matched\":{},\"files_binary\":{},\"bytes_scanned\":{},\"matches\":{},\"errors\":{},\"elapsed_secs\":{}}}}}",
         st.files_scanned,
         st.files_matched,
         st.files_binary,
@@ -429,7 +448,12 @@ pub fn render_search_json(r: &SearchReport, o: &SearchOptions, out: &mut dyn Wri
 }
 
 /// Text output for `dusage find`: one path per line, or a long listing.
-pub fn render_paths(r: &SearchReport, long: bool, color: bool, out: &mut dyn Write) -> io::Result<()> {
+pub fn render_paths(
+    r: &SearchReport,
+    long: bool,
+    color: bool,
+    out: &mut dyn Write,
+) -> io::Result<()> {
     for c in &r.paths {
         if long {
             writeln!(
@@ -469,7 +493,7 @@ pub fn render_paths_json(r: &SearchReport, out: &mut dyn Write) -> io::Result<()
             fmt_time(c.modified)
         );
     }
-    let _ = write!(s, "],\"count\":{}}}\n", r.paths.len());
+    let _ = writeln!(s, "],\"count\":{}}}", r.paths.len());
     out.write_all(s.as_bytes())
 }
 
@@ -832,12 +856,16 @@ mod tests {
         assert_eq!(fmt_time(None), "-");
         assert_eq!(fmt_time(Some(UNIX_EPOCH)), "1970-01-01 00:00:00");
         assert_eq!(
-            fmt_time(Some(UNIX_EPOCH + std::time::Duration::from_secs(1_763_500_802))),
+            fmt_time(Some(
+                UNIX_EPOCH + std::time::Duration::from_secs(1_763_500_802)
+            )),
             "2025-11-18 21:20:02"
         );
         // 2000-02-29 handled by the civil algorithm.
         assert_eq!(
-            fmt_time(Some(UNIX_EPOCH + std::time::Duration::from_secs(951_782_400))),
+            fmt_time(Some(
+                UNIX_EPOCH + std::time::Duration::from_secs(951_782_400)
+            )),
             "2000-02-29 00:00:00"
         );
     }
@@ -855,13 +883,28 @@ mod tests {
             files: vec![FileHits {
                 path: "/data/a.txt".into(),
                 hits: vec![
-                    LineHit { number: 2, text: b"a needle".to_vec(), matched: true, spans: vec![(2, 8)] },
-                    LineHit { number: 5, text: b"another needle".to_vec(), matched: true, spans: vec![(8, 14)] },
+                    LineHit {
+                        number: 2,
+                        text: b"a needle".to_vec(),
+                        matched: true,
+                        spans: vec![(2, 8)],
+                    },
+                    LineHit {
+                        number: 5,
+                        text: b"another needle".to_vec(),
+                        matched: true,
+                        spans: vec![(8, 14)],
+                    },
                 ],
                 matches: 2,
                 binary: false,
             }],
-            stats: Stats { files_scanned: 3, files_matched: 1, matches: 2, ..Default::default() },
+            stats: Stats {
+                files_scanned: 3,
+                files_matched: 1,
+                matches: 2,
+                ..Default::default()
+            },
             any_match: true,
             ..Default::default()
         };
@@ -877,13 +920,22 @@ mod tests {
         render_search(&r, &o, false, &mut v).unwrap();
         let text = String::from_utf8(v).unwrap();
         assert!(text.contains("a.txt:2:a needle"), "{text}");
-        assert!(text.contains("--\n"), "non-contiguous groups are separated: {text}");
+        assert!(
+            text.contains("--\n"),
+            "non-contiguous groups are separated: {text}"
+        );
         let mut v = Vec::new();
         render_search_json(&r, &o, &mut v).unwrap();
         let json = String::from_utf8(v).unwrap();
-        assert!(json.starts_with("{\"files\":[{\"path\":\"/data/a.txt\""), "{json}");
+        assert!(
+            json.starts_with("{\"files\":[{\"path\":\"/data/a.txt\""),
+            "{json}"
+        );
         assert!(json.contains("\"line_number\":2"), "{json}");
-        assert!(json.contains("\"start\":2,\"end\":8,\"text\":\"needle\""), "{json}");
+        assert!(
+            json.contains("\"start\":2,\"end\":8,\"text\":\"needle\""),
+            "{json}"
+        );
         assert!(json.trim_end().ends_with('}'), "{json}");
         assert_eq!(json.matches("{\"path\"").count(), 1);
     }

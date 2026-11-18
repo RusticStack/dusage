@@ -250,9 +250,12 @@ pub fn at_word_boundary(hay: &[u8], start: usize, end: usize) -> bool {
     left && right
 }
 
+/// A byte that can be part of a word. Every byte of a multi-byte character counts, so a
+/// non-ASCII letter is a letter to `-w`: `-w caf` does not match inside `café`, matching what
+/// `rg` and a UTF-8 `grep` do.
 #[inline]
 pub fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+    b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
 }
 
 /// Number of non-overlapping occurrences of `needle` in `hay`; zero for an empty needle.
@@ -558,8 +561,9 @@ mod tests {
         assert!(!is_word_byte(b'-'));
         assert!(!is_word_byte(b' '));
         assert!(!is_word_byte(b'.'));
-        assert!(!is_word_byte(0x80));
-        assert!(!is_word_byte(0xC3));
+        assert!(is_word_byte(0x80), "non-ASCII bytes belong to words");
+        assert!(is_word_byte(0xC3));
+        assert!(!is_word_byte(b','));
     }
 
     #[test]

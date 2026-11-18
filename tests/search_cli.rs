@@ -22,9 +22,17 @@ impl Fixture {
             "fn main() {\n    let needle = 1;\n    println!(\"{needle}\");\n}\n",
         )
         .unwrap();
-        fs::write(root.join("src/deep/util.rs"), "pub fn helper() {}\n// no match here\n").unwrap();
+        fs::write(
+            root.join("src/deep/util.rs"),
+            "pub fn helper() {}\n// no match here\n",
+        )
+        .unwrap();
         fs::write(root.join("tests/it.rs"), "needle in a test\nneedle twice\n").unwrap();
-        fs::write(root.join("node_modules/pkg/index.js"), "needle in a dependency\n").unwrap();
+        fs::write(
+            root.join("node_modules/pkg/index.js"),
+            "needle in a dependency\n",
+        )
+        .unwrap();
         fs::write(root.join("README.md"), "# Title\n\nNeedle with capital N\n").unwrap();
         Fixture { root }
     }
@@ -94,7 +102,10 @@ fn flags_case_word_invert_count_list() {
     let o = run(&["search", "-c", "needle", "--no-ignore"], &f.root);
     assert_eq!(code(&o), 0);
     let out = stdout(&o);
-    assert!(out.lines().any(|l| l.ends_with(":2")), "counts per file: {out}");
+    assert!(
+        out.lines().any(|l| l.ends_with(":2")),
+        "counts per file: {out}"
+    );
     let o = run(&["search", "-l", "needle"], &f.root);
     assert_eq!(code(&o), 0);
     let out = stdout(&o);
@@ -111,7 +122,10 @@ fn only_matching_context_and_json() {
     let out = stdout(&o);
     assert_eq!(code(&o), 0);
     assert!(out.lines().all(|l| l.ends_with("needle")), "{out}");
-    let o = run(&["search", "-C", "1", "-n", "twice", "--no-ignore", "-H"], &f.root);
+    let o = run(
+        &["search", "-C", "1", "-n", "twice", "--no-ignore", "-H"],
+        &f.root,
+    );
     let out = stdout(&o);
     assert!(out.contains("-1-needle in a test"), "context: {out}");
     assert!(out.contains(":2:needle twice"), "{out}");
@@ -119,7 +133,10 @@ fn only_matching_context_and_json() {
     let out = stdout(&o);
     assert!(out.trim_start().starts_with("{\"files\":["), "{out}");
     assert!(out.contains("\"line_number\":2"), "{out}");
-    assert!(out.contains("\"submatches\":[{\"start\":8,\"end\":14"), "{out}");
+    assert!(
+        out.contains("\"submatches\":[{\"start\":8,\"end\":14"),
+        "{out}"
+    );
     assert!(out.trim_end().ends_with('}'));
 }
 
@@ -132,7 +149,17 @@ fn glob_and_type_filters() {
     assert_eq!(out.lines().count(), 2, "{out}");
     let o = run(&["search", "-t", "rust", "-l", "needle"], &f.root);
     assert_eq!(stdout(&o).lines().count(), 2);
-    let o = run(&["search", "--no-ignore", "-g", "!node_modules/**", "-l", "needle"], &f.root);
+    let o = run(
+        &[
+            "search",
+            "--no-ignore",
+            "-g",
+            "!node_modules/**",
+            "-l",
+            "needle",
+        ],
+        &f.root,
+    );
     assert!(!stdout(&o).contains("node_modules"));
     let o = run(&["search", "--no-ignore", "-l", "needle"], &f.root);
     assert!(stdout(&o).contains("node_modules"), "no-ignore reaches it");
@@ -175,7 +202,10 @@ fn find_by_glob_and_filters() {
     let o = run(&["find", "--long", "*.md"], &f.root);
     let out = stdout(&o);
     assert!(out.contains("README.md"), "{out}");
-    assert!(out.contains(':' ) && out.lines().count() == 1, "one long row: {out}");
+    assert!(
+        out.contains(':') && out.lines().count() == 1,
+        "one long row: {out}"
+    );
     let o = run(&["find", "--json", "*.toml"], &f.root);
     assert_eq!(code(&o), 1, "nothing matched");
     assert!(stdout(&o).contains("\"count\":0"));
@@ -216,7 +246,13 @@ fn help_lists_search_and_find() {
         .output()
         .unwrap();
     let h = stdout(&o);
-    for flag in ["--fixed-strings", "--invert-match", "--only-matching", "--context", "--glob"] {
+    for flag in [
+        "--fixed-strings",
+        "--invert-match",
+        "--only-matching",
+        "--context",
+        "--glob",
+    ] {
         assert!(h.contains(flag), "{flag} missing from search help");
     }
     let o = Command::new(env!("CARGO_BIN_EXE_dusage"))
@@ -224,4 +260,95 @@ fn help_lists_search_and_find() {
         .output()
         .unwrap();
     assert!(stdout(&o).contains("--long"));
+}
+
+fn run_env(args: &[&str], env: &[(&str, &Path)]) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_dusage"));
+    c.args(args);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.output().unwrap()
+}
+
+#[test]
+fn encoding_auto_and_forced() {
+    let f = Fixture::new("encoding");
+    let le: Vec<u8> = "needle in utf16\nsecond needle\n"
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
+    fs::write(f.root.join("wide.txt"), le).unwrap();
+    let latin1: Vec<u8> = b"needle caf\xe9\n".to_vec();
+    fs::write(f.root.join("latin.txt"), latin1).unwrap();
+
+    let o = run(&["search", "second", "--no-ignore"], &f.root);
+    assert!(stdout(&o).contains("wide.txt"), "auto: {}", stdout(&o));
+
+    let o = run(&["search", "--encoding", "latin1", "café"], &f.root);
+    assert!(
+        stdout(&o).contains("latin.txt:needle café"),
+        "{}",
+        stdout(&o)
+    );
+
+    let o = run(&["search", "--encoding", "klingon", "x"], &f.root);
+    assert_eq!(code(&o), 2, "an unknown encoding is misuse");
+}
+
+#[test]
+fn presets_print_and_select() {
+    let f = Fixture::new("preset");
+    let conf = f.root.join("presets.conf");
+    fs::write(
+        &conf,
+        "[mini]\nprefixes = node_modules\nage = 1w\nlist_limit = 5\n",
+    )
+    .unwrap();
+
+    let o = run_env(&["prune", "--print-presets"], &[("DUSAGE_CONFIG", &conf)]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    let out = stdout(&o);
+    assert!(out.contains("[mini]"), "{out}");
+    assert!(out.contains("age = 1w"), "{out}");
+    assert!(out.contains("[cargo]"), "builtins stay visible: {out}");
+
+    let o = run_env(
+        &[
+            "prune",
+            f.root.to_str().unwrap(),
+            "--preset",
+            "nope",
+            "--dry",
+        ],
+        &[("DUSAGE_CONFIG", &conf)],
+    );
+    assert_eq!(code(&o), 2, "an unknown preset is misuse");
+
+    let o = run_env(
+        &[
+            "prune",
+            f.root.to_str().unwrap(),
+            "--preset",
+            "mini",
+            "--dry",
+        ],
+        &[("DUSAGE_CONFIG", &conf)],
+    );
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(err.contains("candidates"), "{err}");
+}
+
+#[test]
+fn a_positive_glob_overrides_ignore_rules() {
+    let f = Fixture::new("globwin");
+    fs::write(f.root.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(f.root.join("debug.log"), "needle in a log\n").unwrap();
+
+    let o = run(&["search", "-l", "needle"], &f.root);
+    assert!(!stdout(&o).contains("debug.log"), "{}", stdout(&o));
+
+    let o = run(&["search", "-l", "-g", "*.log", "needle"], &f.root);
+    assert!(stdout(&o).contains("debug.log"), "{}", stdout(&o));
 }

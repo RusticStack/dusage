@@ -131,7 +131,14 @@ pub fn run(raw: Vec<String>, mode: Mode) -> Result<(), Fail> {
         ],
     )?;
     if a.flag("-h") || a.flag("--help") {
-        print!("{}", if mode == Mode::Big { BIG_HELP } else { SCAN_HELP });
+        print!(
+            "{}",
+            if mode == Mode::Big {
+                BIG_HELP
+            } else {
+                SCAN_HELP
+            }
+        );
         return Ok(());
     }
     if a.flag("-V") || a.flag("--version") {
@@ -222,4 +229,3 @@ fn ignore_broken_pipe(e: std::io::Error) -> std::io::Result<()> {
         Err(e)
     }
 }
-

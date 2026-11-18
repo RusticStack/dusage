@@ -50,13 +50,22 @@ impl Pattern {
             ..Default::default()
         };
         let re = Regex::new_with(text, flags)?;
-        // A literal whole pattern is the common "grep for a word" case: scan bytes.
-        if let Some(lit) = re.literal() {
+        // A literal whole pattern is the common "grep for a word" case: scan bytes. The
+        // literal fast path is disabled inside the regex when `-i` folds, so the checker
+        // parses the pattern once more without folding to see whether it is plain.
+        let plain = if ignore_case {
+            Regex::new_with(text, Flags::default())
+                .ok()
+                .and_then(|r| r.literal().map(<[u8]>::to_vec))
+        } else {
+            re.literal().map(<[u8]>::to_vec)
+        };
+        if let Some(lit) = plain {
             if !lit.is_empty() {
                 return Ok(Pattern {
                     kind: PatternKind::Literal,
                     source: text.to_string(),
-                    lit: lit.to_vec(),
+                    lit,
                     ci: ignore_case,
                     word,
                     re: None,
@@ -91,10 +100,7 @@ impl Pattern {
 
     /// True when the pattern is a plain literal and the whole line must equal it (`-x`).
     pub fn matches_line(&self, line: &[u8]) -> bool {
-        self.kind == PatternKind::Literal
-            && !self.ci
-            && !self.word
-            && self.lit.as_slice() == line
+        self.kind == PatternKind::Literal && !self.ci && !self.word && self.lit.as_slice() == line
     }
 
     /// The next acceptable match at or after `from`.
@@ -107,9 +113,7 @@ impl Pattern {
             PatternKind::Regex => {
                 // Cheap prefilter: a line without the required byte cannot match.
                 if let Some(b) = self.required {
-                    if bytes::find_byte(hay, b, from).is_none() {
-                        return None;
-                    }
+                    bytes::find_byte(hay, b, from)?;
                 }
                 let re = self.re.as_ref()?;
                 let mut at = from;
@@ -126,6 +130,13 @@ impl Pattern {
     }
 
     fn find_literal(&self, hay: &[u8], from: usize) -> Option<Match> {
+        // A non-ASCII needle under `-i` is folded per character, so `-i` matches `É` for `é`
+        // the way `rg` and `grep` do. Lines that are not valid UTF-8 keep the ASCII fold.
+        if self.ci && !self.lit.is_ascii() {
+            if let Some(m) = self.find_literal_unicode(hay, from) {
+                return Some(m);
+            }
+        }
         if !self.word && !self.ci {
             let i = bytes::memmem_from(hay, &self.lit, from)?;
             return Some(Match {
@@ -152,6 +163,30 @@ impl Pattern {
         None
     }
 
+    /// Unicode case folding for a literal needle: the line and the needle are lowered with
+    /// `char::to_lowercase`, and a byte map carries folded offsets back to the original line.
+    fn find_literal_unicode(&self, hay: &[u8], from: usize) -> Option<Match> {
+        let text = std::str::from_utf8(hay).ok()?;
+        let (folded, map) = fold_with_map(text);
+        let needle = self.source.to_lowercase();
+        let mut at = map.partition_point(|&off| off < from);
+        while at <= folded.len() {
+            let i = bytes::memmem_from(folded.as_bytes(), needle.as_bytes(), at)?;
+            let end_folded = i + needle.len();
+            let start = *map.get(i)?;
+            let end = map.get(end_folded).copied().unwrap_or(text.len());
+            let m = Match { start, end };
+            if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
+                return Some(m);
+            }
+            at = i + 1;
+            if at > folded.len() {
+                break;
+            }
+        }
+        None
+    }
+
     /// Does the line match? For `-v` the caller inverts the answer.
     pub fn is_match(&self, hay: &[u8]) -> bool {
         self.find_at(hay, 0).is_some()
@@ -162,7 +197,9 @@ impl Pattern {
         let mut out = Vec::new();
         let mut at = 0;
         while out.len() < limit {
-            let Some(m) = self.find_at(hay, at) else { break };
+            let Some(m) = self.find_at(hay, at) else {
+                break;
+            };
             let next = if m.end > m.start { m.end } else { m.start + 1 };
             out.push(m);
             if next > hay.len() {
@@ -174,6 +211,23 @@ impl Pattern {
     }
 }
 
+/// Lowercase `s` and return, for every byte of the folded form, the byte offset of the
+/// original character it came from. Folding can change lengths (`İ` lowers to two chars), so
+/// the map is what keeps spans pointing at the line the user sees.
+fn fold_with_map(s: &str) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(s.len());
+    let mut map = Vec::with_capacity(s.len());
+    for (idx, ch) in s.char_indices() {
+        for lower in ch.to_lowercase() {
+            out.push(lower);
+            for _ in 0..lower.len_utf8() {
+                map.push(idx);
+            }
+        }
+    }
+    (out, map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,16 +237,45 @@ mod tests {
     }
 
     #[test]
+    fn unicode_case_folding_for_literals() {
+        let ci = Pattern::new("café", false, true, false).unwrap();
+        assert!(ci.is_match("un CAFÉ noir".as_bytes()), "folds non-ASCII");
+        assert_eq!(
+            ci.find_at("un CAFÉ noir".as_bytes(), 0),
+            Some(Match { start: 3, end: 8 })
+        );
+        let word = Pattern::new("café", false, true, true).unwrap();
+        assert!(!word.is_match("xcafé".as_bytes()), "-w rejects a prefix");
+        assert!(word.is_match("le café.".as_bytes()));
+        let plain = Pattern::new("caf", false, false, true).unwrap();
+        assert!(
+            !plain.is_match("un café".as_bytes()),
+            "-w does not match inside a non-ASCII word"
+        );
+        let bad = Pattern::new("naïve", false, true, false).unwrap();
+        assert!(
+            !bad.is_match(b"na\xefve"),
+            "invalid UTF-8 falls back to bytes"
+        );
+    }
+
+    #[test]
     fn literal_patterns_use_the_fast_path() {
         let x = p("needle");
         assert_eq!(x.kind(), PatternKind::Literal);
         assert_eq!(x.fast_literal(), Some(&b"needle"[..]));
         assert!(x.is_match(b"a needle in a haystack"));
-        assert!(x.is_match(b"needles are sharp"), "a literal is a substring match");
+        assert!(
+            x.is_match(b"needles are sharp"),
+            "a literal is a substring match"
+        );
         let fixed = Pattern::new("a.c", true, false, false).unwrap();
         assert!(fixed.is_match(b"xa.cy"));
         assert!(!fixed.is_match(b"abc"), "-F is literal");
-        assert!(p("a.c").is_match(b"abc"), "without -F the dot is a wildcard");
+        assert!(
+            p("a.c").is_match(b"abc"),
+            "without -F the dot is a wildcard"
+        );
     }
 
     #[test]

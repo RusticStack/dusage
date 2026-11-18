@@ -6,6 +6,7 @@
 //! matching file contents, runs on all worker threads through [`par_for_each`].
 
 use crate::bytes;
+use crate::encodings::{self, Encoding};
 use crate::ignore::IgnoreRules;
 use crate::model::ErrorCounts;
 use crate::native::enumerate;
@@ -63,6 +64,8 @@ pub struct SearchOptions {
     pub text: bool,
     /// Print the largest-match number of bytes per line: `--max-columns`, 0 = unlimited.
     pub max_columns: usize,
+    /// Force a text encoding, or `None` to detect one per file.
+    pub encoding: Option<Encoding>,
 }
 
 impl SearchOptions {
@@ -91,6 +94,7 @@ impl SearchOptions {
             one_filesystem: false,
             text: false,
             max_columns: 0,
+            encoding: None,
         }
     }
 }
@@ -167,7 +171,7 @@ impl Walker<'_> {
     fn dir(&mut self, dir: &Path, rel: &str, depth: usize) {
         let rel = rel.trim_end_matches('/');
         let mark = if self.o.no_ignore {
-            None
+            self.rules.mark()
         } else {
             self.rules.push_dir(dir, rel)
         };
@@ -191,8 +195,14 @@ impl Walker<'_> {
                 self.stats.entries_ignored += 1;
                 continue;
             }
-            if self.rules.is_ignored(&child_rel, is_dir) || !self.rules.glob_allows(&child_rel, is_dir)
-            {
+            // A positive glob switches the ignore files off (`-g '*.log'` finds a file a
+            // `.gitignore` hides), exactly as ripgrep does; exclusions always apply.
+            let globs_win = self.rules.whitelisted() || self.o.no_ignore;
+            if !globs_win && self.rules.is_ignored(&child_rel, is_dir) {
+                self.stats.entries_ignored += 1;
+                continue;
+            }
+            if !self.rules.glob_allows(&child_rel, is_dir) {
                 self.stats.entries_ignored += 1;
                 continue;
             }
@@ -205,7 +215,8 @@ impl Walker<'_> {
                     }
                 }
                 if self.want_dirs {
-                    self.out.push(self.candidate(dir, &e.name, &child_rel, true, e.size, None));
+                    self.out
+                        .push(self.candidate(dir, &e.name, &child_rel, true, e.size, None));
                 }
                 if self.o.max_depth.is_none_or(|m| depth < m) {
                     self.dir(&dir.join(&e.name), &child_rel, depth + 1);
@@ -217,7 +228,8 @@ impl Walker<'_> {
                     }
                 }
                 let modified = Some(e.modified());
-                self.out.push(self.candidate(dir, &e.name, &child_rel, false, e.size, modified));
+                self.out
+                    .push(self.candidate(dir, &e.name, &child_rel, false, e.size, modified));
             }
         }
         self.rules.pop_to(mark);
@@ -353,7 +365,8 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
         report.stats.elapsed = t0.elapsed();
         return Ok(report);
     }
-    let slots: Mutex<(Vec<Option<FileHits>>, Stats)> = Mutex::new((vec![None; cands.len()], Stats::default()));
+    let slots: Mutex<(Vec<Option<FileHits>>, Stats)> =
+        Mutex::new((vec![None; cands.len()], Stats::default()));
     let items: Vec<(usize, PathBuf)> = cands
         .iter()
         .enumerate()
@@ -419,99 +432,157 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
 fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Option<FileHits>> {
     let mut f = File::open(path)?;
     let mut buf = vec![0u8; BLOCK];
-    let mut carry: Vec<u8> = Vec::new();
-    let mut history: VecDeque<(u64, Vec<u8>)> = VecDeque::new();
-    let mut hits: Vec<LineHit> = Vec::new();
-    let mut line_no = 0u64;
-    let mut matches = 0u64;
-    let mut remaining_after = 0usize;
-    let mut last_emitted = 0u64;
-    let mut binary: Option<bool> = None;
-    let mut first_block = true;
-    let want_lines = !o.count && !o.files_with_matches && !o.files_without_matches && !o.quiet;
-    let limit = o.max_count.unwrap_or(u64::MAX);
-
     stats.files_scanned += 1;
-    loop {
+    let n = f.read(&mut buf)?;
+    if n == 0 {
+        return finished(path, o, stats, Scanner::new(o), false);
+    }
+    // A file that needs transcoding is read whole: UTF-16 code units straddle the block
+    // boundary, so there is nothing to stream. Everything else keeps the streaming path.
+    let encoding = o.encoding.unwrap_or_else(|| encodings::detect(&buf[..n]));
+    if encodings::needs_transcode(encoding) {
+        let mut all = buf[..n].to_vec();
+        f.read_to_end(&mut all)?;
+        stats.bytes_scanned += all.len() as u64;
+        let text = encodings::to_utf8(&all, encoding);
+        let mut sc = Scanner::new(o);
+        sc.feed(&text);
+        return finished(path, o, stats, sc, false);
+    }
+    let mut sc = Scanner::new(o);
+    let binary = bytes::is_binary(&buf[..n], BINARY_SCAN.min(n));
+    if binary {
+        stats.files_binary += 1;
+    }
+    stats.bytes_scanned += n as u64;
+    sc.feed(&buf[..n]);
+    while !sc.done() {
         let n = f.read(&mut buf)?;
         if n == 0 {
             break;
         }
         stats.bytes_scanned += n as u64;
-        let chunk = &buf[..n];
-        if first_block {
-            binary = Some(bytes::is_binary(chunk, BINARY_SCAN.min(chunk.len())));
-            if binary == Some(true) {
-                stats.files_binary += 1;
-            }
-            first_block = false;
+        sc.feed(&buf[..n]);
+    }
+    finished(path, o, stats, sc, binary)
+}
+
+/// The per-file line state: carries the partial last line across blocks and accumulates hits.
+struct Scanner<'a> {
+    o: &'a SearchOptions,
+    carry: Vec<u8>,
+    history: VecDeque<(u64, Vec<u8>)>,
+    hits: Vec<LineHit>,
+    line_no: u64,
+    matches: u64,
+    remaining_after: usize,
+    last_emitted: u64,
+    want_lines: bool,
+    limit: u64,
+    stopped: bool,
+}
+
+impl<'a> Scanner<'a> {
+    fn new(o: &'a SearchOptions) -> Self {
+        Scanner {
+            o,
+            carry: Vec::new(),
+            history: VecDeque::new(),
+            hits: Vec::new(),
+            line_no: 0,
+            matches: 0,
+            remaining_after: 0,
+            last_emitted: 0,
+            want_lines: !o.count && !o.files_with_matches && !o.files_without_matches && !o.quiet,
+            limit: o.max_count.unwrap_or(u64::MAX),
+            stopped: false,
+        }
+    }
+
+    /// True once `--max-count` is reached: the file needs no more reading.
+    fn done(&self) -> bool {
+        self.stopped || self.matches >= self.limit
+    }
+
+    fn feed(&mut self, chunk: &[u8]) {
+        if self.stopped || self.matches >= self.limit {
+            return;
         }
         let mut start = 0;
         while let Some(pos) = bytes::find_byte(chunk, b'\n', start) {
-            let raw = &chunk[start..pos];
-            line_no += 1;
-            let line: &[u8] = if carry.is_empty() {
-                raw
+            let mut line: Vec<u8> = Vec::new();
+            let borrow = if self.carry.is_empty() {
+                &chunk[start..pos]
             } else {
-                carry.extend_from_slice(raw);
-                &carry
+                self.carry.extend_from_slice(&chunk[start..pos]);
+                &self.carry
             };
-            if handle_line(
-                line,
-                line_no,
-                o,
-                &mut history,
-                &mut hits,
-                &mut matches,
-                &mut remaining_after,
-                &mut last_emitted,
-                want_lines,
-                limit,
-            ) {
-                carry.clear();
-                break;
-            }
-            carry.clear();
+            line.extend_from_slice(borrow);
+            self.carry.clear();
             start = pos + 1;
-            if matches >= limit {
-                break;
+            self.line_no += 1;
+            if self.emit(&line) {
+                self.stopped = true;
+                return;
+            }
+            if self.matches >= self.limit {
+                return;
             }
         }
-        if matches >= limit {
-            break;
+        if start < chunk.len() {
+            self.carry.extend_from_slice(&chunk[start..]);
         }
-        carry.extend_from_slice(&chunk[start..]);
     }
-    if matches < limit && !carry.is_empty() {
-        line_no += 1;
-        let line = carry.clone();
+
+    /// Handle the trailing line of a file that does not end in a newline.
+    fn flush(&mut self) {
+        if self.done() || self.carry.is_empty() {
+            return;
+        }
+        let line = std::mem::take(&mut self.carry);
+        self.line_no += 1;
+        self.emit(&line);
+    }
+
+    fn emit(&mut self, line: &[u8]) -> bool {
         handle_line(
-            &line,
-            line_no,
-            o,
-            &mut history,
-            &mut hits,
-            &mut matches,
-            &mut remaining_after,
-            &mut last_emitted,
-            want_lines,
-            limit,
-        );
+            line,
+            self.line_no,
+            self.o,
+            &mut self.history,
+            &mut self.hits,
+            &mut self.matches,
+            &mut self.remaining_after,
+            &mut self.last_emitted,
+            self.want_lines,
+            self.limit,
+        )
     }
-    if matches == 0 {
+}
+
+/// Turn a finished scan into the report for one file.
+fn finished(
+    path: &Path,
+    o: &SearchOptions,
+    stats: &mut Stats,
+    mut sc: Scanner<'_>,
+    binary: bool,
+) -> io::Result<Option<FileHits>> {
+    sc.flush();
+    if sc.matches == 0 {
         return Ok(if o.files_without_matches {
             Some(FileHits {
                 path: path.to_string_lossy().into_owned(),
                 hits: Vec::new(),
                 matches: 0,
-                binary: binary.unwrap_or(false),
+                binary,
             })
         } else {
             None
         });
     }
-    stats.matches += matches;
-    for h in &mut hits {
+    stats.matches += sc.matches;
+    for h in &mut sc.hits {
         if o.max_columns > 0 && h.text.len() > o.max_columns {
             h.text.truncate(o.max_columns);
             h.spans.retain(|(s, _)| *s < o.max_columns);
@@ -524,9 +595,9 @@ fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Op
     }
     Ok(Some(FileHits {
         path: path.to_string_lossy().into_owned(),
-        hits,
-        matches,
-        binary: binary.unwrap_or(false),
+        hits: sc.hits,
+        matches: sc.matches,
+        binary,
     }))
 }
 
@@ -672,7 +743,10 @@ mod tests {
     fn opts(f: &Fixture, pat: &str) -> SearchOptions {
         SearchOptions {
             threads: 4,
-            ..SearchOptions::new(Pattern::new(pat, false, false, false).unwrap(), vec![f.0.clone()])
+            ..SearchOptions::new(
+                Pattern::new(pat, false, false, false).unwrap(),
+                vec![f.0.clone()],
+            )
         }
     }
 
@@ -704,7 +778,11 @@ mod tests {
         assert_eq!(got[1].1, 3);
         assert_eq!(r.stats.files_matched, 2);
         assert_eq!(r.stats.matches, 2, "matching lines, not occurrences");
-        assert_eq!(r.files[1].hits[0].spans.len(), 2, "two occurrences on one line");
+        assert_eq!(
+            r.files[1].hits[0].spans.len(),
+            2,
+            "two occurrences on one line"
+        );
         assert!(r.any_match);
     }
 
@@ -735,7 +813,11 @@ mod tests {
         o.before = 1;
         o.after = 2;
         let r = search(&o).unwrap();
-        let got: Vec<(u64, bool)> = r.files[0].hits.iter().map(|h| (h.number, h.matched)).collect();
+        let got: Vec<(u64, bool)> = r.files[0]
+            .hits
+            .iter()
+            .map(|h| (h.number, h.matched))
+            .collect();
         assert_eq!(got, [(3, false), (4, true), (5, false), (6, false)]);
     }
 
@@ -853,8 +935,14 @@ mod tests {
         o.scope = Scope::Paths;
         let r = search(&o).unwrap();
         let rels: Vec<&str> = r.paths.iter().map(|c| c.rel.as_str()).collect();
-        assert!(rels.contains(&"a.rs") && rels.contains(&"sub/b.rs"), "{rels:?}");
-        assert!(rels.contains(&"sub"), "directories are candidates too: {rels:?}");
+        assert!(
+            rels.contains(&"a.rs") && rels.contains(&"sub/b.rs"),
+            "{rels:?}"
+        );
+        assert!(
+            rels.contains(&"sub"),
+            "directories are candidates too: {rels:?}"
+        );
         assert!(!r.paths.is_empty());
     }
 

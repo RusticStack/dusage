@@ -559,7 +559,10 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn err_at(&self, msg: &str, at: usize) -> String {
-        format!("{msg} at offset {at} in pattern {:?}", String::from_utf8_lossy(self.src))
+        format!(
+            "{msg} at offset {at} in pattern {:?}",
+            String::from_utf8_lossy(self.src)
+        )
     }
 
     fn peek(&self) -> Option<u8> {
@@ -618,7 +621,10 @@ impl Parser<'_> {
             _ => return Ok(atom),
         };
         if matches!(atom, Node::Assert(_)) {
-            return Err(self.err_at("nothing to repeat: an assertion cannot be quantified", self.at));
+            return Err(self.err_at(
+                "nothing to repeat: an assertion cannot be quantified",
+                self.at,
+            ));
         }
         let lazy = if self.peek() == Some(b'?') {
             self.at += 1;
@@ -659,7 +665,11 @@ impl Parser<'_> {
                 }
             }
             if !digits.is_empty() {
-                max = Some(digits.parse().map_err(|_| self.err_at("bad repetition bound", save))?);
+                max = Some(
+                    digits
+                        .parse()
+                        .map_err(|_| self.err_at("bad repetition bound", save))?,
+                );
             }
         }
         if self.peek() != Some(b'}') {
@@ -667,7 +677,9 @@ impl Parser<'_> {
             return Ok(None);
         }
         self.at += 1;
-        let min: u32 = min.parse().map_err(|_| self.err_at("bad repetition bound", save))?;
+        let min: u32 = min
+            .parse()
+            .map_err(|_| self.err_at("bad repetition bound", save))?;
         if min > MAX_REPEAT || max.is_some_and(|m| m > MAX_REPEAT) {
             return Err(self.err_at("repetition bound above 1000", save));
         }
@@ -679,7 +691,9 @@ impl Parser<'_> {
 
     fn parse_atom(&mut self) -> Result<Node, String> {
         let start = self.at;
-        let c = self.peek().ok_or_else(|| self.err_at("unexpected end", self.at))?;
+        let c = self
+            .peek()
+            .ok_or_else(|| self.err_at("unexpected end", self.at))?;
         match c {
             b'(' => self.parse_group(),
             b'[' => self.parse_class(),
@@ -725,7 +739,10 @@ impl Parser<'_> {
                 // One UTF-8 character becomes the sequence of its bytes.
                 let s = std::str::from_utf8(&self.src[self.at..])
                     .map_err(|_| self.err_at("invalid UTF-8 in pattern", self.at))?;
-                let ch = s.chars().next().ok_or_else(|| self.err_at("unexpected end", self.at))?;
+                let ch = s
+                    .chars()
+                    .next()
+                    .ok_or_else(|| self.err_at("unexpected end", self.at))?;
                 let mut buf = [0u8; 4];
                 let bytes = ch.encode_utf8(&mut buf).as_bytes().to_vec();
                 self.at += bytes.len();
@@ -855,7 +872,9 @@ impl Parser<'_> {
     fn parse_escape(&mut self) -> Result<Node, String> {
         let start = self.at;
         self.at += 1;
-        let c = self.peek().ok_or_else(|| self.err_at("trailing backslash", start))?;
+        let c = self
+            .peek()
+            .ok_or_else(|| self.err_at("trailing backslash", start))?;
         let ci = self.flags.case_insensitive;
         let single = move |b: u8| {
             let mut s = ByteSet::empty();
@@ -892,9 +911,10 @@ impl Parser<'_> {
             }
             b'x' => {
                 self.at += 1;
-                let h = self.src.get(self.at..self.at + 2).ok_or_else(|| {
-                    self.err_at("\\x needs exactly two hex digits", start)
-                })?;
+                let h = self
+                    .src
+                    .get(self.at..self.at + 2)
+                    .ok_or_else(|| self.err_at("\\x needs exactly two hex digits", start))?;
                 let hex = std::str::from_utf8(h).map_err(|_| self.err_at("bad \\x", start))?;
                 let b = u8::from_str_radix(hex, 16)
                     .map_err(|_| self.err_at("\\x needs exactly two hex digits", start))?;
@@ -1024,10 +1044,9 @@ impl Parser<'_> {
                 }
             } else {
                 if self.peek() == Some(b'-') && self.src.get(self.at + 1) != Some(&b']') {
-                    return Err(self.err_at(
-                        "non-ASCII ranges in a class are not supported",
-                        self.at,
-                    ));
+                    return Err(
+                        self.err_at("non-ASCII ranges in a class are not supported", self.at)
+                    );
                 }
                 let mut buf = [0u8; 4];
                 seqs.push(ch.encode_utf8(&mut buf).as_bytes().to_vec());
@@ -1073,7 +1092,10 @@ impl Parser<'_> {
     fn next_char(&mut self) -> Result<char, String> {
         let s = std::str::from_utf8(&self.src[self.at..])
             .map_err(|_| self.err_at("invalid UTF-8 in pattern", self.at))?;
-        let ch = s.chars().next().ok_or_else(|| self.err_at("unexpected end", self.at))?;
+        let ch = s
+            .chars()
+            .next()
+            .ok_or_else(|| self.err_at("unexpected end", self.at))?;
         self.at += ch.len_utf8();
         Ok(ch)
     }
@@ -1081,7 +1103,9 @@ impl Parser<'_> {
     fn class_escape(&mut self) -> Result<(ClassItem, usize), String> {
         let start = self.at;
         self.at += 1;
-        let c = self.peek().ok_or_else(|| self.err_at("trailing backslash", start))?;
+        let c = self
+            .peek()
+            .ok_or_else(|| self.err_at("trailing backslash", start))?;
         let single = |b: u8| (ClassItem::Byte(b), start + 2);
         match c {
             b'n' => Ok(single(b'\n')),
@@ -1178,10 +1202,16 @@ mod tests {
         assert_eq!(m("a.c", "abc"), Some((0, 3)));
         assert_eq!(m("a.c", "a\nc"), None, "dot excludes newline");
         assert_eq!(
-            Regex::new_with("a.c", Flags { dot_matches_newline: true, ..Flags::default() })
-                .unwrap()
-                .find(b"a\nc")
-                .map(|m| (m.start, m.end)),
+            Regex::new_with(
+                "a.c",
+                Flags {
+                    dot_matches_newline: true,
+                    ..Flags::default()
+                }
+            )
+            .unwrap()
+            .find(b"a\nc")
+            .map(|m| (m.start, m.end)),
             Some((0, 3))
         );
         assert_eq!(m("", "abc"), Some((0, 0)), "empty pattern matches at 0");
@@ -1198,7 +1228,10 @@ mod tests {
         assert_eq!(m("^a{3}$", "aaa"), Some((0, 3)));
         assert_eq!(m("^a{4}$", "aaa"), None);
         assert_eq!(m("a{2,}", "aaaaa"), Some((0, 5)));
-        assert!(Regex::new("a{1001}").is_err(), "bound over 1000 is rejected");
+        assert!(
+            Regex::new("a{1001}").is_err(),
+            "bound over 1000 is rejected"
+        );
         assert!(Regex::new("a{3,2}").is_err());
     }
 
@@ -1254,7 +1287,14 @@ mod tests {
         assert_eq!(m("^", "abc"), Some((0, 0)));
         assert_eq!(m("$", "abc"), Some((3, 3)));
         // multi-line anchors
-        let re = Regex::new_with("^b", Flags { multi_line: true, ..Flags::default() }).unwrap();
+        let re = Regex::new_with(
+            "^b",
+            Flags {
+                multi_line: true,
+                ..Flags::default()
+            },
+        )
+        .unwrap();
         assert_eq!(re.find(b"a\nb\nc").map(|m| m.start), Some(2));
         let re = Regex::new_with("^b", Flags::default()).unwrap();
         assert!(re.find(b"a\nb\nc").is_none());
@@ -1262,13 +1302,28 @@ mod tests {
 
     #[test]
     fn case_insensitive() {
-        let re = Regex::new_with("needle", Flags { case_insensitive: true, ..Flags::default() })
-            .unwrap();
+        let re = Regex::new_with(
+            "needle",
+            Flags {
+                case_insensitive: true,
+                ..Flags::default()
+            },
+        )
+        .unwrap();
         assert!(re.is_match(b"a NEEDLE b"));
         assert!(re.is_match(b"Needle"));
-        assert!(re.literal().is_none(), "folding disables the literal fast path");
-        let re = Regex::new_with("[a-c]+", Flags { case_insensitive: true, ..Flags::default() })
-            .unwrap();
+        assert!(
+            re.literal().is_none(),
+            "folding disables the literal fast path"
+        );
+        let re = Regex::new_with(
+            "[a-c]+",
+            Flags {
+                case_insensitive: true,
+                ..Flags::default()
+            },
+        )
+        .unwrap();
         assert!(re.is_match(b"ABC"));
         assert!(Regex::new("(?i)abc").unwrap().is_match(b"ABC"));
         assert!(Regex::new("(?i)abc").is_ok());
@@ -1313,7 +1368,9 @@ mod tests {
 
     #[test]
     fn nothing_to_repeat_and_other_errors() {
-        for bad in ["*a", "+a", "?a", "(|", "a)", "a**", "^*", "$+", "{2}", "a{2,1}"] {
+        for bad in [
+            "*a", "+a", "?a", "(|", "a)", "a**", "^*", "$+", "{2}", "a{2,1}",
+        ] {
             assert!(Regex::new(bad).is_err(), "{bad:?} should not compile");
         }
         // Braces that are not a repetition are literal text, and `|` with empty sides
@@ -1325,7 +1382,10 @@ mod tests {
 
     #[test]
     fn required_byte_and_literal_hints() {
-        assert_eq!(Regex::new("needle").unwrap().literal(), Some(&b"needle"[..]));
+        assert_eq!(
+            Regex::new("needle").unwrap().literal(),
+            Some(&b"needle"[..])
+        );
         assert_eq!(Regex::new("nee+dle").unwrap().literal(), None);
         assert_eq!(Regex::new("abc|abd").unwrap().required_byte(), Some(b'a'));
         assert_eq!(Regex::new(r"\d+").unwrap().required_byte(), None);

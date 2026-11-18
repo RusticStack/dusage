@@ -2,6 +2,7 @@
 
 use super::Fail;
 use crate::cli::{self, parse_age, parse_size, Args};
+use crate::encodings::Encoding;
 use crate::glob::Glob;
 use crate::pattern::Pattern;
 use crate::report;
@@ -49,6 +50,7 @@ OPTIONS:
     --max-depth N          do not descend more than N levels below each root
     --max-filesize SIZE    skip files larger than SIZE (e.g. 10M)
     --max-columns N        truncate printed lines at N bytes
+    --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
     --hidden               also search hidden files and directories
     --no-ignore            do not skip .gitignore/.ignore rules or cache directories
     -x, --one-filesystem   stay on the starting filesystem
@@ -168,6 +170,7 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--max-depth",
     "--max-filesize",
     "--max-columns",
+    "--encoding",
 ];
 
 const SEARCH_BOOL_FLAGS: &[&str] = &[
@@ -209,10 +212,7 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--version",
 ];
 
-fn run_query(
-    mut raw: Vec<String>,
-    scope: Scope,
-) -> Result<(), Fail> {
+fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let color_mode = take_color_flag(&mut raw);
     let (value_flags, bool_flags): (&[&str], &[&str]) = if scope == Scope::Content {
         (SEARCH_VALUE_FLAGS, SEARCH_BOOL_FLAGS)
@@ -249,7 +249,14 @@ fn run_query(
     };
     let a = Args::parse(raw, value_flags, bool_flags)?;
     if a.flag("--help") {
-        println!("{}", if scope == Scope::Content { SEARCH_HELP } else { FIND_HELP });
+        println!(
+            "{}",
+            if scope == Scope::Content {
+                SEARCH_HELP
+            } else {
+                FIND_HELP
+            }
+        );
         return Ok(());
     }
     if a.flag("-V") || a.flag("--version") {
@@ -316,12 +323,6 @@ fn run_query(
         roots,
     );
     o.scope = scope;
-    if o.with_filename.is_none() {
-        let any_dir = o.roots.iter().any(|p| p.is_dir());
-        if any_dir || o.roots.len() > 1 {
-            o.with_filename = Some(true);
-        }
-    }
     o.globs = globs.clone();
     o.hidden = a.flag("--hidden");
     o.no_ignore = a.flag("--no-ignore");
@@ -350,9 +351,28 @@ fn run_query(
             o.quiet = a.flag("-q") || a.flag("--quiet");
             o.text = a.flag("-a") || a.flag("--text");
             o.max_columns = unsigned("--max-columns")?.unwrap_or(0);
+            if let Some(name) = a.value("--encoding") {
+                if !name.eq_ignore_ascii_case("auto") {
+                    let e = Encoding::from_name(name).ok_or_else(|| {
+                        Fail(
+                            2,
+                            format!(
+                                "unknown encoding {name:?} (auto, utf-8, utf-16le, utf-16be, latin1)"
+                            ),
+                        )
+                    })?;
+                    o.encoding = Some(e);
+                }
+            }
             let ctx = unsigned("-C")?.or(unsigned("--context")?);
-            o.before = unsigned("-B")?.or(unsigned("--before-context")?).or(ctx).unwrap_or(0);
-            o.after = unsigned("-A")?.or(unsigned("--after-context")?).or(ctx).unwrap_or(0);
+            o.before = unsigned("-B")?
+                .or(unsigned("--before-context")?)
+                .or(ctx)
+                .unwrap_or(0);
+            o.after = unsigned("-A")?
+                .or(unsigned("--after-context")?)
+                .or(ctx)
+                .unwrap_or(0);
             o.max_count = match a.value("-m").or(a.value("--max-count")) {
                 None => None,
                 Some(v) => Some(
@@ -404,12 +424,18 @@ fn run_query(
                     }
                 }
                 if let Some(d) = older {
-                    if !c.modified.is_some_and(|m| now.duration_since(m).unwrap_or_default() > d) {
+                    if !c
+                        .modified
+                        .is_some_and(|m| now.duration_since(m).unwrap_or_default() > d)
+                    {
                         return false;
                     }
                 }
                 if let Some(d) = newer {
-                    if !c.modified.is_some_and(|m| now.duration_since(m).unwrap_or_default() < d) {
+                    if !c
+                        .modified
+                        .is_some_and(|m| now.duration_since(m).unwrap_or_default() < d)
+                    {
                         return false;
                     }
                 }
@@ -422,7 +448,8 @@ fn run_query(
             } else {
                 report::render_paths(&r, long, color, &mut out)
             };
-            res.and_then(|()| out.flush()).map_err(|e| Fail(1, e.to_string()))?;
+            res.and_then(|()| out.flush())
+                .map_err(|e| Fail(1, e.to_string()))?;
             return if r.paths.is_empty() {
                 Err(Fail(1, String::new()))
             } else {
@@ -431,6 +458,11 @@ fn run_query(
         }
     };
 
+    // grep prints the file name whenever more than one file is in play, which a directory or
+    // a second root guarantees; `-h` and `-H` have already had their say above.
+    if o.with_filename.is_none() && (o.roots.iter().any(|p| p.is_dir()) || o.roots.len() > 1) {
+        o.with_filename = Some(true);
+    }
     let stats = a.flag("--stats");
     {
         let mut out = std::io::stdout().lock();
