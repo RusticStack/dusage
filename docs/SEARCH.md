@@ -35,7 +35,7 @@ combine. The option lists are `SEARCH_VALUE_FLAGS` / `SEARCH_BOOL_FLAGS`
 
 | Our flag | grep / rg / find equivalent | Notes |
 |---|---|---|
-| `<pattern>` positional, `-e`, `--regexp` | `grep PATTERN`, `rg PATTERN`, `rg -e` | One pattern only; `-e` exists so a pattern starting with `-` can be passed, it takes the next argument, and a second `-e` replaces the first (`src/cmd/search.rs:270-278`). There is no `grep -f PATTERN_FILE` / `rg -f`. |
+| `<pattern>` positional, `-e`, `--regexp` | `grep PATTERN`, `rg PATTERN`, `rg -e` | `-e` takes the next argument, so a pattern starting with `-` can be passed, and it **may repeat**: every pattern is an alternative (`src/cmd/search.rs`, `alternation`). There is no `grep -f PATTERN_FILE` / `rg -f`. |
 | `-F`, `--fixed-strings` | `grep -F` / `rg -F` | Forces literal matching. A regex the engine can prove is a literal already takes the byte fast path without `-F` (`src/pattern.rs:52-76`). |
 | `-i`, `--ignore-case` | `grep -i` / `rg -i` | Splits in two: a *literal* needle containing a non-ASCII byte is folded per character with `char::to_lowercase` on both sides (`src/pattern.rs:132-139`, `src/pattern.rs:168-189`); a *regex* folds only ASCII `A-Z`, via a per-byte-set fold that adds each letter's counterpart (`src/regex.rs:93-102`, applied at `src/regex.rs:766`). See §2.3. |
 | `-w`, `--word-regexp` | `grep -w` / `rg -w` | Boundaries are `[0-9A-Za-z_]` plus every byte `>= 0x80` (`src/bytes.rs:244-260`), so a non-ASCII letter counts as word text. A rejected match is retried one byte later (`src/pattern.rs:115-127`). |
@@ -45,7 +45,9 @@ combine. The option lists are `SEARCH_VALUE_FLAGS` / `SEARCH_BOOL_FLAGS`
 | `-h`, `--no-filename` | `grep -h` / `rg -h` | `-h` is *never* help here; `--help` is (`src/cmd/search.rs:61`). GNU grep makes the same choice; ripgrep does not — its `-h` prints help and its `--no-filename` short form is `-I` ([rg(1)](https://man.archlinux.org/man/rg.1.en), `-I, --no-filename`). |
 | `-l`, `--files-with-matches` | `grep -l` / `rg -l` | Prints paths only; the line data is dropped as the report is assembled (`src/search.rs:421-426`). |
 | `-L`, `--files-without-match` | `grep -L` / `rg --files-without-match` | **Not ripgrep's `-L`**: in rg, `-L` is `--follow` ([rg(1)](https://man.archlinux.org/man/rg.1.en), `-L, --follow`). We have no follow-symlink option at all. `exit 0` when at least one path is printed (`src/search.rs:424-426`). |
-| `-c`, `--count` | `grep -c` / `rg -c` | Counts *matching lines* per file. `rg --count-matches` (occurrences) has no equivalent; `--count-matches` is an unknown option and exits 2. Source: `src/report.rs:344-351`. |
+| `-c`, `--count` | `grep -c` / `rg -c` | Counts *matching lines* per file. |
+| `--count-matches` | `rg --count-matches` | Counts individual matches per file, so a line holding `needle needle` counts twice. Measured equal to `rg --count-matches` on the same input. Source: `src/report.rs`. |
+| `--files` | `rg --files` | With no pattern, lists the files a search would read: the same walk and the same ignore rules, printed root-relative like `dusage find`. `-t`/`-g`/`--hidden`/`--no-ignore` all apply. |
 | `-o`, `--only-matching` | `grep -o` / `rg -o` | One output line per match, capped at 1024 matches per input line (`src/search.rs:28`, `src/search.rs:668-694`). Measured: a 3000-byte line of `x` with pattern `x` prints 1024 lines. |
 | `-q`, `--quiet` | `grep -q` / `rg -q` | Prints nothing and stops at the first matching file. This path is sequential — it walks the candidate list in order (`src/search.rs:354-372`) — so it does not use the thread pool. |
 | `-m N`, `--max-count N` | `grep -m` / `rg -m` | Per file, in matching lines; the file stops being read once the limit is reached (`src/search.rs:509-537`). |
@@ -68,9 +70,9 @@ combine. The option lists are `SEARCH_VALUE_FLAGS` / `SEARCH_BOOL_FLAGS`
 | `--help` | — | Prints the help text. `-h` does not. |
 | `-V`, `--version` | — | Prints `dusage <version>`. |
 
-Not present on `search`, and rejected as unknown options: `--count-matches`,
-`--ext`, `--size`, `--older`, `--newer`, `--dirs`, `--files`, `--long` (find-side
-only, per the `run_query` flag lists at `src/cmd/search.rs:153-247`).
+Not present on `search`, and rejected as unknown options: `--ext`, `--size`,
+`--older`, `--newer`, `--dirs`, `--long` (find-side only, per the `run_query`
+flag lists in `src/cmd/search.rs`).
 
 ### 1.2 `dusage find`
 
@@ -123,17 +125,19 @@ partial stand-in in the parser.
 | `--sort SORTBY`, `--sortr` | `path`, `modified`, `accessed`, `created`; forces single-threaded traversal ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--sort=SORTBY`). | Output is always sorted by relative path (`src/search.rs:324`), so the default already equals `--sort path`; sorting by mtime or size is not available. |
 | `--no-require-git` | Respects `.gitignore` even outside a git repository ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--no-require-git`). | We always respect it — nothing in `src/ignore.rs` tests for a repository — which is exactly `--no-require-git` behaviour, on by default. `.git/info/exclude` is the one rule file that *is* gated on a `.git` directory (§3). |
 
-Also missing, and worth knowing: `--files`/`--type-list` (list instead of
-search), `--null-data`, `--count-matches`, `--crlf`, `--binary`, `--follow`/`-L`,
+Also missing, and worth knowing: `--type-list`, `--null-data`, `--crlf`,
+`--binary`, `--follow`/`-L`,
 `--max-columns-preview`, `--heading`, `--no-heading`, `--trim`,
 `--line-buffered`, `--block-buffered`, `-f/--file`, `--engine`, `--no-unicode`,
 `-u/--unrestricted` (the `-uu`/`-uuu` ladder has no equivalent; use
-`--no-ignore --hidden`), `-S/--smart-case`, `-s/--case-sensitive`, multiple
-patterns (a second `-e` replaces the first), and reading **stdin**: with no paths
-we always search `.` (`src/cmd/search.rs:280-286`), so `cat x | dusage search foo`
-searches the directory instead of the pipe. A `-` path is rejected as a
-nonexistent path with exit 2 (`src/cmd/search.rs:286-289`), and `/dev/stdin`
-fails the same way — measured: `dusage: 1 path(s) could not be read`.
+`--no-ignore --hidden`), and `-S/--smart-case` / `-s/--case-sensitive`.
+
+Two things that *are* supported and easy to miss. `-e` may repeat, and every
+pattern is an alternative; with `-F` each one is escaped before they are joined,
+so `-F -e 'a.b'` stays literal. And **stdin** is searched when it is piped with
+no paths, or when a `-` path names it, exactly as in grep and rg: a piped stdin
+replaces the default `.`, an explicit path still wins over the pipe, and `-H`
+labels the output `(standard input)`.
 
 ## 2. Regex dialect
 
@@ -615,10 +619,11 @@ MD5. `-q` bypasses the pool and scans sequentially so it can stop early
   gigabytes of resident memory, and the first line appears only when the last
   file is done. `-c`, `-l`, `-L` and `-q` avoid this by discarding line data
   (`want_lines`, `src/search.rs:501-511`).
-- **One pattern per walk.** There is no multi-pattern engine: a second `-e`
-  replaces the first (`src/cmd/search.rs:270-278`), so searching for five terms
-  means five walks over the same tree. The 1024-match cap bounds `-o` and
-  colouring output on minified files (`src/search.rs:28`).
+- **A repeated `-e` becomes one alternation.** The patterns are joined into a
+  single regex, escaped first under `-F`, so five terms cost one walk instead of
+  five — but a repeated `-e` also loses the literal fast path that a single plain
+  pattern gets. The 1024-match cap bounds `-o` and colouring output on minified
+  files.
 - **Unicode case folding for literals allocates.** A case-insensitive needle with
   a non-ASCII byte builds a folded copy of the whole line plus a byte map before
   scanning it (`src/pattern.rs:168-189`), once per line.
@@ -678,9 +683,9 @@ needing grep.
 gets the same results faster to type than `grep`, and its built-in cache list
 (`node_modules`, `target`, `.venv`) matches what most people reach for
 `--glob '!node_modules'` to do. It is not a drop-in for rg: no `-U`, `-z`,
-`--pre`, `-r`, `--passthru`, `-P`, `--iglob`, `--sort`, `--type-add`, no stdin,
-one pattern per run, and the `-L` letter means the opposite of follow. Repeated
-`-g` and `-t` do combine, so the common "several globs" habit carries over.
+`--pre`, `-r`, `--passthru`, `-P`, `--iglob`, `--sort`, `--type-add`, and the `-L`
+letter means the opposite of follow. Repeated `-g`, `-t` and `-e` do combine, and
+stdin works, so the common habits carry over.
 Case-insensitive search is the sharp edge: `-i` folds non-ASCII only for a
 literal needle, so `rg -i 'CAF[É]'` finds `café` and `dusage search -i 'CAF[É]'`
 does not — while a plain literal `dusage search -i café` does. Keep rg for anything involving

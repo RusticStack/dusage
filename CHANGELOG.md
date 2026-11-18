@@ -8,11 +8,17 @@ from outside the standard library.
 
 ### Added
 
+- **stdin**: `dusage search` reads a piped stdin when no paths are given, or `-` when it is
+  named, so `cat log | dusage search -n error` works like `grep`.
+
 - **`dusage search`** (`grep`, `rg`): matching lines from `<pattern> [paths...]`, with
   `-i -w -v -n -H -h -l -L -c -o -q -a -F -e -g -t -A -B -C -m -j --max-depth
-  --max-filesize --max-columns --encoding --hidden --no-ignore -x --json --color --stats`.
+  --max-filesize --max-columns --encoding --hidden --no-ignore -x --json --color --stats
+  --count-matches --files -Z`.
   Patterns are regular expressions or, with `-F`, plain text; a pattern that is plain text
-  either way takes a byte-scan fast path instead of the engine.
+  either way takes a byte-scan fast path instead of the engine. `-e` may repeat and every
+  pattern is an alternative; `--count-matches` counts occurrences rather than lines, and
+  `--files` lists what a search would read.
 - **`dusage find`** (`ls`): paths by gitignore-style glob or, with `-F`, a substring, with
   `-t --ext --size --older --newer --dirs --files --long --json` and the same walk filters.
 - **A regular expression engine of its own** (`regex.rs`): Thompson NFA run by a Pike VM, so
