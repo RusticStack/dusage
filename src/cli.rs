@@ -157,6 +157,19 @@ pub fn parse_age(s: &str) -> Result<Option<Duration>, String> {
     }
 }
 
+/// Format an age the way `parse_age` accepts it: the largest whole unit, then the rest.
+pub fn format_age(d: Duration) -> String {
+    let s = d.as_secs();
+    let (n, unit) = match s {
+        n if n % 604_800 == 0 && n > 0 => (n / 604_800, "w"),
+        n if n % 86_400 == 0 && n > 0 => (n / 86_400, "d"),
+        n if n % 3_600 == 0 && n > 0 => (n / 3_600, "h"),
+        n if n % 60 == 0 && n > 0 => (n / 60, "m"),
+        n => (n, "s"),
+    };
+    format!("{n}{unit}")
+}
+
 fn secs(v: f64, orig: &str) -> Result<Duration, String> {
     Duration::try_from_secs_f64(v).map_err(|_| format!("age too large: {orig:?}"))
 }
