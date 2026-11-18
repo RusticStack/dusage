@@ -1,6 +1,8 @@
 # Architecture and module contracts
 
-Windows-only, std-only (zero crates). All `unsafe`/FFI lives under `src/win/`.
+Windows and Linux, std-only (zero crates). All `unsafe`/FFI lives under `src/win/`
+or `src/unix/`; every module above them is safe Rust. `src/lib.rs` aliases the
+platform module as `crate::native`, so the engines name one surface on both systems.
 Research behind these choices: `docs/ROADMAP.md`.
 
 ```text
@@ -12,11 +14,16 @@ src/guard.rs          protected-root guard
 src/report.rs         text / JSON rendering of ScanResult
 src/scan.rs           scanner engine: readdir/batched/mft backends, watch
 src/prune.rs          pruning engine: plan + execute
-src/win/sys.rs        shared FFI decls + open()/wide_verbatim()/check() 
-src/win/enumerate.rs  batched directory enumeration, reparse-root check, file_id_of
+src/win/sys.rs        shared FFI decls + open()/wide_verbatim()/check()
+src/win/enumerate.rs  batched enumeration, readdir fallback, reparse/file_id/stream helpers
 src/win/delete.rs     handle-based delete, never follows reparse points
 src/win/usn.rs        USN journal + file-reference resolution
 src/win/mft.rs        raw MFT reader
+src/win/watch.rs      change feed for --watch (USN journal)
+src/unix/sys.rs       errno table + inotify/poll declarations
+src/unix/enumerate.rs readdir + statx enumeration, symlink and mount helpers
+src/unix/delete.rs    unlink/rmdir delete, never follows symlinks
+src/unix/watch.rs     change feed for --watch (inotify)
 src/bin/dusage.rs     thin CLI over scan + report
 src/bin/fastdel.rs    thin CLI over prune
 tests/                dusage_cli.rs, fastdel_cli.rs (run the built binaries)
@@ -25,8 +32,11 @@ tests/                dusage_cli.rs, fastdel_cli.rs (run the built binaries)
 ## Rules for every lane
 
 - Edit only the files your lane owns. Extra FFI decls/structs/constants go in
-  your own `win/*.rs` file, not `sys.rs`. If you truly need a change elsewhere,
-  report it instead of making it.
+  your own `win/*.rs` or `unix/*.rs` file, not `sys.rs`. If you truly need a
+  change elsewhere, report it instead of making it.
+- Platform differences belong in `crate::native` (the `win`/`unix` module), never
+  in `scan.rs`, `prune.rs` or `report.rs`; reaching for `#[cfg(target_os)]` there
+  is a design smell to raise, not to fix locally.
 - Every `unsafe` block gets a `// SAFETY:` comment. Struct layouts for FFI are
   `#[repr(C)]` and must match the Microsoft Learn definition; add a
   `size_of`/`offset_of!` test per struct against the documented layout.
@@ -78,8 +88,11 @@ A `--` ends flag parsing. Negative numbers like `-1` are positionals, not flags.
 
 ```rust
 pub fn is_protected_root(p: &Path) -> bool;
+pub const PROTECTED_SUMMARY: &str;   // the refusal message's "what" clause
 ```
-True for any volume root or share root in every spelling (`C:`, `C:\`, `\\?\C:\`,
+
+Two implementations behind one name. **Windows:** true for any volume root or share root in
+every spelling (`C:`, `C:\`, `\\?\C:\`,
 `\\server\share`, `\\?\UNC\server\share\`, `\\.\C:`), `%SystemRoot%`,
 `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%ProgramData%`, `%USERPROFILE%`, `C:\Users`,
 and any ancestor of them. Normalise via `std::path::absolute` + components
@@ -88,6 +101,15 @@ and any ancestor of them. Normalise via `std::path::absolute` + components
 dir is caught. fastdel refuses every protected root regardless of filters. Loopback UNC forms
 (`\\localhost\C$`, `127.0.0.1`, `[::1]`, `<COMPUTERNAME>`, `\\?\UNC\localhost`) map to
 the drive they name; other local `$` shares (`ADMIN$`, `IPC$`) are refused.
+
+**Linux:** normalise with `std::path::absolute` + components, then `fs::canonicalize` when the
+path exists, so a symlink to a system directory is caught. Protected when the candidate lies
+inside an immutable system tree (`/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`,
+`/sys`, `/dev`, `/run`), or is a data root (`/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME`)
+or an ancestor of one. `/` is always protected, and so is a path that cannot be normalised.
+Their children stay prunable (`/var/tmp`, `/opt/app/cache`), the way `C:\Windows\Temp` does on
+Windows. Mount points are deliberately not special-cased: a prune never descends into one, so
+only a path the user typed can be a mount.
 
 ### report (`src/report.rs`)
 
@@ -99,10 +121,61 @@ pub fn json_escape(s: &str, out: &mut String);
 ```
 The text format keeps the existing header/sections (TOTAL line, top entries,
 big files) and adds: on-disk column when `show_alloc`, a by-extension section,
-and a footer with skipped reparse points, hardlink dupes, stream bytes, and error
-counts by category. JSON is one object containing every `ScanResult` field. Use
+and a footer with skipped reparse points, skipped mount points (`--one-filesystem`), hardlink
+dupes, stream bytes, and error counts by category. Directory rows end with the platform's
+separator (`std::path::MAIN_SEPARATOR`). JSON is one object containing every `ScanResult` field. Use
 `elapsed_secs` as an f64 and `source` as a label. It must be valid JSON for any
 path (control chars, quotes, backslashes, non-BMP).
+
+### Platform layer (`src/win/*`, `src/unix/*`) — the `crate::native` surface
+
+Both platforms implement exactly this, and nothing above the platform layer knows which
+one is present:
+
+```rust
+pub struct Entry { /* platform fields */ }
+impl Entry {
+    pub fn is_dir(&self) -> bool;
+    pub fn is_reparse(&self) -> bool;               // Windows: any reparse point; Linux: symlink
+    pub fn modified(&self) -> std::time::SystemTime;
+}
+pub fn is_skipped(e: &Entry) -> bool;              // "count as a link, never follow"
+pub struct DirReader;
+impl DirReader {
+    pub fn new() -> Self;
+    /// Enumerate one directory, skipping "." and "..". Per-entry failures go into
+    /// `errs`; only an unreadable directory is returned as Err.
+    pub fn read(&mut self, dir: &Path, out: &mut Vec<Entry>, errs: &mut ErrorCounts)
+        -> std::io::Result<()>;
+}
+pub fn read_plain(dir: &Path, out: &mut Vec<Entry>, errs: &mut ErrorCounts) -> io::Result<()>;
+pub fn refuse_reparse_root(path: &Path) -> io::Result<()>;
+pub fn file_id_of(path: &Path) -> io::Result<u128>;
+pub fn named_stream_bytes(path: &Path) -> io::Result<u64>;   // Linux: always 0
+pub fn dev_of(path: &Path) -> io::Result<u64>;               // 0 on Windows
+pub fn other_filesystem(e: &Entry, root_dev: u64) -> bool;   // --one-filesystem boundary
+pub fn same_filesystem(e: &Entry, parent_dev: u64) -> bool;  // prune must not cross mounts
+pub fn is_unsupported(e: &io::Error) -> bool;                // backend fallback trigger
+pub fn is_denied(e: &io::Error) -> bool;
+
+pub mod delete { pub fn delete_entry(path: &Path) -> io::Result<()>;
+                 pub fn remove_tree(path: &Path) -> (u64, ErrorCounts); }
+
+pub mod watch {
+    pub fn resolve_root(root: &Path) -> PathBuf;   // canonicalise: feeds report real paths
+    pub struct ChangeSource;
+    impl ChangeSource {
+        pub fn open(root: &Path) -> Option<ChangeSource>;   // None => full rescans
+        /// Wait up to `interval` for changes; the affected entry paths.
+        pub fn poll(&mut self, interval: Duration) -> io::Result<Vec<PathBuf>>;
+    }
+}
+```
+
+`ChangeSource` is the NTFS USN journal on Windows (elevated; returns Err when the journal
+was truncated, which forces a full rescan) and inotify on Linux (an unprivileged watch tree
+with `IN_Q_OVERFLOW` mapped to Err). Both return paths, and `scan::top_for` decides which
+top-level entry each one belongs to.
 
 ### win::enumerate (`src/win/enumerate.rs`)
 
@@ -117,20 +190,12 @@ pub struct Entry {
     pub last_write: u64,           // FILETIME as 100ns ticks since 1601
     pub change_time: u64,
 }
-impl Entry {
-    pub fn is_dir(&self) -> bool;
-    pub fn is_reparse(&self) -> bool;               // any reparse point (dir or file)
-    pub fn modified(&self) -> std::time::SystemTime;
-}
 pub struct DirReader { /* owns a reusable 64 KiB buffer (Vec<u64> for alignment) */ }
 impl DirReader {
-    pub fn new() -> Self;
     pub fn with_buffer(bytes: usize) -> Self;
-    /// Enumerate one directory, skipping "." and "..". Opens with
-    /// FILE_LIST_DIRECTORY|SYNCHRONIZE, BACKUP_SEMANTICS|OPEN_REPARSE_POINT.
+    /// Opens with FILE_LIST_DIRECTORY|SYNCHRONIZE, BACKUP_SEMANTICS|OPEN_REPARSE_POINT.
     /// Uses FileIdExtdDirectoryInfo; on ERROR_INVALID_PARAMETER/INVALID_LEVEL/NOT_SUPPORTED
     /// falls back to FileIdBothDirectoryInfo (64-bit id) for this and later calls.
-    pub fn read(&mut self, dir: &std::path::Path, out: &mut Vec<Entry>) -> std::io::Result<()>;
 }
 pub fn volume_serial(path: &std::path::Path) -> std::io::Result<u64>;
 /// Sum of named ($DATA other than the unnamed one) alternate stream sizes.
@@ -140,6 +205,18 @@ pub fn cluster_size(path: &std::path::Path) -> std::io::Result<u64>;        // G
 pub fn refuse_reparse_root(path: &std::path::Path) -> std::io::Result<()>;
 pub fn file_id_of(path: &std::path::Path) -> std::io::Result<u128>;
 ```
+
+### unix::enumerate (`src/unix/enumerate.rs`)
+
+`Entry` carries `name`, `is_dir`, `is_link`, `size`, `alloc` (`st_blocks * 512`),
+`file_id` (`dev << 64 | ino`) and `dev`. Enumeration is `std::fs::read_dir` plus one
+`lstat` per entry (`DirEntry::metadata` never follows a symlink), which is why the Linux
+`batched` backend is "one stat per entry" rather than "many entries per syscall".
+`read_plain` leaves `alloc`, `file_id` and `dev` zero, matching the `readdir` backend's
+"size on disk unknown" contract. `refuse_reparse_root` refuses a symlink root;
+`file_id_of` is the inode identity that makes `--dedup-hardlinks` correct; `dev_of` and
+`other_filesystem` implement `--one-filesystem`; `same_filesystem` stops a prune at a
+mount point.
 Bounds-check every `NextEntryOffset`/`FileNameLength` (bytes) against the
 returned buffer. The tests must compare against `std::fs::read_dir` on a fixture
 for names, sizes and dir flags, and confirm that a junction shows `is_reparse()`.
@@ -221,7 +298,8 @@ Implemented as designed after wave 1. Signatures as built:
 // scan.rs
 pub enum Backend { Auto /*default*/, ReadDir, Batched, Mft }
 pub struct ScanOptions { pub root: PathBuf, pub threads: usize, pub min_big: u64, pub top_n: usize,
-                         pub backend: Backend, pub dedup_hardlinks: bool, pub streams: bool, pub by_ext: bool }
+                         pub backend: Backend, pub dedup_hardlinks: bool, pub streams: bool,
+                         pub by_ext: bool, pub one_filesystem: bool }
 impl ScanOptions { pub fn new(root: impl Into<PathBuf>) -> Self; }  // defaults: 4x cores, 1 GiB, top 60, Auto
 pub fn scan(o: &ScanOptions) -> io::Result<ScanResult>;
 pub fn watch(o: &ScanOptions, interval: Duration,
@@ -238,7 +316,9 @@ pub fn execute(o: &PruneOptions, cands: Vec<Candidate>, progress: &dyn Fn(u64, u
 ```
 
 `scan` errors only when the root itself is missing, unreadable, not a directory or a reparse
-point; everything below is counted in `ScanResult::errors`. `plan` refuses protected roots and
+point; everything below is counted in `ScanResult::errors`. `Backend::Mft` is refused with an
+explanation on Linux. With `one_filesystem`, a directory on another device is counted in
+`ScanResult::skipped_mounts` instead of being scanned. `plan` refuses protected roots and
 non-directory or reparse roots (`InvalidInput`); `execute` never errors (failures are in the report).
 `watch` calls `on_update` with the initial scan and then after each rescan that changed something;
 returning false stops it.

@@ -6,21 +6,24 @@
 
 use crate::cli::default_threads;
 use crate::model::{BigFile, ErrorCounts, ScanResult, Source, TopEntry, Totals};
+use crate::native::enumerate::{self, DirReader, Entry};
+use crate::native::watch::ChangeSource;
 use crate::queue::par_for_each;
-use crate::win::enumerate::{self, DirReader, Entry};
-use crate::win::{mft, sys, usn};
+#[cfg(windows)]
+use crate::win::mft;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::os::windows::fs::MetadataExt;
-use std::path::{Component, Path, PathBuf, Prefix};
+#[cfg(windows)]
+use std::path::Prefix;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use std::{fs, io, thread};
+use std::{fs, io};
 
-/// Reparse tags with this bit are name surrogates (symlinks, mount points).
-const NAME_SURROGATE: u32 = 0x2000_0000;
+#[cfg(windows)]
 const MFT_INDEX_MASK: u64 = 0xFFFF_FFFF_FFFF;
+#[cfg(windows)]
 const MFT_ROOT_RECORD: u64 = 5;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -45,9 +48,11 @@ pub struct ScanOptions {
     /// Count each file id once (Batched only). A link whose other name lies outside
     /// the root is still counted once.
     pub dedup_hardlinks: bool,
-    /// Sum named alternate data streams into `stream_bytes` (slow; one open per file).
+    /// Sum named alternate data streams into `stream_bytes` (NTFS only).
     pub streams: bool,
     pub by_ext: bool,
+    /// Do not descend into a directory on another filesystem (a mount point).
+    pub one_filesystem: bool,
 }
 
 impl ScanOptions {
@@ -61,6 +66,7 @@ impl ScanOptions {
             dedup_hardlinks: false,
             streams: false,
             by_ext: false,
+            one_filesystem: false,
         }
     }
 }
@@ -74,6 +80,7 @@ struct TopData {
     big: Vec<BigFile>,
     ext: HashMap<String, Totals>,
     skipped: u64,
+    mounts: u64,
     errors: ErrorCounts,
     dupes: u64,
     dupe_bytes: u64,
@@ -96,6 +103,7 @@ impl TopData {
             self.ext.entry(k).or_default().add(&v);
         }
         self.skipped += o.skipped;
+        self.mounts += o.mounts;
         self.errors.add(&o.errors);
         self.dupes += o.dupes;
         self.dupe_bytes += o.dupe_bytes;
@@ -196,39 +204,13 @@ fn list_dir(
     errs: &mut ErrorCounts,
 ) -> io::Result<()> {
     match src {
-        Source::Batched => READER.with(|r| r.borrow_mut().read(dir, out)),
-        _ => read_std(dir, out, errs),
+        Source::Batched => READER.with(|r| r.borrow_mut().read(dir, out, errs)),
+        _ => enumerate::read_plain(dir, out, errs),
     }
 }
 
-/// `std::fs::read_dir` flavour of a listing: no allocation sizes or file ids.
-fn read_std(dir: &Path, out: &mut Vec<Entry>, errs: &mut ErrorCounts) -> io::Result<()> {
-    for e in fs::read_dir(dir)? {
-        let md = match e.and_then(|e| e.metadata().map(|m| (e, m))) {
-            Ok(x) => x,
-            Err(err) => {
-                errs.record(&err);
-                continue;
-            }
-        };
-        let (e, md) = md;
-        let attributes = md.file_attributes();
-        let symlink = e.file_type().is_ok_and(|t| t.is_symlink());
-        out.push(Entry {
-            name: e.file_name(),
-            attributes,
-            reparse_tag: if symlink { NAME_SURROGATE } else { 0 },
-            size: md.len(),
-            alloc: 0,
-            file_id: 0,
-            last_write: 0,
-            change_time: 0,
-        });
-    }
-    Ok(())
-}
-
-/// Classify one listed entry: a directory to descend into, a file to count, or skipped.
+/// Classify one listed entry: a directory to descend into, a file to count, or a link
+/// that is never followed.
 enum Kind {
     Dir,
     File,
@@ -236,14 +218,10 @@ enum Kind {
 }
 
 fn kind_of(e: &Entry) -> Kind {
-    if e.is_dir() {
-        if e.is_reparse() {
-            Kind::Reparse
-        } else {
-            Kind::Dir
-        }
-    } else if e.is_reparse() && e.reparse_tag & NAME_SURROGATE != 0 {
+    if enumerate::is_skipped(e) {
         Kind::Reparse
+    } else if e.is_dir() {
+        Kind::Dir
     } else {
         Kind::File
     }
@@ -275,7 +253,16 @@ struct Ctx<'a> {
     o: &'a ScanOptions,
     src: Source,
     dedup: Option<Dedup>,
+    /// Device of the scan root, when `--one-filesystem` restricts the walk.
+    root_dev: Option<u64>,
     agg: Mutex<Vec<TopData>>,
+}
+
+/// The device to stay on for `--one-filesystem`, or `None` when mounts are followed.
+fn root_dev(o: &ScanOptions) -> Option<u64> {
+    o.one_filesystem
+        .then(|| enumerate::dev_of(&o.root).ok())
+        .flatten()
 }
 
 fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
@@ -287,6 +274,12 @@ fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
     }
     for e in &ents {
         match kind_of(e) {
+            Kind::Dir
+                if c.root_dev
+                    .is_some_and(|d| enumerate::other_filesystem(e, d)) =>
+            {
+                local.mounts += 1;
+            }
             Kind::Dir => push(Work {
                 path: w.path.join(&e.name),
                 top: w.top,
@@ -326,10 +319,7 @@ fn seed(
     let mut misc = TopData::default();
     let mut ents = Vec::new();
     if let Err(e) = list_dir(src, &o.root, &mut ents, &mut misc.errors) {
-        let unsupported = matches!(
-            e.raw_os_error(),
-            Some(sys::ERROR_INVALID_PARAMETER | sys::ERROR_NOT_SUPPORTED)
-        );
+        let unsupported = enumerate::is_unsupported(&e);
         if o.backend != Backend::Auto || !unsupported {
             return Err(e);
         }
@@ -337,6 +327,7 @@ fn seed(
         ents.clear();
         list_dir(src, &o.root, &mut ents, &mut misc.errors)?;
     }
+    let dev = root_dev(o);
     let mut tops = vec![misc];
     let mut work = Vec::new();
     let mut listed = HashSet::new();
@@ -347,6 +338,10 @@ fn seed(
         let is_dir = matches!(kind, Kind::Dir);
         if matches!(kind, Kind::Reparse) {
             tops[0].skipped += 1;
+            continue;
+        }
+        if is_dir && dev.is_some_and(|d| enumerate::other_filesystem(e, d)) {
+            tops[0].mounts += 1;
             continue;
         }
         if is_dir && only.is_some_and(|s| !s.contains(&k)) {
@@ -381,6 +376,7 @@ fn run(o: &ScanOptions, only: Option<&HashSet<String>>) -> io::Result<Scanned> {
         o,
         src: s.src,
         dedup,
+        root_dev: root_dev(o),
         agg: Mutex::new(s.tops),
     };
     par_for_each(work, o.threads, |w, push| walk(&ctx, w, push));
@@ -395,6 +391,7 @@ fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.into())
 }
 
+#[cfg(windows)]
 fn run_mft(o: &ScanOptions) -> io::Result<Scanned> {
     let abs = std::path::absolute(&o.root)?;
     let letter = match abs.components().next() {
@@ -411,7 +408,7 @@ fn run_mft(o: &ScanOptions) -> io::Result<Scanned> {
     };
     let mut ents: Vec<mft::MftEntry> = Vec::new();
     mft::scan_volume(letter, &mut |e| ents.push(e)).map_err(|e| {
-        if denied(&e) {
+        if enumerate::is_denied(&e) {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "--backend mft needs an elevated (admin) shell",
@@ -512,9 +509,12 @@ fn run_mft(o: &ScanOptions) -> io::Result<Scanned> {
     })
 }
 
-fn denied(e: &io::Error) -> bool {
-    e.raw_os_error() == Some(sys::ERROR_ACCESS_DENIED)
-        || e.kind() == io::ErrorKind::PermissionDenied
+#[cfg(not(windows))]
+fn run_mft(_o: &ScanOptions) -> io::Result<Scanned> {
+    Err(invalid(
+        "--backend mft reads the NTFS master file table and needs Windows; \
+         use --backend auto or batched on this platform",
+    ))
 }
 
 fn assemble(o: &ScanOptions, tops: &[TopData], src: Source, elapsed: Duration) -> ScanResult {
@@ -540,6 +540,7 @@ fn assemble(o: &ScanOptions, tops: &[TopData], src: Source, elapsed: Duration) -
             ext.entry(k).or_default().add(v);
         }
         r.skipped_reparse += t.skipped;
+        r.skipped_mounts += t.mounts;
         r.errors.add(&t.errors);
         r.hardlink_dupes += t.dupes;
         r.hardlink_dupe_bytes += t.dupe_bytes;
@@ -566,67 +567,63 @@ pub fn scan(o: &ScanOptions) -> io::Result<ScanResult> {
     Ok(assemble(o, &s.tops, s.src, t0.elapsed()))
 }
 
-/// Normalised comparison form of a path: no verbatim prefix, `\` separators, no
-/// trailing separator.
-fn norm(p: &Path) -> String {
-    let s = p.to_string_lossy().replace('/', "\\");
-    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-    s.trim_end_matches('\\').to_string()
+/// Comparable form of one path component: verbatim and plain drive/UNC prefixes map
+/// to the same key, and components compare case-insensitively on Windows.
+fn comp_key(c: Component<'_>) -> String {
+    match c {
+        #[cfg(windows)]
+        Component::Prefix(p) => {
+            use std::path::Prefix;
+            let lower = |s: &OsStr| s.to_string_lossy().to_ascii_lowercase();
+            match p.kind() {
+                Prefix::Disk(d) | Prefix::VerbatimDisk(d) => {
+                    format!("{}:", (d as char).to_ascii_lowercase())
+                }
+                Prefix::UNC(s, sh) | Prefix::VerbatimUNC(s, sh) => {
+                    format!("\\\\{}\\{}", lower(s), lower(sh))
+                }
+                Prefix::Verbatim(s) | Prefix::DeviceNS(s) => lower(s),
+            }
+        }
+        #[cfg(not(windows))]
+        Component::Prefix(_) => String::new(),
+        Component::RootDir => "/".to_string(),
+        Component::CurDir => String::new(),
+        Component::ParentDir => "..".to_string(),
+        Component::Normal(s) => {
+            #[cfg(windows)]
+            {
+                s.to_string_lossy().to_ascii_lowercase()
+            }
+            #[cfg(not(windows))]
+            {
+                s.to_string_lossy().into_owned()
+            }
+        }
+    }
+}
+
+fn comps(p: &Path) -> Vec<Component<'_>> {
+    p.components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect()
 }
 
 /// Which top-level entry of `root` does a change to `name` inside directory
 /// `parent` affect? `None` when it lies outside `root` or is `root`'s own parent chain.
 fn top_for(root: &Path, parent: &Path, name: &OsStr) -> Option<String> {
-    let (r, p) = (norm(root), norm(parent));
-    if p.eq_ignore_ascii_case(&r) {
-        return Some(name.to_string_lossy().into_owned());
-    }
-    let head = p.get(..r.len())?;
-    if !head.eq_ignore_ascii_case(&r) || p.as_bytes().get(r.len()) != Some(&b'\\') {
+    let r = comps(root);
+    let p = comps(parent);
+    if p.len() < r.len() || r.iter().zip(&p).any(|(a, b)| comp_key(*a) != comp_key(*b)) {
         return None;
     }
-    p[r.len() + 1..].split('\\').next().map(str::to_string)
-}
-
-struct Journal {
-    vol: usn::Volume,
-    id: u64,
-    next: i64,
-}
-
-impl Journal {
-    fn open(root: &Path) -> Option<Journal> {
-        let vol = usn::Volume::for_path(root).ok()?;
-        let info = vol.query().ok()?;
-        Some(Journal {
-            vol,
-            id: info.journal_id,
-            next: info.next_usn,
-        })
+    if p.len() == r.len() {
+        return Some(name.to_string_lossy().into_owned());
     }
-
-    /// Top-level entries (lowercase key -> display name) touched since the last poll.
-    fn poll(&mut self, root: &Path) -> io::Result<HashMap<String, String>> {
-        let (recs, next) = self.vol.read(self.id, self.next)?;
-        let mut paths: HashMap<u128, Option<PathBuf>> = HashMap::new();
-        let mut out = HashMap::new();
-        for r in recs {
-            let p = paths
-                .entry(r.parent_ref)
-                .or_insert_with(|| self.vol.path_of(r.parent_ref).ok());
-            if let Some(t) = p.as_deref().and_then(|p| top_for(root, p, &r.name)) {
-                out.insert(t.to_lowercase(), t);
-            }
-        }
-        self.next = next;
-        Ok(out)
+    match p[r.len()] {
+        Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+        _ => None,
     }
-}
-
-/// The root as the USN journal reports it: links, junctions and `subst` drives resolved,
-/// since journal paths come from `GetFinalPathNameByHandle`.
-fn journal_root(root: &Path) -> PathBuf {
-    fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// Hardlink dedup state is per `run`, so a partial rescan would count a link whose other name
@@ -642,18 +639,31 @@ fn rescan_scope(
     }
 }
 
+/// The top-level entries (lowercase key -> display name) touched by `changed` paths.
+fn changed_tops(root: &Path, changed: &[PathBuf]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for p in changed {
+        let Some(name) = p.file_name() else { continue };
+        let Some(parent) = p.parent() else { continue };
+        if let Some(t) = top_for(root, parent, name) {
+            out.insert(t.to_lowercase(), t);
+        }
+    }
+    out
+}
+
 /// Scan, then rescan every `interval`, reporting through `on_update` (return false
-/// to stop). With an admin shell the USN journal says which top-level entries
-/// changed and only those are rescanned; otherwise every tick is a full rescan.
-/// Read-only: the journal is only queried and read.
+/// to stop). The platform change feed (the NTFS USN journal on Windows, inotify on
+/// Linux) says which top-level entries changed and only those are rescanned; when it
+/// is unavailable every tick is a full rescan. Read-only: the feed is only read.
 pub fn watch(
     o: &ScanOptions,
     interval: Duration,
     on_update: &mut dyn FnMut(&ScanResult, &str) -> bool,
 ) -> io::Result<()> {
-    let root = journal_root(&std::path::absolute(&o.root)?);
-    // Open the journal before scanning so changes made during the scan are not lost.
-    let mut journal = Journal::open(&root);
+    let root = crate::native::watch::resolve_root(&std::path::absolute(&o.root)?);
+    // Open the change feed before scanning so changes made during the scan are not lost.
+    let mut changes = ChangeSource::open(&root);
     let t0 = Instant::now();
     let first = run(o, None)?;
     let mut o2 = o.clone();
@@ -668,27 +678,29 @@ pub fn watch(
         return Ok(());
     }
     loop {
-        thread::sleep(interval);
-        let (only, what) = match journal.as_mut().map(|j| j.poll(&root)) {
-            Some(Ok(set)) if set.is_empty() => continue,
-            Some(Ok(set)) => {
+        let (only, what) = match changes.as_mut().map(|c| c.poll(interval)) {
+            Some(Ok(changed)) if changed.is_empty() => continue,
+            Some(Ok(changed)) => {
+                let set = changed_tops(&root, &changed);
+                if set.is_empty() {
+                    continue;
+                }
                 let mut names: Vec<&str> = set.values().map(String::as_str).collect();
                 names.sort_unstable();
                 let what = format!("changed: {}", names.join(", "));
-                let keys: HashSet<String> = set.keys().cloned().collect();
                 if src == Source::Mft {
                     (None, format!("{what} (full MFT rescan)"))
                 } else {
-                    (Some(keys), what)
+                    (Some(set.keys().cloned().collect()), what)
                 }
             }
             Some(Err(_)) => {
-                journal = Journal::open(&root);
-                (None, "journal read failed; full rescan".to_string())
+                changes = ChangeSource::open(&root);
+                (None, "change journal unavailable; full rescan".to_string())
             }
             None => {
-                journal = Journal::open(&root);
-                (None, "journal unavailable; full rescan".to_string())
+                changes = ChangeSource::open(&root);
+                (None, "change journal unavailable; full rescan".to_string())
             }
         };
         let (only, what) = rescan_scope(o2.dedup_hardlinks, only, what);
@@ -766,6 +778,25 @@ mod tests {
         f.file("noext", 3);
     }
 
+    /// Create `link` as a directory link to `target` (junction on Windows, symlink on
+    /// Linux). Returns false when the platform refuses.
+    fn link_dir(link: &Path, target: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+    }
+
     fn top<'a>(r: &'a ScanResult, n: &str) -> &'a TopEntry {
         r.tops.iter().find(|t| t.name == n).unwrap()
     }
@@ -779,6 +810,7 @@ mod tests {
         assert_eq!(ext_of(OsStr::new(".gitignore")), "gitignore");
     }
 
+    #[cfg(windows)]
     #[test]
     fn top_mapping() {
         let root = Path::new(r"C:\data");
@@ -801,6 +833,28 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn top_mapping() {
+        let root = Path::new("/data");
+        let t = |p: &str| top_for(root, Path::new(p), OsStr::new("f"));
+        assert_eq!(t("/data"), Some("f".into()));
+        assert_eq!(t("/data/./"), Some("f".into()));
+        assert_eq!(t("/data/sub"), Some("sub".into()));
+        assert_eq!(t("/data/sub/deep/er"), Some("sub".into()));
+        assert_eq!(t("/database"), None);
+        assert_eq!(t("/other/data"), None);
+        assert_eq!(t("/"), None);
+        assert_eq!(
+            top_for(Path::new("/"), Path::new("/"), OsStr::new("x")),
+            Some("x".into())
+        );
+        assert_eq!(
+            top_for(Path::new("/"), Path::new("/home/me"), OsStr::new("x")),
+            Some("home".into())
+        );
+    }
+
     #[test]
     fn dedup_hardlinks_forces_full_rescan() {
         let set: HashSet<String> = ["b".to_string()].into();
@@ -813,21 +867,15 @@ mod tests {
     }
 
     #[test]
-    fn journal_root_resolves_junction_parent() {
+    fn change_feed_resolves_junction_parent() {
         let f = Fixture::new("jroot");
         f.file("real/sub/x.bin", 10);
-        let st = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(f.0.join("junc"))
-            .arg(f.0.join("real"))
-            .output()
-            .unwrap();
-        if !st.status.success() {
-            eprintln!("skipped: could not create junction");
+        if !link_dir(&f.0.join("junc"), &f.0.join("real")) {
+            eprintln!("skipped: could not create link");
             return;
         }
         let via_link = f.0.join("junc").join("sub");
-        let jr = journal_root(&via_link);
+        let jr = crate::native::watch::resolve_root(&via_link);
         // A journal record for the real path must map to a top of the resolved root.
         let real_parent = fs::canonicalize(f.0.join("real").join("sub")).unwrap();
         assert_eq!(
@@ -841,14 +889,8 @@ mod tests {
     fn root_reparse_point_refused() {
         let f = Fixture::new("rroot");
         f.file("real/a.bin", 5000);
-        let st = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(f.0.join("junc"))
-            .arg(f.0.join("real"))
-            .output()
-            .unwrap();
-        if !st.status.success() {
-            eprintln!("skipped: could not create junction");
+        if !link_dir(&f.0.join("junc"), &f.0.join("real")) {
+            eprintln!("skipped: could not create link");
             return;
         }
         for b in [Backend::Auto, Backend::ReadDir, Backend::Batched] {
@@ -909,13 +951,10 @@ mod tests {
         build(&f);
         let target = Fixture::new("junc_target");
         target.file("huge.bin", 100_000);
-        let st = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(f.0.join("junc"))
-            .arg(&target.0)
-            .output()
-            .unwrap();
-        assert!(st.status.success());
+        assert!(
+            link_dir(&f.0.join("junc"), &target.0),
+            "link creation failed"
+        );
         for b in [Backend::ReadDir, Backend::Batched] {
             let r = scan(&opts(&f, b)).unwrap();
             assert_eq!(r.total.bytes, 6273, "{b:?}");
@@ -940,6 +979,7 @@ mod tests {
         assert_eq!(r.hardlink_dupe_bytes, 4000);
     }
 
+    #[cfg(windows)]
     #[test]
     fn streams_counted() {
         let f = Fixture::new("ads");
@@ -951,6 +991,18 @@ mod tests {
         o.streams = true;
         let r = scan(&o).unwrap();
         assert_eq!(r.stream_bytes, 321);
+        assert_eq!(r.total.bytes, 10);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn streams_are_zero_on_linux() {
+        let f = Fixture::new("ads");
+        f.file("a.txt", 10);
+        let mut o = opts(&f, Backend::Batched);
+        o.streams = true;
+        let r = scan(&o).unwrap();
+        assert_eq!(r.stream_bytes, 0);
         assert_eq!(r.total.bytes, 10);
     }
 

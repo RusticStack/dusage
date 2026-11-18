@@ -5,15 +5,17 @@
 <h1 align="center">dusage</h1>
 
 <p align="center"><b>See where your disk space went, then get it back.</b><br>
-A fast disk-usage scanner and a safe parallel pruner for Windows. Two small exes, zero dependencies.</p>
+A fast disk-usage scanner and a safe parallel pruner for Windows and Linux. Two small binaries, zero dependencies.</p>
 
 <p align="center">
   <a href="https://github.com/RusticStack/dusage/releases/latest"><img src="https://img.shields.io/badge/Download_for_Windows-dusage-CC420C?style=for-the-badge&logo=windows11&logoColor=white" height="44" alt="Download dusage for Windows"></a>
+  <a href="https://github.com/RusticStack/dusage/releases/latest"><img src="https://img.shields.io/badge/Download_for_Linux-dusage-CC420C?style=for-the-badge&logo=linux&logoColor=white" height="44" alt="Download dusage for Linux"></a>
 </p>
 
 <p align="center">
   <a href="https://github.com/RusticStack/dusage/releases/latest"><img src="https://img.shields.io/github/v/release/RusticStack/dusage?style=flat-square&label=latest&color=CC420C" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-2A2A30?style=flat-square" alt="Windows 10 and 11">
+  <img src="https://img.shields.io/badge/Linux-x86__64-2A2A30?style=flat-square&logo=linux&logoColor=white" alt="Linux x86_64">
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2A2A30?style=flat-square" alt="MIT OR Apache-2.0"></a>
   <a href="https://github.com/RusticStack/dusage/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/RusticStack/dusage/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
   <img src="https://img.shields.io/badge/dependencies-0-2A2A30?style=flat-square" alt="Zero dependencies">
@@ -33,16 +35,19 @@ A fast disk-usage scanner and a safe parallel pruner for Windows. Two small exes
 - **Real numbers.** Size on disk next to file size (`--on-disk`), so compressed, sparse and
   tiny files are counted the way Explorer's *Size on disk* counts them. Hardlinked files
   (pnpm stores, `.git` objects) can be counted once (`--dedup-hardlinks`).
-- **Fast.** Directory entries come from Windows in large batches, with size on disk and file
+- **Fast.** On Windows, directory entries arrive in large batches with size on disk and file
   ids included, so there is no per-file call: up to millions of files per second on a warm
   cache, and a whole 8.4-million-file system drive in about 70 seconds. In an elevated shell
-  `--mft` reads the NTFS master file table instead and does the same drive in about 11 seconds
-  (see [Benchmarks](#benchmarks)).
+  `--mft` reads the NTFS master file table instead and does the same drive in about 11 seconds.
+  On Linux one `statx` per entry is enough for the same numbers, at roughly twice `du`'s
+  speed (see [Benchmarks](#benchmarks)).
 - **`fastdel` gets it back.** It deletes the children of a folder that match a name prefix
   and are older than an age (`7d`, `2h`), in parallel, including inside one huge subtree.
 - **Safe by design.** Volume roots, Windows, Program Files, ProgramData and your profile are
-  refused in every spelling. Junctions, symlinks and other reparse points are never
-  followed. `--dry` shows the plan first, and `--log` records every deletion as it happens.
+  refused in every spelling, and on Linux the filesystem root, the system directories, `/home`
+  and `$HOME`. Junctions, symlinks and other reparse points are never followed, and a delete
+  never walks into another filesystem. `--dry` shows the plan first, and `--log` records every
+  deletion as it happens.
 - **Scriptable.** `--json` output, plain exit codes, and the old positional commands still
   work.
 
@@ -60,6 +65,17 @@ dusage C:\ --on-disk --by-ext                 # whole drive
 dusage $env:LOCALAPPDATA --top 20             # one folder, top 20 rows
 fastdel $env:TEMP --age 7d --dry              # what would go: entries idle for 7 days
 fastdel $env:TEMP --age 7d --log prune.log    # do it, with a log
+```
+
+On Linux the release page has a `dusage-<version>-linux-x64.tar.gz` (both binaries plus the
+docs), or take the bare `dusage` and `fastdel` binaries:
+
+```bash
+tar -xzf dusage-0.4.0-linux-x64.tar.gz && sudo install -m755 dusage-0.4.0-linux-x64/{dusage,fastdel} /usr/local/bin/
+dusage /var/log --top 20                     # what is big in one folder
+dusage / --one-filesystem --on-disk          # the whole root filesystem, staying on it
+fastdel /var/tmp --age 7d --dry              # what would go: entries idle for 7 days
+fastdel /var/tmp --age 7d --log prune.log    # do it, with a log
 ```
 
 With Rust installed you can also build and install both tools with
@@ -80,24 +96,48 @@ dusage <root> [min_big] [threads] [top_n]      (positional form, still supported
 | `--on-disk` | show size on disk next to file size |
 | `--by-ext` | add a breakdown by file extension |
 | `--dedup-hardlinks` | count a file with several hardlinks once |
-| `--streams` | add named alternate data streams (slower: one probe per file) |
+| `--streams` | add named alternate data streams (NTFS only; 0 bytes elsewhere) |
+| `-x`, `--one-filesystem` | stay on the root's filesystem: mount points are counted as skipped |
 | `--json` | machine-readable output on stdout |
 | `--watch SECS` | rescan every SECS seconds and print what changed; Ctrl+C stops |
 | `--backend NAME` | `auto` (default), `batched`, `readdir` or `mft` |
-| `--mft` | same as `--backend mft` |
+| `--mft` | same as `--backend mft` (Windows/NTFS only) |
 
 **Backends.** `auto` uses `batched` and falls back to `readdir` on file systems that
-don't support it. `batched` is the default fast path. `readdir` uses the Rust standard
-library and can't report size on disk. `mft` reads the NTFS master file table directly, in
-parallel, and builds the tree in memory. It needs an elevated shell and an NTFS volume. It
-always reads the whole volume's table, so a folder takes about as long as the whole drive:
-use it for big trees and the default backend for small ones. Its totals match the default
-backend, plus the NTFS metadata files (`$MFT`, `$LogFile`, `$Extend`) that a directory walk
-cannot see.
+don't support it. `batched` is the default fast path: on Windows it asks for many entries per
+syscall with `GetFileInformationByHandleEx`, so size on disk and 128-bit file ids come for
+free; on Linux it lists with `read_dir` and takes one `statx` per entry, which still gives
+every row its on-disk size (`st_blocks`) and a file id (`dev << 64 | ino`) for hardlink
+dedup. `readdir` uses the Rust standard library only and can't report size on disk. `mft` is
+Windows-only: it reads the NTFS master file table directly, in parallel, and builds the tree
+in memory. It needs an elevated shell and an NTFS volume. It always reads the whole volume's
+table, so a folder takes about as long as the whole drive: use it for big trees and the
+default backend for small ones. Its totals match the default backend, plus the NTFS metadata
+files (`$MFT`, `$LogFile`, `$Extend`) that a directory walk cannot see.
 
-**Watch.** In an elevated shell, `--watch` reads the NTFS change journal and rescans only
-the top-level entries that changed. Without admin rights every tick is a full rescan. An
-update is printed only when something changed.
+**Watch.** `--watch` asks the platform's change feed which top-level entries moved and
+rescans only those: the NTFS change journal in an elevated shell on Windows, inotify on Linux.
+When the feed is unavailable (`--watch` without admin rights on Windows, or an exceeded
+inotify watch limit) every tick is a full rescan. An update is printed only when something
+changed.
+
+**Mount points.** A scan follows them by default, like `du`. `-x`/`--one-filesystem` stops at
+a directory on another device and counts it in the "skipped mount points" note, which is what
+you want for `dusage /`. Windows mount points are reparse points and are always skipped.
+
+### Platforms
+
+| | Windows | Linux |
+|---|---|---|
+| `batched` / `auto` backend | `GetFileInformationByHandleEx` batches | `read_dir` + one `statx` per entry |
+| Size on disk (`--on-disk`) | `AllocationSize` | `st_blocks * 512` |
+| Hardlink dedup (`--dedup-hardlinks`) | 128-bit file id | `dev << 64 | ino` |
+| `--watch` change feed | NTFS USN journal (elevated) | inotify (no privileges) |
+| `--mft` | raw NTFS `$MFT` | not applicable, refused with a reason |
+| `--streams` | named NTFS streams | no named streams, reports 0 |
+| Links never followed | reparse points of any kind | symlinks |
+| `--one-filesystem` | no-op (mount points are links) | skips other devices |
+| Protected `fastdel` roots | volume roots, `Windows`, `Program Files`, `ProgramData`, profile | `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` |
 
 ## fastdel
 
@@ -128,12 +168,17 @@ deleted (the summary lists them by cause), `2` bad arguments or a refused root.
 
 ### What fastdel will not touch
 
-- **Protected roots**, whatever the filters: any drive or share root, `Windows`,
-  `Program Files`, `ProgramData`, `C:\Users` and your profile folder, plus every folder
-  above them. Every spelling is caught: `\\?\C:\`, `C:\x\..`, short names like `PROGRA~1`,
-  `\\localhost\C$`, and junctions that point at them.
+- **Protected roots**, whatever the filters. On Windows: any drive or share root, `Windows`,
+  `Program Files`, `ProgramData`, `C:\Users` and your profile folder, plus every folder above
+  them, in every spelling: `\\?\C:\`, `C:\x\..`, short names like `PROGRA~1`,
+  `\\localhost\C$`, and junctions that point at them. On Linux: `/`, `/etc`, `/usr`, `/bin`,
+  `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`,
+  `/home`, `$HOME` and their ancestors, including through a symlink. Their children
+  (`/var/tmp`, `/opt/app/cache`) are prunable.
 - **Anything behind a link.** A junction or symlink is removed as a link and its target is
   left alone. A root that is itself a link is refused: pass its target.
+- **Another filesystem.** A directory on a different device inside a candidate is left in
+  place and reported, the way a junction is on Windows.
 - Files that are locked or vanish mid-run are skipped and counted, never fatal.
 
 ## Benchmarks
@@ -179,6 +224,20 @@ table (about 2 GB/s here); parsing runs on up to 16 threads alongside the reads.
 Version 0.1 deleted each top-level candidate on a single thread. Version 0.2 spreads
 one big subtree, or one huge flat folder, across every worker.
 
+**Linux** (Ubuntu 24.04 container, Linux 6.1, 2 vCPU, overlayfs, release build, warm cache,
+`/usr` = 180,497 files / 7.99 GB, median of three runs):
+
+| Workload | dusage | `du -sb` | `find -printf` + awk |
+|---|---|---|---|
+| Scan `/usr` | **0.31 s** | 0.62 s | 0.68 s |
+| Totals | 7,994,136,968 B, 180,497 files | 7,991,131,817 B (dedups hardlinks, counts directories) | 7,994,136,968 B |
+
+The three agree on the file count and on bytes once you account for `du` counting each inode
+once and adding directory sizes; `dusage --dedup-hardlinks` lands within directory-entry
+noise of `du`. Deleting 50,301 entries (300 folders × 100 files): **0.36 s** against 0.60 s for
+`rm -rf` on the same tree. A scan of `/` with `-x` covers this container's 251,816 files in
+about 1 s while skipping the 7 pseudo and nested mounts (`/proc`, `/sys`, `/dev`, `/run`, ...).
+
 ## Use it from an AI agent
 
 [`skills/dusage/SKILL.md`](skills/dusage/SKILL.md) is an
@@ -198,8 +257,9 @@ $dst = "$env:APPDATA\devin\skills\dusage"; New-Item -ItemType Directory -Force $
 Invoke-WebRequest https://raw.githubusercontent.com/RusticStack/dusage/main/skills/dusage/SKILL.md -OutFile "$dst\SKILL.md"
 ```
 
-Then ask the agent "what is using my disk space?" or run `/dusage C:\`. The tools are
-Windows-only, so the skill is for agents running on Windows, not cloud Linux sandboxes.
+Then ask the agent "what is using my disk space?" or run `/dusage C:\` (on Linux the same
+skill works against `/`, `/var`, `/tmp` and the rest; only `--mft` and `--streams` are
+Windows-only).
 
 ## Good to know
 
@@ -207,27 +267,35 @@ Windows-only, so the skill is for agents running on Windows, not cloud Linux san
   folders full of hardlinks (pnpm, git) read higher than their real usage.
 - `fastdel`'s age is the entry's last-write time. For a folder on NTFS that is the last
   time a direct child was created or deleted, which works well for "idle since".
-- Both tools need Windows 10 or 11 on NTFS for every feature. Other file systems fall back
-  to the standard-library backend where they can.
+- Windows 10 or 11 on NTFS has every feature. Other Windows file systems fall back to the
+  standard-library backend where they can. On Linux there is no master file table to read
+  (so no `--mft`) and no named data streams (so `--streams` reports 0).
+- On Linux, `st_blocks` is what the filesystem actually allocated, so sparse and compressed
+  files read low with `--on-disk` and high with the plain size, the way `du` and `ls -l`
+  disagree.
+- An unreadable directory is counted in the `access_denied` error tally and the scan carries
+  on; only a missing or non-directory root is fatal.
 
 ---
 
 ## For developers
 
-dusage is written in Rust with the standard library only: no crates. All Windows FFI and
-`unsafe` code lives in `src/win/`, and every struct layout there is asserted in tests
-against the Microsoft documentation.
+dusage is written in Rust with the standard library only: no crates. All platform FFI and
+`unsafe` code lives in `src/win/` and `src/unix/`; everything above them is safe Rust, and
+every Windows struct layout is asserted in tests against the Microsoft documentation.
 
-```powershell
-cargo build --release                      # target\release\dusage.exe and fastdel.exe
+```bash
+cargo build --release                      # target/release/dusage and fastdel
 cargo test                                 # unit + CLI tests on temp fixtures
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The C runtime is linked statically (`.cargo/config.toml`), so the exes run on a clean
-Windows install. The MFT and change-journal tests need an elevated shell and skip
-themselves otherwise. Pushing a `v*` tag builds, tests and publishes a release
+On Windows the C runtime is linked statically (`.cargo/config.toml`), so the exes run on a
+clean install. The MFT and change-journal tests need an elevated shell and skip themselves
+otherwise; the Linux inotify and hardlink tests need nothing special. CI runs the full set on
+`windows-latest` and `ubuntu-latest`, plus a Linux smoke test that compares a `/usr` scan
+against `find`. Pushing a `v*` tag builds, tests and publishes Windows and Linux releases
 (`.github/workflows/release.yml`).
 
 ```text
@@ -235,12 +303,14 @@ src/
   queue.rs      parallel work queue shared by both tools
   scan.rs       scanner engine and watch mode          (dusage)
   prune.rs      planning and parallel deletion          (fastdel)
-  guard.rs      protected-root checks
+  guard.rs      protected-root checks, per platform
   cli.rs        argument parsing, sizes and ages
   report.rs     text and JSON output
   model.rs      shared result types
   win/          Windows layer: batched enumeration, handle-based delete,
-                USN journal, raw MFT reader, shared FFI
+                USN journal, raw MFT reader, change feed, shared FFI
+  unix/         Linux layer: readdir + statx enumeration, unlink/rmdir delete,
+                inotify change feed, errno table
   bin/          the two thin command-line front ends
 ```
 

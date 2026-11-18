@@ -1,32 +1,41 @@
-//! Protected-root guard for destructive tools. Owned by wave-1 lane `cli`.
+//! Protected-root guard for destructive tools.
 //!
 //! `is_protected_root` answers "must a destructive tool refuse this path?". A path is
 //! protected when, after lexical normalisation (and canonicalisation when it exists), it is a
-//! volume or share root, one of the well-known system/profile directories, or an ancestor of
-//! one of those. Descendants of the system directories (e.g. `C:\Windows\Temp`) are not
-//! protected here. Anything that cannot be normalised is treated as protected.
+//! volume or share root (the filesystem root on Linux), one of the well-known system/profile
+//! directories, or an ancestor of one of those. Descendants of the system directories (e.g.
+//! `C:\Windows\Temp`, `/var/tmp`) are not protected here. Anything that cannot be
+//! normalised is treated as protected.
+//!
+//! The two implementations share only the entry point and `PROTECTED_SUMMARY`.
 
+#[cfg(windows)]
 use std::fs;
+#[cfg(windows)]
 use std::path::Path;
 
 /// A normalised path: lowercase root key plus resolved lowercase components.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(windows)]
 struct Norm {
     root: String,
     comps: Vec<String>,
 }
 
+#[cfg(windows)]
 fn is_drive_prefix(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
+#[cfg(windows)]
 fn starts_with_ci(s: &str, prefix: &str) -> bool {
     s.len() >= prefix.len()
         && s.is_char_boundary(prefix.len())
         && s[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
+#[cfg(windows)]
 fn resolve(rest: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for c in rest.split('\\') {
@@ -49,6 +58,7 @@ fn resolve(rest: &str) -> Vec<String> {
 
 /// True if a UNC server name refers to this machine (loopback names, the machine name and
 /// its DNS name). Unknown aliases cannot be detected; their `$` shares are not remapped.
+#[cfg(windows)]
 fn is_local_server(server: &str) -> bool {
     let s = server.trim_matches(['[', ']']).to_lowercase();
     let env = |k: &str| std::env::var(k).ok().map(|v| v.to_lowercase());
@@ -63,6 +73,7 @@ fn is_local_server(server: &str) -> bool {
         })
 }
 
+#[cfg(windows)]
 fn unc(rest: &str) -> Option<Norm> {
     let mut it = rest.split('\\').filter(|c| !c.is_empty());
     let server = it.next()?;
@@ -93,6 +104,7 @@ fn unc(rest: &str) -> Option<Norm> {
     })
 }
 
+#[cfg(windows)]
 fn normalize(orig: &str, may_absolutize: bool) -> Option<Norm> {
     let s = orig.replace('/', "\\");
     let mut body = s.as_str();
@@ -156,6 +168,7 @@ fn normalize(orig: &str, may_absolutize: bool) -> Option<Norm> {
     normalize(abs.to_str()?, false)
 }
 
+#[cfg(windows)]
 fn make_set(paths: &[String]) -> Vec<Norm> {
     let mut set = Vec::new();
     for p in paths {
@@ -172,6 +185,7 @@ fn make_set(paths: &[String]) -> Vec<Norm> {
 }
 
 /// Directories protected on this machine, read from the environment at call time.
+#[cfg(windows)]
 fn protected_paths() -> Vec<String> {
     let env = |k: &str| {
         std::env::var_os(k)
@@ -206,6 +220,7 @@ fn protected_paths() -> Vec<String> {
     v
 }
 
+#[cfg(windows)]
 fn hits(n: &Norm, set: &[Norm]) -> bool {
     n.comps.is_empty()
         || set
@@ -213,6 +228,7 @@ fn hits(n: &Norm, set: &[Norm]) -> bool {
             .any(|p| p.root == n.root && p.comps.starts_with(&n.comps))
 }
 
+#[cfg(windows)]
 fn check(p: &Path, set: &[Norm]) -> bool {
     let Some(s) = p.to_str() else {
         return true; // not representable: refuse
@@ -235,15 +251,197 @@ fn check(p: &Path, set: &[Norm]) -> bool {
     false
 }
 
+/// What `is_protected_root` refuses, for the message a tool prints on refusal.
+#[cfg(windows)]
+pub const PROTECTED_SUMMARY: &str =
+    "volume roots, Windows, Program Files, ProgramData, user profile and their ancestors";
+
 /// True if a destructive tool must refuse `p`: any volume/share root in any spelling,
 /// `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%ProgramData%`, `%USERPROFILE%`,
 /// `C:\Users`, and any ancestor of those. Case-insensitive; `.`/`..` and trailing
 /// separators are resolved; existing paths are also canonicalised.
+#[cfg(windows)]
 pub fn is_protected_root(p: &Path) -> bool {
     check(p, &make_set(&protected_paths()))
 }
 
-#[cfg(test)]
+#[cfg(target_os = "linux")]
+pub use linux::is_protected_root;
+
+/// What `is_protected_root` refuses, for the message a tool prints on refusal.
+#[cfg(target_os = "linux")]
+pub const PROTECTED_SUMMARY: &str =
+    "the filesystem root, /etc, /usr, /bin, /sbin, /lib*, /boot, /proc, /sys, /dev, /run, \
+     /var, /opt, /srv, /root, /home, $HOME and their ancestors";
+
+/// Protection for destructive tools on Linux.
+///
+/// A path is protected when, after lexical normalisation (and canonicalisation when it
+/// exists, which also resolves symlinks), it is the filesystem root, one of the system
+/// directories, a home directory, or an ancestor of one of those. Descendants of a
+/// system directory (e.g. `/var/tmp`) are not protected. Anything that cannot be
+/// normalised is treated as protected.
+///
+/// Mount points are not special-cased here: the tool refuses to descend into one while
+/// deleting, so only a root the user typed explicitly can be a mount.
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::fs;
+    use std::path::{Component, Path, PathBuf};
+
+    /// Absolute, no `.`/`..`, no trailing separator, resolved without touching the disk.
+    fn lexical(p: &Path) -> Option<PathBuf> {
+        let abs = std::path::absolute(p).ok()?;
+        let mut out = PathBuf::from("/");
+        for c in abs.components() {
+            match c {
+                Component::RootDir | Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::Normal(s) => out.push(s),
+                Component::Prefix(_) => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// Immutable system trees: nothing below these is ever scratch space, so the whole
+    /// subtree is refused (`/usr/bin`, `/etc/nginx`), like `C:\Windows` on Windows.
+    fn system_trees() -> Vec<PathBuf> {
+        [
+            "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/boot",
+            "/proc", "/sys", "/dev", "/run",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect()
+    }
+
+    /// Directories that hold user or service data: the directory itself and anything above
+    /// it are refused, but their children (`/var/tmp`, `/opt/app/cache`) are prunable, the
+    /// way `%ProgramFiles%\App` is on Windows.
+    fn data_dirs() -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = ["/var", "/opt", "/srv", "/root", "/home"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            if let Some(p) = lexical(Path::new(&h)) {
+                v.push(p);
+            }
+        }
+        v
+    }
+
+    pub fn is_protected_root(p: &Path) -> bool {
+        if p.to_string_lossy().trim().is_empty() {
+            return true;
+        }
+        let Some(abs) = lexical(p) else {
+            return true;
+        };
+        if abs == Path::new("/") {
+            return true;
+        }
+        let real = fs::canonicalize(p)
+            .ok()
+            .and_then(|c| lexical(&c))
+            .unwrap_or(abs);
+        system_trees().iter().any(|s| real.starts_with(s))
+            || data_dirs().iter().any(|s| s.starts_with(&real))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn prot(s: &str) -> bool {
+        is_protected_root(Path::new(s))
+    }
+
+    #[test]
+    fn root_and_system_trees_are_protected() {
+        for s in [
+            "/",
+            "//",
+            "/.",
+            "/etc",
+            "/etc/",
+            "//etc",
+            "/usr",
+            "/usr/bin",
+            "/usr/../etc",
+            "/boot",
+            "/boot/efi",
+            "/opt",
+            "/srv",
+            "/root",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/run",
+            "/bin",
+            "/lib64",
+            "/home",
+            "/var",
+            "/etc/./passwd/..",
+        ] {
+            assert!(prot(s), "{s:?} should be protected");
+        }
+    }
+
+    #[test]
+    fn ordinary_dirs_and_data_children_are_prunable() {
+        assert!(!prot("/tmp"));
+        assert!(!prot("/tmp/x"));
+        assert!(!prot("/var/tmp"));
+        assert!(!prot("/var/log/journal"));
+        assert!(!prot("/opt/app"));
+        assert!(!prot("/workspace/proj"));
+        assert!(!prot("/usrx"));
+        assert!(!prot("/etcx/y"));
+        assert!(!prot("some-relative-dir"));
+        // A relative path climbing far enough lands on the filesystem root.
+        assert!(prot(&(0..40).map(|_| "..").collect::<Vec<_>>().join("/")));
+    }
+
+    #[test]
+    fn home_directories_are_protected() {
+        if let Some(h) = std::env::var_os("HOME") {
+            let home = Path::new(&h);
+            assert!(is_protected_root(home), "HOME itself");
+            if let Some(p) = home.parent() {
+                assert!(is_protected_root(p), "an ancestor of HOME");
+            }
+            assert!(!is_protected_root(&home.join("scratch/x")), "inside HOME");
+        }
+    }
+
+    #[test]
+    fn empty_is_protected() {
+        assert!(prot(""));
+        assert!(prot("   "));
+    }
+
+    #[test]
+    fn symlink_to_protected_dir_is_caught() {
+        let base = std::env::temp_dir().join(format!("dusage-guard-lx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let link = base.join("lnk");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        assert!(is_protected_root(&link), "symlink to /etc");
+        let safe = base.join("safe");
+        std::os::unix::fs::symlink(base.join("data"), &safe).unwrap();
+        assert!(!is_protected_root(&safe));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 

@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.4.0] - 2026-11-18
+
+`dusage` and `fastdel` now run on Linux as well as Windows. Everything the Windows build
+does has a Linux equivalent except the NTFS-only read paths: there is no master file table
+to read, and no named alternate data streams.
+
+### Added
+
+- **Linux support.** A scan walks `std::fs::read_dir` with one `statx` per entry, so every
+  row still carries its on-disk size (`st_blocks`) and a 128-bit file id (`dev << 64 | ino`)
+  for hardlink dedup. A 180k-file `/usr` scans in 0.9 s, the same totals as
+  `find -printf '%s'`.
+- **`--watch` on Linux** reads an inotify watch tree instead of the USN journal and rescans
+  only the top-level entries that changed. A new directory is watched as it appears, a burst
+  of writes is coalesced into one rescan, and a queue overflow falls back to a full rescan.
+- **`-x, --one-filesystem`** keeps a scan on the root's filesystem, counting mount points as
+  skipped instead of descending into `/proc`, `/sys` or another disk.
+- **Protected roots on Linux**: `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`,
+  `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` and their
+  ancestors are refused by `fastdel`, including through a symlink. Symlinks are the Linux
+  reparse point: skipped by a scan, unlinked by a prune, refused as a root.
+- `fastdel` never follows a tree into another filesystem: a mount point inside a candidate is
+  left in place and reported, the way a junction is on Windows.
+- Linux CI job (fmt, clippy, tests, release build, binary artifact) and a Linux tarball on
+  release.
+
+### Changed
+
+- Error categories are read per platform: errno on Linux (`EACCES`, `ENOTEMPTY`, `ETXTBSY`,
+  `ENOENT`) and the Win32 codes on Windows. Previously the Win32 numbers were assumed, which
+  misclassified Linux errors (`5` is `EIO`, not "access denied").
+- `enumerate::DirReader::read` takes an error sink, so a per-entry failure inside a directory
+  listing is counted instead of dropped.
+- Directory rows in the text report use the platform separator.
+- `--streams` is documented as NTFS-only and reports 0 bytes elsewhere.
+
+### Fixed
+
+- A failed `--backend mft` request on Linux now explains itself instead of failing to build.
+
 ## [0.3.0] - 2026-11-15
 
 ### Changed

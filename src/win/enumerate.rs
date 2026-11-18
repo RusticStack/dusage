@@ -5,6 +5,7 @@
 //! `io::ErrorKind::InvalidData`; a failed `read` may leave partial entries in `out`.
 
 use super::sys::{self, HANDLE};
+use crate::model::ErrorCounts;
 use std::ffi::{c_void, OsString};
 use std::io;
 use std::os::windows::ffi::OsStringExt;
@@ -264,8 +265,14 @@ impl DirReader {
         }
     }
 
-    /// Enumerate one directory, skipping "." and "..".
-    pub fn read(&mut self, dir: &Path, out: &mut Vec<Entry>) -> io::Result<()> {
+    /// Enumerate one directory, skipping "." and "..". A batch-level failure is
+    /// returned; there is no per-entry failure to record, so `errs` stays untouched.
+    pub fn read(
+        &mut self,
+        dir: &Path,
+        out: &mut Vec<Entry>,
+        _errs: &mut ErrorCounts,
+    ) -> io::Result<()> {
         let h = sys::open(
             dir,
             sys::FILE_LIST_DIRECTORY | sys::SYNCHRONIZE,
@@ -481,12 +488,77 @@ mod file_id_tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), b"x").unwrap();
         let mut v = Vec::new();
-        DirReader::new().read(&dir, &mut v).unwrap();
+        DirReader::new()
+            .read(&dir, &mut v, &mut ErrorCounts::default())
+            .unwrap();
         let id = file_id_of(&dir.join("a.txt")).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_ne!(id, 0);
         assert_eq!(v[0].file_id, id);
     }
+}
+
+/// Reparse tags with this bit are name surrogates (symlinks, mount points).
+pub const NAME_SURROGATE: u32 = 0x2000_0000;
+
+/// True for entries that are counted as links and never descended into: every
+/// directory reparse point, and the name-surrogate file ones (symlinks).
+pub fn is_skipped(e: &Entry) -> bool {
+    e.is_reparse() && (e.is_dir() || e.reparse_tag & NAME_SURROGATE != 0)
+}
+
+/// The `readdir` backend: `std::fs::read_dir` with the find data std already
+/// caches, so sizes are exact but allocation sizes and file ids are unknown.
+pub fn read_plain(dir: &Path, out: &mut Vec<Entry>, errs: &mut ErrorCounts) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    for e in std::fs::read_dir(dir)? {
+        let (e, md) = match e.and_then(|e| e.metadata().map(|m| (e, m))) {
+            Ok(x) => x,
+            Err(err) => {
+                errs.record(&err);
+                continue;
+            }
+        };
+        let symlink = e.file_type().is_ok_and(|t| t.is_symlink());
+        out.push(Entry {
+            name: e.file_name(),
+            attributes: md.file_attributes(),
+            reparse_tag: if symlink { NAME_SURROGATE } else { 0 },
+            size: md.len(),
+            alloc: 0,
+            file_id: 0,
+            last_write: 0,
+            change_time: 0,
+        });
+    }
+    Ok(())
+}
+
+/// The filesystem rejected a per-directory detail we asked for.
+pub fn is_unsupported(e: &io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(sys::ERROR_INVALID_PARAMETER | sys::ERROR_NOT_SUPPORTED | sys::ERROR_INVALID_LEVEL)
+    )
+}
+
+pub fn is_denied(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(sys::ERROR_ACCESS_DENIED)
+        || e.kind() == io::ErrorKind::PermissionDenied
+}
+
+/// Device id for the `--one-filesystem` boundary; Windows mount points are reparse
+/// points and already skipped, so there is nothing extra to compare.
+pub fn dev_of(_path: &Path) -> io::Result<u64> {
+    Ok(0)
+}
+
+pub fn other_filesystem(_e: &Entry, _root_dev: u64) -> bool {
+    false
+}
+
+pub fn same_filesystem(_e: &Entry, _parent_dev: u64) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -497,6 +569,33 @@ mod tests {
     use std::mem::{offset_of, size_of};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Fresh error sink for the `read` signature.
+    fn sink() -> ErrorCounts {
+        ErrorCounts::default()
+    }
+
+    #[test]
+    fn plain_listing_matches_batched() {
+        let f = Fixture::new("plain");
+        build(&f);
+        let mut plain = Vec::new();
+        read_plain(&f.0, &mut plain, &mut sink()).unwrap();
+        let mut batched = Vec::new();
+        DirReader::new()
+            .read(&f.0, &mut batched, &mut sink())
+            .unwrap();
+        assert_eq!(plain.len(), batched.len());
+        for e in &plain {
+            let b = batched.iter().find(|b| b.name == e.name).unwrap();
+            assert_eq!((e.size, e.is_dir()), (b.size, b.is_dir()));
+            assert_eq!((e.alloc, e.file_id), (0, 0));
+        }
+        for e in &plain {
+            let b = batched.iter().find(|b| b.name == e.name).unwrap();
+            assert_eq!(is_skipped(e), is_skipped(b), "{:?}", e.name);
+        }
+    }
 
     #[test]
     fn struct_layouts() {
@@ -554,7 +653,7 @@ mod tests {
 
     fn read_all(dir: &Path) -> Vec<Entry> {
         let mut v = Vec::new();
-        DirReader::new().read(dir, &mut v).unwrap();
+        DirReader::new().read(dir, &mut v, &mut sink()).unwrap();
         v
     }
 
@@ -597,10 +696,10 @@ mod tests {
         let mut r = DirReader::new();
         r.both = true;
         let mut v = Vec::new();
-        r.read(&f.0, &mut v).unwrap();
+        r.read(&f.0, &mut v, &mut sink()).unwrap();
         compare_with_std(&v, &f.0);
         let mut w = Vec::new();
-        DirReader::new().read(&f.0, &mut w).unwrap();
+        DirReader::new().read(&f.0, &mut w, &mut sink()).unwrap();
         // 64-bit ids agree with the low 64 bits of the 128-bit ids on NTFS.
         for e in &v {
             let x = w.iter().find(|x| x.name == e.name).unwrap();
@@ -621,15 +720,17 @@ mod tests {
             .unwrap();
         }
         let mut v = Vec::new();
-        DirReader::with_buffer(4096).read(&f.0, &mut v).unwrap();
+        DirReader::with_buffer(4096)
+            .read(&f.0, &mut v, &mut sink())
+            .unwrap();
         assert_eq!(v.len(), 300);
         compare_with_std(&v, &f.0);
         // Reader is reusable across calls.
         let mut r = DirReader::new();
         let mut a = Vec::new();
-        r.read(&f.0, &mut a).unwrap();
+        r.read(&f.0, &mut a, &mut sink()).unwrap();
         let mut b = Vec::new();
-        r.read(&f.0, &mut b).unwrap();
+        r.read(&f.0, &mut b, &mut sink()).unwrap();
         assert_eq!(a.len(), b.len());
     }
 
@@ -638,7 +739,9 @@ mod tests {
         let f = Fixture::new("empty");
         assert!(read_all(&f.0).is_empty());
         let mut v = Vec::new();
-        assert!(DirReader::new().read(&f.0.join("nope"), &mut v).is_err());
+        assert!(DirReader::new()
+            .read(&f.0.join("nope"), &mut v, &mut sink())
+            .is_err());
     }
 
     #[test]

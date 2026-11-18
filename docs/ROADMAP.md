@@ -2,7 +2,12 @@
 
 **Origin.** This began as a research report written from `src/lib.rs`, `src/bin/dusage.rs` and `src/bin/fastdel.rs` before any change (four research lanes plus skeptic verdicts; refuted items dropped or corrected, unconfirmed items marked unverified). The "Problem" and "Fix" text below describes the original code and is kept as written; the status line under each item says what was built. Gains stay unmeasured unless stated: no benchmark has been run on the implementation.
 
-**Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are all still open.
+**Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are all still open, apart from the Linux work in the last section.
+
+**Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
+protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
+tested; the NTFS-only read paths (`--mft`, `--streams`) are refused or report zero with an
+explanation. Numbers measured on this machine are in the last section.
 
 **FFI audit (wave 2).** Every FFI declaration, struct layout and constant under `src/win/` was audited against Microsoft Learn: 34 items, none wrong, 3 unverifiable (no authoritative source reachable).
 
@@ -177,3 +182,40 @@
 - `https://devblogs.microsoft.com/oldnewthing/20131024-00/?p=2843` (not fetched)
 - `https://github.com/microsoft/WinDev/issues/27`
 - `https://blog.rust-lang.org/2022/01/20/cve-2022-21658/`
+## Linux port (0.4.0)
+
+**Done.**
+
+- `src/unix/` mirrors `src/win/`: `enumerate` (read_dir + one `lstat`/`statx` per entry,
+  `st_blocks` for on-disk, `dev << 64 | ino` for hardlink identity, symlinks as the reparse
+  class), `delete` (unlink/rmdir, never follows a symlink, stops at a mount point), `watch`
+  (inotify, per-directory watches, `IN_Q_OVERFLOW` forces a full rescan) and an errno table.
+- `--one-filesystem` (`-x`): skip a directory on another device and count it.
+- Linux guard: `/`, the immutable system trees, the data roots, `/home` and `$HOME`, plus
+  their ancestors, canonicalised so a symlink to `/etc` is caught.
+- CI on `ubuntu-latest` including a `/usr` oracle comparison against `find -printf`, and a
+  Linux tarball plus loose binaries on every tagged release.
+
+**Measured** (Ubuntu 24.04 container, Linux 6.1, 2 vCPU, overlayfs, warm cache, release):
+
+| Workload | dusage | baseline |
+|---|---|---|
+| Scan `/usr`, 180,497 files / 7.99 GB | 0.31 s | `du -sb` 0.62 s, `find -printf` + awk 0.68 s |
+| Scan `/` with `-x`, 251,816 files, 7 mounts skipped | ~1 s | — |
+| Delete 50,301 entries (300 dirs × 100 files) | 0.36 s | `rm -rf` 0.60 s |
+
+Totals agree with `find` exactly (7,994,136,968 bytes); `du` differs only by counting each
+inode once and adding directory sizes, which `--dedup-hardlinks` reproduces within
+directory-entry noise.
+
+**Open.**
+
+- A raw `getdents64` enumerator (own syscall, no `read_dir` allocation per entry) and
+  `statx` with `STATX_MNT_ID` batching are unexplored; the current backend is one syscall
+  per entry, the same as `du`'s, and wins only on parallelism and on doing less per entry.
+- Thread sweep and cold-cache numbers on a real machine (2 vCPUs here, and the machine is a
+  container on overlayfs, so delete timings are not comparable to ext4 or btrfs).
+- `--watch` under `max_user_watches` pressure: the fallback is implemented (full rescans)
+  but has only been tested by construction, not by lowering the limit.
+- macOS would need a kqueue/FSEvents change feed and its own guard list; the crate refuses
+  to compile there today, on purpose.

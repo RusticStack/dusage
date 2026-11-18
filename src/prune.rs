@@ -7,9 +7,9 @@
 
 use crate::guard;
 use crate::model::{ErrorCounts, ErrorKind};
+use crate::native::delete::delete_entry;
+use crate::native::enumerate::{self, DirReader};
 use crate::par_for_each;
-use crate::win::delete::delete_entry;
-use crate::win::enumerate::DirReader;
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, Write};
@@ -71,11 +71,12 @@ pub fn plan(o: &PruneOptions) -> io::Result<(Vec<Candidate>, usize)> {
     let refuse = |m: String| Err(io::Error::new(io::ErrorKind::InvalidInput, m));
     if guard::is_protected_root(&o.root) {
         return refuse(format!(
-            "refusing protected root '{}' (volume roots, Windows, Program Files, ProgramData, user profile and their ancestors)",
-            o.root.display()
+            "refusing protected root '{}' ({} are never pruned)",
+            o.root.display(),
+            guard::PROTECTED_SUMMARY
         ));
     }
-    crate::win::enumerate::refuse_reparse_root(&o.root).or_else(|e| match e.kind() {
+    enumerate::refuse_reparse_root(&o.root).or_else(|e| match e.kind() {
         io::ErrorKind::InvalidInput => Err(e),
         _ => Ok(()), // missing/unreadable roots get the clearer message below
     })?;
@@ -90,7 +91,7 @@ pub fn plan(o: &PruneOptions) -> io::Result<(Vec<Candidate>, usize)> {
             .unwrap_or(SystemTime::UNIX_EPOCH)
     });
     let mut ents = Vec::new();
-    DirReader::new().read(&o.root, &mut ents)?;
+    DirReader::new().read(&o.root, &mut ents, &mut ErrorCounts::default())?;
     let (mut cands, mut kept) = (Vec::new(), 0);
     for e in ents {
         let name = e.name.to_string_lossy().into_owned();
@@ -262,16 +263,21 @@ impl Ctx<'_> {
             }
         };
         let mut ents = Vec::new();
-        if let Err(e) = READER.with(|r| r.borrow_mut().read(&node.path, &mut ents)) {
+        let mut errs = ErrorCounts::default();
+        if let Err(e) = READER.with(|r| r.borrow_mut().read(&node.path, &mut ents, &mut errs)) {
             let c = self.fail(&e, &node.path);
             let _ = node
                 .failed
                 .compare_exchange(0, c, Ordering::AcqRel, Ordering::Acquire);
         }
+        // A mount point is left in place, like a Windows junction: descending would
+        // delete another filesystem's contents. Its rmdir then fails with EBUSY/ENOTEMPTY,
+        // which is reported rather than hidden.
+        let parent_dev = enumerate::dev_of(&node.path).unwrap_or(0);
         let mut files = Vec::new();
         for e in &ents {
             let p = node.path.join(&e.name);
-            if e.is_dir() && !e.is_reparse() {
+            if e.is_dir() && !e.is_reparse() && enumerate::same_filesystem(e, parent_dev) {
                 node.pending.fetch_add(1, Ordering::AcqRel);
                 push(Work::Dir(Arc::new(Node {
                     path: p,
@@ -446,6 +452,12 @@ mod tests {
         })
     }
 
+    /// The platform's "access denied" code, so the fake deleters classify the same.
+    #[cfg(windows)]
+    const DENIED: i32 = 5;
+    #[cfg(target_os = "linux")]
+    const DENIED: i32 = 13;
+
     static LOG: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     fn fake_ok(p: &Path) -> io::Result<()> {
         LOG.lock().unwrap().push(p.to_path_buf());
@@ -453,7 +465,7 @@ mod tests {
     }
     fn fake_fail(p: &Path) -> io::Result<()> {
         if p.ends_with("bad") {
-            Err(io::Error::from_raw_os_error(5))
+            Err(io::Error::from_raw_os_error(DENIED))
         } else {
             fake_ok(p)
         }
@@ -522,7 +534,9 @@ mod tests {
             log: None,
             list_limit: 50,
         };
-        assert!(plan(&mk(PathBuf::from(r"C:\"))).is_err());
+        // A protected root is refused before it is looked at; a missing one is refused too.
+        let protected = if cfg!(windows) { r"C:\" } else { "/" };
+        assert!(plan(&mk(PathBuf::from(protected))).is_err());
         assert!(plan(&mk(tmp("x").join("missing"))).is_err());
     }
 
@@ -597,7 +611,7 @@ mod tests {
 
     fn fail_f7(p: &Path) -> io::Result<()> {
         if p.ends_with("f7") {
-            return Err(io::Error::from_raw_os_error(5));
+            return Err(io::Error::from_raw_os_error(DENIED));
         }
         delete_entry(p)
     }
@@ -615,6 +629,10 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    fn deleted_line(dir: &str, name: &str) -> String {
+        format!("DELETED {}", PathBuf::from(dir).join(name).display())
+    }
+
     static WATCH_LOG: Mutex<Option<PathBuf>> = Mutex::new(None);
 
     /// Deleting `b` only succeeds once `a`'s DELETED line is already in the log file.
@@ -622,12 +640,12 @@ mod tests {
         if p.ends_with("b") {
             let log = WATCH_LOG.lock().unwrap().clone().unwrap();
             for _ in 0..500 {
-                if fs::read_to_string(&log).is_ok_and(|t| t.contains(r"DELETED x\a")) {
+                if fs::read_to_string(&log).is_ok_and(|t| t.contains(&deleted_line("x", "a"))) {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            return Err(io::Error::from_raw_os_error(5));
+            return Err(io::Error::from_raw_os_error(DENIED));
         }
         Ok(())
     }
@@ -655,7 +673,7 @@ mod tests {
         assert_eq!((rep.candidates_done, rep.candidates_failed), (2, 0));
         let t = fs::read_to_string(&logp).unwrap();
         assert!(
-            t.find(r"DELETED x\a").unwrap() < t.find(r"DELETED x\b").unwrap(),
+            t.find(&deleted_line("x", "a")).unwrap() < t.find(&deleted_line("x", "b")).unwrap(),
             "{t}"
         );
         let _ = fs::remove_dir_all(&dir);

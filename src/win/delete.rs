@@ -169,7 +169,7 @@ pub fn remove_tree(path: &Path) -> (u64, ErrorCounts) {
             continue;
         }
         ents.clear();
-        if let Err(e) = reader.read(&dir, &mut ents) {
+        if let Err(e) = reader.read(&dir, &mut ents, &mut errs) {
             errs.record(&e);
             continue;
         }

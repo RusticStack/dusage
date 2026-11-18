@@ -12,8 +12,9 @@ USAGE:
     fastdel <root> --age AGE [--prefix a,b] [--threads N] [--dry] [--log FILE] [--limit N]
 
 Filters apply to the direct children of <root>; matching entries are deleted recursively.
-Junctions and symlinks are unlinked, never followed.
-A root that is itself a junction or symlink is refused; pass its target.
+Links (junctions, symlinks) are unlinked, never followed, and a tree is never followed into
+another filesystem (a mount point is left in place, like a link).
+A root that is itself a link is refused; pass its target.
 
 OPTIONS:
     --age AGE       delete entries last modified more than AGE ago: 30s 15m 2h 7d 1w, or a
@@ -26,7 +27,10 @@ OPTIONS:
     -h, --help      this text
     -V, --version   print the version
 
-Protected roots (volume roots, Windows, Program Files, user profile, ...) are always refused.";
+Protected roots are always refused:
+  Windows  volume roots, Windows, Program Files, ProgramData, user profile and ancestors
+  Linux    /, /etc, /usr, /bin, /sbin, /lib*, /boot, /proc, /sys, /dev, /run, /var, /opt,
+           /srv, /root, /home, $HOME and ancestors";
 
 fn die(msg: &str) -> ! {
     eprintln!("fastdel: {msg}\n(try fastdel --help)");

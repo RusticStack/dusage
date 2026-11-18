@@ -1,5 +1,8 @@
 //! End-to-end tests of the `fastdel` binary. Fixtures live under the temp dir only.
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(windows)]
+use std::fs::OpenOptions;
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -40,20 +43,36 @@ fn stderr(o: &Output) -> String {
 
 fn make_old(p: &Path) {
     let t = SystemTime::now() - Duration::from_secs(10 * 86400);
-    let mut o = OpenOptions::new();
-    // FILE_WRITE_ATTRIBUTES + FILE_FLAG_BACKUP_SEMANTICS opens files and directories alike.
-    o.access_mode(0x100).custom_flags(0x0200_0000);
-    o.open(p).unwrap().set_modified(t).unwrap();
+    #[cfg(windows)]
+    {
+        let mut o = OpenOptions::new();
+        // FILE_WRITE_ATTRIBUTES + FILE_FLAG_BACKUP_SEMANTICS opens files and directories alike.
+        o.access_mode(0x100).custom_flags(0x0200_0000);
+        o.open(p).unwrap().set_modified(t).unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Opening a directory read-only is enough to set its times when we own it.
+        fs::File::open(p).unwrap().set_modified(t).unwrap();
+    }
 }
 
-fn mklink_j(link: &Path, target: &Path) {
-    let o = Command::new("cmd")
-        .args(["/c", "mklink", "/J"])
-        .arg(link)
-        .arg(target)
-        .output()
-        .unwrap();
-    assert!(o.status.success(), "mklink failed");
+/// A directory link: a junction on Windows, a symlink on Linux.
+fn link_dir(link: &Path, target: &Path) {
+    #[cfg(windows)]
+    {
+        let o = Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "mklink failed");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
 }
 
 fn cleanup(p: &Path) {
@@ -138,11 +157,11 @@ fn junctions_unlinked_not_followed() {
     let root = fixture("junc");
     let keep = fixture("junc_keep");
     fs::write(keep.join("keep.txt"), b"k").unwrap();
-    mklink_j(&root.join("link"), &keep); // junction as a candidate
+    link_dir(&root.join("link"), &keep); // junction as a candidate
     let inner = root.join("inner");
     fs::create_dir(&inner).unwrap();
     fs::write(inner.join("f"), b"f").unwrap();
-    mklink_j(&inner.join("jl"), &keep); // junction inside a candidate
+    link_dir(&inner.join("jl"), &keep); // junction inside a candidate
     let o = fastdel(&[s(&root), "-1"]);
     assert_eq!(code(&o), 0, "{}", stderr(&o));
     assert!(fs::symlink_metadata(root.join("link")).is_err());
@@ -186,8 +205,14 @@ fn bad_args_exit_2() {
 
 #[test]
 fn protected_roots_refused() {
+    #[cfg(windows)]
     let mut roots = vec!["C:\\".to_string()];
+    #[cfg(target_os = "linux")]
+    let mut roots = vec!["/".to_string()];
+    #[cfg(windows)]
     roots.extend(std::env::var("USERPROFILE"));
+    #[cfg(target_os = "linux")]
+    roots.extend(std::env::var("HOME").ok());
     for r in &roots {
         // The prefix matches nothing, so even a guard bug could not delete real data.
         for extra in [&["--dry"][..], &[][..]] {
@@ -268,7 +293,7 @@ fn reparse_root_refused() {
     fs::create_dir(&real).unwrap();
     fs::write(real.join("f"), b"x").unwrap();
     let link = base.join("lnk");
-    mklink_j(&link, &real);
+    link_dir(&link, &real);
     let o = fastdel(&[s(&link), "-1"]);
     assert_eq!(code(&o), 2, "{}", stderr(&o));
     assert!(stderr(&o).contains("reparse point"), "{}", stderr(&o));
@@ -277,6 +302,19 @@ fn reparse_root_refused() {
     cleanup(&base);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn symlink_to_protected_dir_refused() {
+    let base = fixture("lnkprot");
+    let link = base.join("etc");
+    link_dir(&link, Path::new("/etc"));
+    let o = fastdel(&[s(&link), "-1", "zzz_no_such_prefix_", "--dry"]);
+    assert_eq!(code(&o), 2, "{}", stderr(&o));
+    assert!(stderr(&o).contains("refusing"), "{}", stderr(&o));
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[cfg(windows)]
 #[test]
 fn junction_to_protected_target_refused() {
     let Some(win) = std::env::var_os("SystemRoot") else {
@@ -284,7 +322,7 @@ fn junction_to_protected_target_refused() {
     };
     let base = fixture("jprot");
     let link = base.join("lnk");
-    mklink_j(&link, Path::new(&win));
+    link_dir(&link, Path::new(&win));
     let o = fastdel(&[s(&link), "-1", "zzz_no_such_prefix_", "--dry"]);
     assert_eq!(code(&o), 2, "{}", stderr(&o));
     assert!(stderr(&o).contains("refusing"), "{}", stderr(&o));
@@ -292,6 +330,7 @@ fn junction_to_protected_target_refused() {
     cleanup(&base);
 }
 
+#[cfg(windows)]
 #[test]
 fn loopback_admin_share_refused() {
     for r in [r"\\localhost\C$\Windows", r"\\127.0.0.1\C$\Users"] {
