@@ -3,13 +3,20 @@
 #[cfg(not(any(windows, target_os = "linux")))]
 compile_error!("dusage supports Windows (NTFS) and Linux only.");
 
+pub mod bytes;
 pub mod cli;
+pub mod cmd;
+pub mod glob;
 pub mod guard;
+pub mod ignore;
 pub mod model;
+pub mod pattern;
 pub mod prune;
 pub mod queue;
+pub mod regex;
 pub mod report;
 pub mod scan;
+pub mod search;
 
 #[cfg(target_os = "linux")]
 pub mod unix;

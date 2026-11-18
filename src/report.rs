@@ -3,8 +3,10 @@
 //! Formatting helpers here are deliberately independent of `cli.rs`.
 
 use crate::model::{ScanResult, Totals};
+use crate::search::{SearchOptions, SearchReport};
 use std::fmt::Write as _;
 use std::io::{self, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct ReportOptions {
     pub top_n: usize,
@@ -259,6 +261,228 @@ pub fn render_json(r: &ScanResult, out: &mut dyn Write) -> io::Result<()> {
     }
     s.push_str("]}\n");
     out.write_all(s.as_bytes())
+}
+
+/// ANSI wrappers used by `--color=always` and by a terminal on stdout.
+pub mod color {
+    pub const RESET: &str = "\x1b[0m";
+    pub const PATH: &str = "\x1b[35m";
+    pub const LINE: &str = "\x1b[32m";
+    pub const MATCH: &str = "\x1b[1;31m";
+    pub const STATS: &str = "\x1b[36m";
+}
+
+/// `2026-11-18 14:03:22` in UTC, or `-` when the time is unknown.
+pub fn fmt_time(t: Option<SystemTime>) -> String {
+    let Some(t) = t else {
+        return "-".to_string()
+    };
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (y, m, d) = civil_from_days(days);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
+/// Howard Hinnant's days-from-civil inverse: days since 1970-01-01 to (y, m, d).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+fn write_match_line(out: &mut dyn Write, text: &[u8], spans: &[(usize, usize)], color: bool) -> io::Result<()> {
+    if !color || spans.is_empty() {
+        return out.write_all(text);
+    }
+    let mut at = 0;
+    for &(s, e) in spans {
+        if s >= text.len() || e > text.len() || s < at {
+            continue;
+        }
+        out.write_all(&text[at..s])?;
+        out.write_all(color::MATCH.as_bytes())?;
+        out.write_all(&text[s..e])?;
+        out.write_all(color::RESET.as_bytes())?;
+        at = e;
+    }
+    out.write_all(&text[at..])
+}
+
+/// Text output for `dusage search`: `path:line:text`, `-o`, `-c`, `-l` and context groups.
+pub fn render_search(r: &SearchReport, o: &SearchOptions, color: bool, out: &mut dyn Write) -> io::Result<()> {
+    let many = o.with_filename.unwrap_or(r.files.len() > 1 || !o.roots.iter().all(|p| p.is_file()));
+    for f in &r.files {
+        if o.files_with_matches || o.files_without_matches {
+            writeln!(out, "{}", f.path)?;
+            continue;
+        }
+        if o.count {
+            if many {
+                writeln!(out, "{}:{}", f.path, f.matches)?;
+            } else {
+                writeln!(out, "{}", f.matches)?;
+            }
+            continue;
+        }
+        if f.binary && !o.text {
+            writeln!(out, "Binary file {} matches", f.path)?;
+            continue;
+        }
+        let mut last: Option<u64> = None;
+        for h in &f.hits {
+            if let Some(l) = last {
+                if h.number > l + 1 {
+                    writeln!(out, "--")?;
+                }
+            }
+            last = Some(h.number);
+            let colon = if h.matched { ':' } else { '-' };
+            if many {
+                if color {
+                    write!(out, "{}{}{}", color::PATH, f.path, color::RESET)?;
+                } else {
+                    write!(out, "{}", f.path)?;
+                }
+                write!(out, "{colon}")?;
+            }
+            if o.line_numbers {
+                if color {
+                    write!(out, "{}{}{}{colon}", color::LINE, h.number, color::RESET)?;
+                } else {
+                    write!(out, "{}", h.number)?;
+                    write!(out, "{colon}")?;
+                }
+            }
+            if h.matched {
+                write_match_line(out, &h.text, &h.spans, color)?;
+            } else {
+                out.write_all(&h.text)?;
+            }
+            writeln!(out)?;
+        }
+    }
+    Ok(())
+}
+
+/// One JSON document for `dusage search --json`, with the report's stats appended.
+pub fn render_search_json(r: &SearchReport, o: &SearchOptions, out: &mut dyn Write) -> io::Result<()> {
+    let mut s = String::new();
+    s.push_str("{\"files\":[");
+    for (i, f) in r.files.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str("{\"path\":");
+        jstr(&f.path, &mut s);
+        let _ = write!(s, ",\"matches\":{},\"binary\":{},", f.matches, f.binary);
+        if o.count || o.files_with_matches || o.files_without_matches {
+            s.push_str("\"lines\":[]}");
+            continue;
+        }
+        s.push_str("\"lines\":[");
+        for (j, h) in f.hits.iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            let _ = write!(s, "{{\"line_number\":{},\"context\":{},", h.number, !h.matched);
+            s.push_str("\"text\":");
+            jstr(&String::from_utf8_lossy(&h.text), &mut s);
+            s.push_str(",\"submatches\":[");
+            for (k, &(a, b)) in h.spans.iter().enumerate() {
+                if k > 0 {
+                    s.push(',');
+                }
+                let _ = write!(s, "{{\"start\":{a},\"end\":{b},\"text\":");
+                jstr(&String::from_utf8_lossy(&h.text[a.min(h.text.len())..b.min(h.text.len())]), &mut s);
+                s.push('}');
+            }
+            s.push_str("]}");
+        }
+        s.push_str("]}");
+    }
+    let st = &r.stats;
+    let _ = write!(
+        s,
+        "],\"stats\":{{\"files_scanned\":{},\"files_matched\":{},\"files_binary\":{},\"bytes_scanned\":{},\"matches\":{},\"errors\":{},\"elapsed_secs\":{}}}}}\n",
+        st.files_scanned,
+        st.files_matched,
+        st.files_binary,
+        st.bytes_scanned,
+        st.matches,
+        st.errors.total(),
+        jf64(st.elapsed.as_secs_f64())
+    );
+    out.write_all(s.as_bytes())
+}
+
+/// Text output for `dusage find`: one path per line, or a long listing.
+pub fn render_paths(r: &SearchReport, long: bool, color: bool, out: &mut dyn Write) -> io::Result<()> {
+    for c in &r.paths {
+        if long {
+            writeln!(
+                out,
+                "{:>12}  {}  {}{}",
+                crate::cli::fmt_bytes(c.size),
+                fmt_time(c.modified),
+                c.rel,
+                if c.is_dir { "/" } else { "" }
+            )?;
+        } else if color {
+            writeln!(out, "{}{}{}", color::PATH, c.rel, color::RESET)?;
+        } else {
+            writeln!(out, "{}", c.rel)?;
+        }
+    }
+    Ok(())
+}
+
+/// JSON for `dusage find --json`.
+pub fn render_paths_json(r: &SearchReport, out: &mut dyn Write) -> io::Result<()> {
+    let mut s = String::new();
+    s.push_str("{\"paths\":[");
+    for (i, c) in r.paths.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str("{\"rel\":");
+        jstr(&c.rel, &mut s);
+        s.push_str(",\"path\":");
+        jstr(&c.path.to_string_lossy(), &mut s);
+        let _ = write!(
+            s,
+            ",\"size\":{},\"is_dir\":{},\"modified\":\"{}\"}}",
+            c.size,
+            c.is_dir,
+            fmt_time(c.modified)
+        );
+    }
+    let _ = write!(s, "],\"count\":{}}}\n", r.paths.len());
+    out.write_all(s.as_bytes())
+}
+
+/// A one-line statistics footer, printed to stderr by the binaries.
+pub fn stats_line(r: &SearchReport) -> String {
+    let st = &r.stats;
+    format!(
+        "{} files scanned ({} binary), {} matched, {} matches, {} errors, {:.2?}",
+        st.files_scanned,
+        st.files_binary,
+        st.files_matched,
+        st.matches,
+        st.errors.total(),
+        st.elapsed
+    )
 }
 
 #[cfg(test)]
@@ -599,5 +823,109 @@ mod tests {
         let mut r = sample();
         r.elapsed = Duration::from_millis(1500);
         assert!(json(&r).contains("\"elapsed_secs\":1.5"));
+    }
+
+    #[test]
+    fn time_formatting() {
+        assert_eq!(fmt_time(None), "-");
+        assert_eq!(fmt_time(Some(UNIX_EPOCH)), "1970-01-01 00:00:00");
+        assert_eq!(
+            fmt_time(Some(UNIX_EPOCH + std::time::Duration::from_secs(1_763_500_802))),
+            "2025-11-18 17:20:02"
+        );
+        // 2000-02-29 handled by the civil algorithm.
+        assert_eq!(
+            fmt_time(Some(UNIX_EPOCH + std::time::Duration::from_secs(951_782_400))),
+            "2000-02-29 00:00:00"
+        );
+    }
+
+    fn search_sample() -> (crate::search::SearchReport, crate::search::SearchOptions) {
+        use crate::pattern::Pattern;
+        use crate::search::{FileHits, LineHit, SearchOptions, SearchReport, Stats};
+        let mut o = SearchOptions::new(
+            Pattern::new("needle", false, false, false).unwrap(),
+            vec![PathBuf::from("/data")],
+        );
+        o.line_numbers = true;
+        let mut r = SearchReport {
+            files: vec![FileHits {
+                path: "/data/a.txt".into(),
+                hits: vec![
+                    LineHit { number: 2, text: b"a needle".to_vec(), matched: true, spans: vec![(2, 8)] },
+                    LineHit { number: 5, text: b"another needle".to_vec(), matched: true, spans: vec![(8, 14)] },
+                ],
+                matches: 2,
+                binary: false,
+            }],
+            stats: Stats { files_scanned: 3, files_matched: 1, matches: 2, ..Default::default() },
+            any_match: true,
+            ..Default::default()
+        };
+        r.stats.elapsed = Duration::from_millis(5);
+        (r, o)
+    }
+
+    #[test]
+    fn search_text_and_json() {
+        let (r, o) = search_sample();
+        let mut v = Vec::new();
+        render_search(&r, &o, false, &mut v).unwrap();
+        let text = String::from_utf8(v).unwrap();
+        assert!(text.contains("a.txt:2:a needle"), "{text}");
+        assert!(text.contains("--\n"), "non-contiguous groups are separated: {text}");
+        let mut v = Vec::new();
+        render_search_json(&r, &o, &mut v).unwrap();
+        let json = String::from_utf8(v).unwrap();
+        assert!(json.starts_with("{\"files\":[{\"path\":\"/data/a.txt\""), "{json}");
+        assert!(json.contains("\"line_number\":2"), "{json}");
+        assert!(json.contains("\"start\":2,\"end\":8,\"text\":\"needle\""), "{json}");
+        assert!(json.trim_end().ends_with('}'), "{json}");
+        assert_eq!(json.matches("{\"path\"").count(), 1);
+    }
+
+    #[test]
+    fn count_and_files_listing() {
+        let (mut r, mut o) = search_sample();
+        o.count = true;
+        r.files[0].hits.clear();
+        let mut v = Vec::new();
+        render_search(&r, &o, false, &mut v).unwrap();
+        assert_eq!(String::from_utf8(v).unwrap(), "2\n");
+        o.count = false;
+        o.files_with_matches = true;
+        let mut v = Vec::new();
+        render_search(&r, &o, false, &mut v).unwrap();
+        assert_eq!(String::from_utf8(v).unwrap(), "/data/a.txt\n");
+    }
+
+    #[test]
+    fn path_listing_modes() {
+        use crate::search::{Candidate, SearchReport};
+        let r = SearchReport {
+            paths: vec![Candidate {
+                path: "/data/x.rs".into(),
+                rel: "x.rs".into(),
+                size: 1536,
+                modified: Some(UNIX_EPOCH),
+                is_dir: false,
+                is_link: false,
+            }],
+            ..Default::default()
+        };
+        let mut v = Vec::new();
+        render_paths(&r, false, false, &mut v).unwrap();
+        assert_eq!(String::from_utf8(v).unwrap(), "x.rs\n");
+        let mut v = Vec::new();
+        render_paths(&r, true, false, &mut v).unwrap();
+        assert_eq!(
+            String::from_utf8(v).unwrap(),
+            "     1.50 KB  1970-01-01 00:00:00  x.rs\n"
+        );
+        let mut v = Vec::new();
+        render_paths_json(&r, &mut v).unwrap();
+        let json = String::from_utf8(v).unwrap();
+        assert!(json.contains("\"count\":1"), "{json}");
+        assert!(json.contains("\"rel\":\"x.rs\""), "{json}");
     }
 }
