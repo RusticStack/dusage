@@ -449,7 +449,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 true
             });
             let long = a.flag("--long");
-            let mut out = std::io::stdout().lock();
+            let mut out = std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock());
             let res = if json {
                 report::render_paths_json(&r, &mut out)
             } else {
@@ -480,7 +480,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     }
     let stats = a.flag("--stats");
     {
-        let mut out = std::io::stdout().lock();
+        let mut out = std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock());
         let res = if json {
             report::render_search_json(&report, &o, &mut out)
         } else {

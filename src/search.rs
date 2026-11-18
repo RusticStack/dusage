@@ -473,9 +473,16 @@ fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Op
     }
     // A file that needs transcoding is read whole: UTF-16 code units straddle the block
     // boundary, so there is nothing to stream. Everything else keeps the streaming path.
-    // Sniffing reads only the prefix the binary check already looks at.
-    let sample = &buf[..n.min(BINARY_SCAN)];
-    let encoding = o.encoding.unwrap_or_else(|| encodings::detect(sample));
+    let binary = bytes::is_binary(&buf[..n], BINARY_SCAN.min(n));
+    // Only a NUL-heavy or BOM-carrying file can be UTF-16, and the binary check has already
+    // looked for NULs, so plain text skips the sniff entirely.
+    let encoding = o.encoding.unwrap_or_else(|| {
+        if binary || buf[..n].starts_with(&[0xEF, 0xBB, 0xBF]) {
+            encodings::detect(&buf[..n.min(BINARY_SCAN)])
+        } else {
+            Encoding::Utf8
+        }
+    });
     if encodings::needs_transcode(encoding) {
         let mut all = buf[..n].to_vec();
         f.read_to_end(&mut all)?;
@@ -486,7 +493,6 @@ fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Op
         return finished(path, o, stats, sc, false);
     }
     let mut sc = Scanner::new(o);
-    let binary = bytes::is_binary(&buf[..n], BINARY_SCAN.min(n));
     if binary {
         stats.files_binary += 1;
     }

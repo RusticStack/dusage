@@ -128,7 +128,6 @@ T="$SEARCH_ROOT"
 add scan "dusage scan" "$BIN scan '$S' --top 1"
 add scan "du -sb" "du -sb '$S'"
 add scan "find+awk" "find '$S' -printf '%s\\n' | awk '{s+=\$1} END{}'"
-add scan "dusage scan (4 threads)" "$BIN scan '$S' --top 1 --threads 4"
 add scan "dusage scan (1 thread)" "$BIN scan '$S' --top 1 --threads 1"
 
 add search-rare "dusage" "$BIN search --color=never -F '$PAT_RARE' '$T'"
@@ -138,7 +137,6 @@ add search-rare "grep -rI" "grep -rI --color=never -F '$PAT_RARE' '$T'"
 add search-common "dusage" "$BIN search --color=never -F '$PAT_COMMON' '$T'"
 add search-common "rg" "rg --color=never -F '$PAT_COMMON' '$T'"
 add search-common "grep -rI" "grep -rI --color=never -F '$PAT_COMMON' '$T'"
-add search-common "dusage (4 threads)" "$BIN search --color=never -F '$PAT_COMMON' --threads 4 '$T'"
 
 add search-regex "dusage" "$BIN search --color=never '$PAT_REGEX' '$T'"
 add search-regex "rg" "rg --color=never '$PAT_REGEX' '$T'"
@@ -154,7 +152,24 @@ add search-files-with-matches "rg -l" "rg --color=never -l -F '$PAT_COMMON' '$T'
 add search-files-with-matches "grep -rIl" "grep -rIl --color=never -F '$PAT_COMMON' '$T'"
 
 add find-glob "dusage find" "$BIN find --color=never '$GLOB' '$S'"
+
 add find-glob "find -name" "find '$S' -name '$GLOB'"
+
+# The default is now one thread per core clamped to 4..16, so it is 4 here and equals
+# the explicit 4-thread row; 16 is swept to show what oversubscription costs.
+add threads-scan "dusage scan 1 thread" "$BIN scan '$S' --top 1 --threads 1"
+add threads-scan "dusage scan 2 threads" "$BIN scan '$S' --top 1 --threads 2"
+add threads-scan "dusage scan 4 threads" "$BIN scan '$S' --top 1 --threads 4"
+add threads-scan "dusage scan 8 threads" "$BIN scan '$S' --top 1 --threads 8"
+add threads-scan "dusage scan 16 threads" "$BIN scan '$S' --top 1 --threads 16"
+add threads-scan "dusage scan default" "$BIN scan '$S' --top 1"
+
+add threads-search "dusage search 1 thread" "$BIN search --color=never -F '$PAT_COMMON' --threads 1 '$T'"
+add threads-search "dusage search 2 threads" "$BIN search --color=never -F '$PAT_COMMON' --threads 2 '$T'"
+add threads-search "dusage search 4 threads" "$BIN search --color=never -F '$PAT_COMMON' --threads 4 '$T'"
+add threads-search "dusage search 8 threads" "$BIN search --color=never -F '$PAT_COMMON' --threads 8 '$T'"
+add threads-search "dusage search 16 threads" "$BIN search --color=never -F '$PAT_COMMON' --threads 16 '$T'"
+add threads-search "dusage search default" "$BIN search --color=never -F '$PAT_COMMON' '$T'"
 
 count=${#cmd[@]}
 
