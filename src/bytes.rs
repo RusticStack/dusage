@@ -1,14 +1,69 @@
 //! Fast byte scanning: memmem-style substring search, ASCII case folding, word boundaries.
 //!
-//! Every search is a safe scalar scan over native-endian `u64` words: the first needle byte is
-//! broadcast across a word, the candidate words are found with the classic has-zero-byte trick
-//! after the XOR, and interior bytes are only compared once a word holds a candidate. Long
-//! needles test their last byte before the rest, so a stray first-byte hit rarely reaches the
-//! middle comparison. No `unsafe`, no dependencies, no allocations.
+//! Every search is a safe scalar scan over native-endian `u64` words. The byte a needle is
+//! searched by — its "anchor" — is broadcast across a word, candidates are found with the
+//! classic has-zero-byte trick after the XOR, and the exact per-byte flag word pins down the
+//! lane, so a 32-byte block that holds a hit costs no rescan. The anchor is the rarest byte of
+//! the needle (a coarse frequency table, the same idea as memchr's `memmem`), which is what
+//! keeps candidate density low enough that the only comparisons on a hit are `memcmp`-shaped
+//! whole-window compares. Needles long enough for it use Horspool instead: its bad-byte table
+//! advances a whole needle width per mismatch on text whose bytes are all common.
+//!
+//! Both decisions cost more than the scan of a 30-byte line, so a needle searched line after
+//! line is prepared once into a [`Finder`] — the anchor and the skip table built with the
+//! pattern, not per call. The free functions build one per call, for the callers that match a
+//! single buffer.
+//!
+//! No `unsafe`, no dependencies, no allocations.
 
 const LO: u64 = 0x0101_0101_0101_0101;
 const HI: u64 = 0x8080_8080_8080_8080;
 const M7: u64 = 0x7F7F_7F7F_7F7F_7F7F;
+
+/// How rare each byte is in running text and source code, `0` rarest. Only the ordering
+/// matters: it decides which needle byte a search scans for, so a needle of one common and
+/// one rare byte is searched by the rare one, and `func ` is searched by its `f`, not its
+/// space. Tiers are ordered by the usual English/source-code letter frequencies; the exact
+/// numbers are irrelevant to correctness.
+const RANK: [u8; 256] = rank_table();
+
+const fn rank_table() -> [u8; 256] {
+    let mut t = [3u8; 256];
+    let tiers: [&[u8]; 8] = [
+        b"^~`\\$@",
+        b"|%#?&!zqjx",
+        b"{}[]<>*;+=-_:'\"/,.()",
+        b"0123456789kvbfpwyge",
+        b"mcudl",
+        b"hrsn",
+        b"ioat",
+        b" e",
+    ];
+    let mut tier = 0;
+    while tier < tiers.len() {
+        let mut i = 0;
+        while i < tiers[tier].len() {
+            t[tiers[tier][i] as usize] = tier as u8;
+            i += 1;
+        }
+        tier += 1;
+    }
+    let mut b = 0;
+    while b < 0x20 {
+        t[b] = 0;
+        b += 1;
+    }
+    t[b'\n' as usize] = 7;
+    t[b'\t' as usize] = 5;
+    t[b'\r' as usize] = 3;
+    t[0x7F] = 0;
+    let mut b = 0x80;
+    while b < 0x100 {
+        t[b] = 2;
+        b += 1;
+    }
+    t
+}
 
 const fn lower_table() -> [u8; 256] {
     let mut t = [0u8; 256];
@@ -64,9 +119,19 @@ trait Case {
     /// non-letter, both the lower and the upper form for a letter under `Ci`.
     fn targets(b: u8) -> (u64, u64);
     /// Zero flags (high bits) for the bytes of `chunk` that match. Several flags from one block
-    /// can be OR-ed and tested once, which is what keeps the scan loop branch-light.
+    /// can be OR-ed and tested once, which is what keeps the scan loop branch-light. A borrow
+    /// out of a zero byte also flags the byte above it, so these flags are only ever tested
+    /// for "any match here?".
     fn flags(chunk: u64, targets: (u64, u64)) -> u64;
+    /// Exactly one high bit per matching byte, no borrow artefacts: what locates the lane.
+    fn flags_exact(chunk: u64, targets: (u64, u64)) -> u64;
     fn eq(a: u8, b: u8) -> bool;
+    /// The byte's equality key: itself under `Exact`, its ASCII lowercase under `Ci`.
+    fn fold(b: u8) -> u8;
+    /// Whole-window compare of two equal-length slices.
+    fn slice_eq(a: &[u8], b: &[u8]) -> bool;
+    /// Rarity of the haystack byte that matches `b`, for anchor choice.
+    fn rank(b: u8) -> u8;
 }
 
 struct Exact;
@@ -84,8 +149,28 @@ impl Case for Exact {
     }
 
     #[inline]
+    fn flags_exact(chunk: u64, targets: (u64, u64)) -> u64 {
+        zero_bytes(chunk ^ targets.0)
+    }
+
+    #[inline]
     fn eq(a: u8, b: u8) -> bool {
         a == b
+    }
+
+    #[inline]
+    fn fold(b: u8) -> u8 {
+        b
+    }
+
+    #[inline]
+    fn slice_eq(a: &[u8], b: &[u8]) -> bool {
+        a == b
+    }
+
+    #[inline]
+    fn rank(b: u8) -> u8 {
+        RANK[b as usize]
     }
 }
 
@@ -114,65 +199,331 @@ impl Case for Ci {
     }
 
     #[inline]
+    fn flags_exact(chunk: u64, targets: (u64, u64)) -> u64 {
+        let lo = zero_bytes(chunk ^ targets.0);
+        if targets.0 == targets.1 {
+            lo
+        } else {
+            lo | zero_bytes(chunk ^ targets.1)
+        }
+    }
+
+    #[inline]
     fn eq(a: u8, b: u8) -> bool {
         LOWER[a as usize] == LOWER[b as usize]
+    }
+
+    #[inline]
+    fn fold(b: u8) -> u8 {
+        LOWER[b as usize]
+    }
+
+    #[inline]
+    fn slice_eq(a: &[u8], b: &[u8]) -> bool {
+        a.eq_ignore_ascii_case(b)
+    }
+
+    #[inline]
+    fn rank(b: u8) -> u8 {
+        RANK[LOWER[b as usize] as usize]
     }
 }
 
 /// First index in `from..=last` holding a byte that matches `byte` under `C`.
+///
+/// Blocks of 32, then 16, then 8 bytes are tested with one branch each; whatever is left over
+/// is a single masked word load anchored at `end`, so a short line — the common shape, since
+/// this runs once per line — never pays for a byte-at-a-time loop.
+#[inline]
 fn find_candidate<C: Case>(hay: &[u8], byte: u8, from: usize, last: usize) -> Option<usize> {
     if from > last || last >= hay.len() {
         return None;
     }
     let targets = C::targets(byte);
+    let end = last + 1;
     let mut i = from;
-    while i + 32 <= last + 1 {
-        let flags = C::flags(load8(hay, i), targets)
-            | C::flags(load8(hay, i + 8), targets)
-            | C::flags(load8(hay, i + 16), targets)
-            | C::flags(load8(hay, i + 24), targets);
+    while i + 32 <= end {
+        let w0 = load8(hay, i);
+        let w1 = load8(hay, i + 8);
+        let w2 = load8(hay, i + 16);
+        let w3 = load8(hay, i + 24);
+        let flags = C::flags(w0, targets)
+            | C::flags(w1, targets)
+            | C::flags(w2, targets)
+            | C::flags(w3, targets);
         if flags & HI != 0 {
-            for (k, &h) in hay[i..i + 32].iter().enumerate() {
-                if C::eq(h, byte) {
-                    return Some(i + k);
-                }
+            let m = C::flags_exact(w0, targets);
+            if m != 0 {
+                return Some(i + (m.trailing_zeros() as usize >> 3));
+            }
+            let m = C::flags_exact(w1, targets);
+            if m != 0 {
+                return Some(i + 8 + (m.trailing_zeros() as usize >> 3));
+            }
+            let m = C::flags_exact(w2, targets);
+            if m != 0 {
+                return Some(i + 16 + (m.trailing_zeros() as usize >> 3));
+            }
+            let m = C::flags_exact(w3, targets);
+            if m != 0 {
+                return Some(i + 24 + (m.trailing_zeros() as usize >> 3));
             }
         }
         i += 32;
     }
-    while i + 8 <= last + 1 {
-        if C::flags(load8(hay, i), targets) & HI != 0 {
-            for (k, &h) in hay[i..i + 8].iter().enumerate() {
-                if C::eq(h, byte) {
-                    return Some(i + k);
-                }
+    while i + 16 <= end {
+        let a = load8(hay, i);
+        let b = load8(hay, i + 8);
+        if (C::flags(a, targets) | C::flags(b, targets)) & HI != 0 {
+            let m = C::flags_exact(a, targets);
+            if m != 0 {
+                return Some(i + (m.trailing_zeros() as usize >> 3));
+            }
+            let m = C::flags_exact(b, targets);
+            if m != 0 {
+                return Some(i + 8 + (m.trailing_zeros() as usize >> 3));
+            }
+        }
+        i += 16;
+    }
+    while i + 8 <= end {
+        let word = load8(hay, i);
+        if C::flags(word, targets) & HI != 0 {
+            let m = C::flags_exact(word, targets);
+            if m != 0 {
+                return Some(i + (m.trailing_zeros() as usize >> 3));
             }
         }
         i += 8;
     }
-    while i <= last {
-        if C::eq(hay[i], byte) {
-            return Some(i);
+    if i == end {
+        return None;
+    }
+    if end < 8 {
+        return hay[i..end]
+            .iter()
+            .position(|&h| C::eq(h, byte))
+            .map(|k| i + k);
+    }
+    // The last word ends exactly at `end`; the lanes below `i` are already known to be clean.
+    let base = end - 8;
+    let lanes = (i - base) * 8;
+    let m = C::flags_exact(load8(hay, base), targets) & (u64::MAX << lanes);
+    (m != 0).then(|| base + (m.trailing_zeros() as usize >> 3))
+}
+
+/// Whether `hay[pos..pos + needle.len()]` equals `needle` under `C`.
+#[inline]
+fn verify<C: Case>(hay: &[u8], needle: &[u8], pos: usize) -> bool {
+    let Some(end) = pos.checked_add(needle.len()) else {
+        return false;
+    };
+    match hay.get(pos..end) {
+        Some(window) => C::slice_eq(window, needle),
+        None => false,
+    }
+}
+
+/// Index of the needle byte whose matches are rarest in text: the cheapest one to scan for.
+///
+/// The lookahead is capped so that a long needle costs the same handful of table reads as a
+/// short one, and the needle's last byte is always weighed because "common prefix, distinctive
+/// tail" (`the `, `// `, `);`) is the usual shape of a real pattern.
+fn anchor<C: Case>(needle: &[u8]) -> usize {
+    let n = needle.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut best = 0;
+    let mut best_rank = C::rank(needle[0]);
+    let head = n.min(6);
+    for (k, &b) in needle[..head].iter().enumerate().skip(1) {
+        let r = C::rank(b);
+        if r < best_rank {
+            best = k;
+            best_rank = r;
         }
-        i += 1;
+    }
+    if n > head && C::rank(needle[n - 1]) < best_rank {
+        best = n - 1;
+    }
+    best
+}
+
+/// Scan for a chosen needle byte and compare the whole window on each candidate. A mismatch
+/// advances the anchor by one byte, which is all that is left to do: the anchor is the needle's
+/// rarest byte, so candidates are few and the window compare (`memcmp` under `Exact`) is rare.
+#[inline]
+fn search_anchor<C: Case>(hay: &[u8], needle: &[u8], from: usize, k: usize) -> Option<usize> {
+    let n = needle.len();
+    let last = hay.len() - n + k;
+    let mut at = from + k;
+    while at <= last {
+        let p = find_candidate::<C>(hay, needle[k], at, last)?;
+        let start = p - k;
+        if verify::<C>(hay, needle, start) {
+            return Some(start);
+        }
+        at = p + 1;
     }
     None
 }
 
-/// Whether `needle` occurs at `pos` in `hay`. The caller guarantees `pos + needle.len()` is in bounds.
+/// Horspool's bad-byte table: 256 entries packed eight to a word, so building one costs 32
+/// stores plus one per needle byte instead of a 256-byte initialisation.
+#[derive(Debug, Clone)]
+struct Skip([u64; 32]);
+
+impl Skip {
+    /// `skip[b]` is how far the window may advance when its last byte is `b`: the distance to
+    /// that byte's last occurrence before the needle's end, or the needle width when it never
+    /// recurs. Offsets above 255 clamp, which only makes the skip smaller than allowed.
+    fn build<C: Case>(needle: &[u8]) -> Skip {
+        let n = needle.len();
+        let mut table = Skip([broadcast((n - 1).min(255) as u8); 32]);
+        for (k, &b) in needle[..n - 1].iter().enumerate() {
+            let key = C::fold(b) as usize;
+            let shift = (key & 7) * 8;
+            let lane = !(0xFFu64 << shift);
+            let step = ((n - 1 - k).min(255) as u64) << shift;
+            table.0[key >> 3] = (table.0[key >> 3] & lane) | step;
+        }
+        table
+    }
+
+    #[inline]
+    fn get(&self, b: u8) -> usize {
+        ((self.0[b as usize >> 3] >> ((b as usize & 7) * 8)) & 0xFF) as usize
+    }
+}
+
+/// Horspool: test the window's last byte, compare the rest only when it fits, and on a mismatch
+/// advance by the bad-byte table — a whole needle width per step once the haystack's bytes all
+/// happen to be common, which is where an anchor scan crawls.
 #[inline]
-fn verify<C: Case>(hay: &[u8], needle: &[u8], pos: usize) -> bool {
+fn search_skip<C: Case>(hay: &[u8], needle: &[u8], from: usize, skips: &Skip) -> Option<usize> {
     let n = needle.len();
-    match n {
-        0 | 1 => true,
-        2 => C::eq(hay[pos + 1], needle[1]),
-        3 => C::eq(hay[pos + 2], needle[2]) && C::eq(hay[pos + 1], needle[1]),
-        _ => {
-            // Tail first: it rejects most false first-byte hits without touching the interior.
-            if !C::eq(hay[pos + n - 1], needle[n - 1]) {
-                return false;
-            }
-            (1..n - 1).all(|k| C::eq(hay[pos + k], needle[k]))
+    let tail = n - 1;
+    let last = hay.len() - n;
+    let mut at = from;
+    while at <= last {
+        if C::eq(hay[at + tail], needle[tail]) && C::slice_eq(&hay[at..at + tail], &needle[..tail])
+        {
+            return Some(at);
+        }
+        at += skips.get(C::fold(hay[at + tail]));
+    }
+    None
+}
+
+/// Needles at least this long get a Horspool table. Measured: below 16 bytes the skip is too
+/// narrow to beat scanning for the rare anchor byte, and the window compare of every aligned
+/// window costs more than the candidates the anchor scan rejects. From 16 up Horspool wins by
+/// 1.15x to 1.6x on both shapes the searcher has — 30-byte lines and whole multi-megabyte
+/// buffers. Numbers in `bench_literal_matcher`.
+const SKIP_MIN_LEN: usize = 16;
+
+/// A needle prepared once and searched many times: which byte to scan for, and Horspool's
+/// bad-byte table when the needle is long enough to earn one.
+///
+/// `dusage search` runs the matcher once per line, and a 40-byte line is over before a plan
+/// paid for itself, so the plan is built with the pattern and reused. The public free functions
+/// below build one per call for the callers that match a single big buffer.
+#[derive(Debug)]
+pub struct Finder {
+    needle: Vec<u8>,
+    anchor: usize,
+    skips: Option<Skip>,
+    ci: bool,
+}
+
+impl Finder {
+    /// Prepare `needle`; `ci` selects the ASCII case-insensitive fold.
+    pub fn new(needle: &[u8], ci: bool) -> Finder {
+        let anchor = if ci {
+            anchor::<Ci>(needle)
+        } else {
+            anchor::<Exact>(needle)
+        };
+        let skips = if needle.len() >= SKIP_MIN_LEN {
+            Some(if ci {
+                Skip::build::<Ci>(needle)
+            } else {
+                Skip::build::<Exact>(needle)
+            })
+        } else {
+            None
+        };
+        Finder {
+            needle: needle.to_vec(),
+            anchor,
+            skips,
+            ci,
+        }
+    }
+
+    /// First occurrence at or after `from`.
+    #[inline]
+    pub fn find_from(&self, hay: &[u8], from: usize) -> Option<usize> {
+        if self.ci {
+            self.search_in::<Ci>(hay, from)
+        } else {
+            self.search_in::<Exact>(hay, from)
+        }
+    }
+
+    /// First occurrence in `hay`.
+    #[inline]
+    pub fn find(&self, hay: &[u8]) -> Option<usize> {
+        self.find_from(hay, 0)
+    }
+
+    #[inline]
+    fn search_in<C: Case>(&self, hay: &[u8], from: usize) -> Option<usize> {
+        let needle = &self.needle[..];
+        if from > hay.len() {
+            return None;
+        }
+        let n = needle.len();
+        if n == 0 {
+            return Some(from);
+        }
+        if n > hay.len() - from {
+            return None;
+        }
+        if n == 1 {
+            return find_candidate::<C>(hay, needle[0], from, hay.len() - 1);
+        }
+        match &self.skips {
+            Some(skips) => search_skip::<C>(hay, needle, from, skips),
+            None => search_anchor::<C>(hay, needle, from, self.anchor),
+        }
+    }
+}
+
+/// The free functions build their plan per call, so Horspool needs the buffer to be long
+/// enough to pay for the table: a 64 KiB read block or a `count_matches` sweep clears it, a
+/// 30-byte line does not.
+const SKIP_MIN_HAY: usize = 512;
+
+#[cfg(test)]
+impl Finder {
+    /// The same plan with the skip table forced off (`false`) or on (`true`), so the
+    /// benchmark compares the two strategies through one call path.
+    fn forced(&self, skips: bool) -> Finder {
+        Finder {
+            needle: self.needle.clone(),
+            anchor: self.anchor,
+            skips: if skips && self.needle.len() > 1 {
+                Some(if self.ci {
+                    Skip::build::<Ci>(&self.needle)
+                } else {
+                    Skip::build::<Exact>(&self.needle)
+                })
+            } else {
+                None
+            },
+            ci: self.ci,
         }
     }
 }
@@ -191,14 +542,10 @@ fn search<C: Case>(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if n == 1 {
         return find_candidate::<C>(hay, needle[0], from, hay.len() - 1);
     }
-    let last = hay.len() - n;
-    let mut at = from;
-    loop {
-        let p = find_candidate::<C>(hay, needle[0], at, last)?;
-        if verify::<C>(hay, needle, p) {
-            return Some(p);
-        }
-        at = p + 1;
+    if n >= SKIP_MIN_LEN && hay.len() - from >= SKIP_MIN_HAY {
+        search_skip::<C>(hay, needle, from, &Skip::build::<C>(needle))
+    } else {
+        search_anchor::<C>(hay, needle, from, anchor::<C>(needle))
     }
 }
 
@@ -887,6 +1234,643 @@ mod tests {
             }
         }
         best
+    }
+
+    /// The scan this module replaced, kept verbatim as the benchmark's baseline: first byte
+    /// only, cheap borrow-artefact flags, and an inline byte-loop verify.
+    mod legacy {
+        use super::{HI, LO};
+
+        fn broadcast(b: u8) -> u64 {
+            u64::from(b) * LO
+        }
+
+        fn zero_flags(x: u64) -> u64 {
+            x.wrapping_sub(LO) & !x
+        }
+
+        fn load8(hay: &[u8], at: usize) -> u64 {
+            u64::from_ne_bytes(hay[at..at + 8].try_into().unwrap())
+        }
+
+        fn find_candidate(hay: &[u8], byte: u8, from: usize, last: usize) -> Option<usize> {
+            if from > last || last >= hay.len() {
+                return None;
+            }
+            let target = broadcast(byte);
+            let mut i = from;
+            while i + 32 <= last + 1 {
+                let flags = zero_flags(load8(hay, i) ^ target)
+                    | zero_flags(load8(hay, i + 8) ^ target)
+                    | zero_flags(load8(hay, i + 16) ^ target)
+                    | zero_flags(load8(hay, i + 24) ^ target);
+                if flags & HI != 0 {
+                    for (k, &h) in hay[i..i + 32].iter().enumerate() {
+                        if h == byte {
+                            return Some(i + k);
+                        }
+                    }
+                }
+                i += 32;
+            }
+            while i + 8 <= last + 1 {
+                if zero_flags(load8(hay, i) ^ target) & HI != 0 {
+                    for (k, &h) in hay[i..i + 8].iter().enumerate() {
+                        if h == byte {
+                            return Some(i + k);
+                        }
+                    }
+                }
+                i += 8;
+            }
+            while i <= last {
+                if hay[i] == byte {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            None
+        }
+
+        fn verify(hay: &[u8], needle: &[u8], pos: usize) -> bool {
+            let n = needle.len();
+            match n {
+                0 | 1 => true,
+                2 => hay[pos + 1] == needle[1],
+                3 => hay[pos + 2] == needle[2] && hay[pos + 1] == needle[1],
+                _ => {
+                    if hay[pos + n - 1] != needle[n - 1] {
+                        return false;
+                    }
+                    (1..n - 1).all(|k| hay[pos + k] == needle[k])
+                }
+            }
+        }
+
+        pub fn find_byte(hay: &[u8], b: u8, from: usize) -> Option<usize> {
+            if from >= hay.len() {
+                return None;
+            }
+            find_candidate(hay, b, from, hay.len() - 1)
+        }
+
+        pub fn memmem_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+            if from > hay.len() {
+                return None;
+            }
+            let n = needle.len();
+            if n == 0 {
+                return Some(from);
+            }
+            if n > hay.len() - from {
+                return None;
+            }
+            if n == 1 {
+                return find_candidate(hay, needle[0], from, hay.len() - 1);
+            }
+            let last = hay.len() - n;
+            let mut at = from;
+            loop {
+                let p = find_candidate(hay, needle[0], at, last)?;
+                if verify(hay, needle, p) {
+                    return Some(p);
+                }
+                at = p + 1;
+            }
+        }
+    }
+
+    /// Common-byte needles of every length, absent from the corpus so the whole sweep runs:
+    /// this is the shape that decides where Horspool starts to pay.
+    const CROSSOVER: &[u8] = b"and the function returned struct error string package";
+
+    /// Needles spanning every strategy boundary the matcher has.
+    const BENCH_NEEDLES: [&[u8]; 12] = [
+        b"e",
+        b"q",
+        b"->",
+        b") {",
+        b"func ",
+        b"return ",
+        b"fmt.Println",
+        b"func (t *T) ",
+        b"if err != nil {",
+        b"package main\n\nimport",
+        b"\x01no such byte in go source\x01",
+        b"func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Req",
+    ];
+
+    /// A real corpus split into lines: one flat buffer plus `(start, end)` per line, so the
+    /// benchmark measures the matcher and nothing else.
+    fn corpus(root: &str, cap: usize) -> (Vec<u8>, Vec<(usize, usize)>) {
+        let mut buf = Vec::new();
+        let mut lines = Vec::new();
+        let mut dirs = vec![std::path::PathBuf::from(root)];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if !meta.is_file() || meta.len() == 0 || meta.len() > (1 << 20) {
+                    continue;
+                }
+                let Ok(data) = std::fs::read(&path) else {
+                    continue;
+                };
+                if data.iter().take(1024).any(|&b| b == 0) {
+                    continue;
+                }
+                let start = buf.len();
+                buf.extend_from_slice(&data);
+                let mut line = start;
+                for (i, &b) in buf.iter().enumerate().skip(start) {
+                    if b == b'\n' {
+                        lines.push((line, i));
+                        line = i + 1;
+                    }
+                }
+                if line < buf.len() {
+                    lines.push((line, buf.len()));
+                }
+                if buf.len() >= cap {
+                    break;
+                }
+            }
+            if buf.len() >= cap {
+                break;
+            }
+        }
+        (buf, lines)
+    }
+
+    /// Hits over every line, the shape the `-c` path takes: the old scan against the plan the
+    /// searcher really builds, once per pattern, then reused per line.
+    fn count_lines(buf: &[u8], lines: &[(usize, usize)], needle: &[u8], legacy: bool) -> usize {
+        let finder = (!legacy).then(|| Finder::new(needle, false));
+        let mut hits = 0;
+        for &(start, end) in lines {
+            let line = &buf[start..end];
+            let found = match &finder {
+                Some(f) => f.find_from(line, 0),
+                None => legacy::memmem_from(line, needle, 0),
+            };
+            hits += found.is_some() as usize;
+        }
+        hits
+    }
+
+    /// `find_byte` until it runs out, one byte past each hit: the line splitter's shape.
+    fn find_sweep(hay: &[u8], b: u8, legacy: bool) -> usize {
+        let mut at = 0;
+        let mut hits = 0;
+        loop {
+            let hit = if legacy {
+                legacy::find_byte(hay, b, at)
+            } else {
+                find_byte(hay, b, at)
+            };
+            match hit {
+                Some(p) => {
+                    hits += 1;
+                    at = p + 1;
+                }
+                None => return hits,
+            }
+        }
+    }
+
+    fn best_secs(mut f: impl FnMut() -> usize) -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..3 {
+            let start = Instant::now();
+            black_box(f());
+            best = best.min(start.elapsed().as_secs_f64());
+        }
+        best
+    }
+
+    /// Best-of-three seconds for one full sweep over the corpus.
+    fn sweep(buf: &[u8], lines: &[(usize, usize)], needle: &[u8], legacy: bool) -> f64 {
+        let iterations = if cfg!(debug_assertions) { 1 } else { 3 };
+        let mut best = f64::INFINITY;
+        for _ in 0..iterations {
+            let start = Instant::now();
+            black_box(count_lines(black_box(buf), lines, needle, legacy));
+            best = best.min(start.elapsed().as_secs_f64());
+        }
+        best
+    }
+
+    /// One strategy only, table prebuilt, so the columns isolate the scan from its setup.
+    #[derive(Clone, Copy)]
+    enum Strat {
+        Anchor,
+        Skip,
+    }
+
+    /// The same two strategies on one whole-buffer call, which is the shape a long needle
+    /// meets in `memmem`/`count_matches` and inside the regex literal prefilter.
+    fn whole_sweep(buf: &[u8], needle: &[u8], strat: Strat) -> f64 {
+        if needle.len() < 2 {
+            return f64::INFINITY;
+        }
+        let finder = Finder::new(needle, false).forced(matches!(strat, Strat::Skip));
+        let mut best = f64::INFINITY;
+        for _ in 0..3 {
+            let start = Instant::now();
+            black_box(finder.find_from(buf, 0));
+            best = best.min(start.elapsed().as_secs_f64());
+        }
+        best
+    }
+
+    fn strategy_sweep(buf: &[u8], lines: &[(usize, usize)], needle: &[u8], strat: Strat) -> f64 {
+        let finder = Finder::new(needle, false).forced(matches!(strat, Strat::Skip));
+        let mut best = f64::INFINITY;
+        for _ in 0..3 {
+            let start = Instant::now();
+            let mut hits = 0;
+            for &(start, end) in lines {
+                hits += finder.find_from(&buf[start..end], 0).is_some() as usize;
+            }
+            black_box(hits);
+            best = best.min(start.elapsed().as_secs_f64());
+        }
+        best
+    }
+
+    /// Old against new on one real corpus, one line at a time, the way `search` drives it.
+    ///
+    /// `DUSAGE_BENCH_CORPUS` picks the tree (default `/usr/local/go`); `DUSAGE_BENCH_MB` the
+    /// sample size. Release only: `cargo test --release bench_literal_matcher -- --ignored`.
+    #[test]
+    #[ignore = "benchmark: run with --release --ignored"]
+    fn bench_literal_matcher() {
+        let root = std::env::var("DUSAGE_BENCH_CORPUS").unwrap_or_else(|_| "/usr/local/go".into());
+        let mb: usize = std::env::var("DUSAGE_BENCH_MB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(64);
+        let Ok(meta) = std::fs::metadata(&root) else {
+            eprintln!("no corpus at {root}, nothing to measure");
+            return;
+        };
+        assert!(meta.is_dir(), "corpus must be a directory");
+        let (buf, lines) = corpus(&root, mb << 20);
+        let bytes: usize = lines.iter().map(|&(s, e)| e - s).sum();
+        let line_mb = bytes as f64 / (1u64 << 20) as f64;
+        eprintln!(
+            "\n{root}: {} lines, {line_mb:.1} MiB, avg {} bytes/line",
+            lines.len(),
+            bytes / lines.len().max(1)
+        );
+        eprintln!(
+            "{:<42} {:>5} {:>9} {:>9} {:>8} {:>9} {:>9} {:>7}",
+            "needle", "len", "old MB/s", "new MB/s", "speedup", "anchor", "horspool", "hits"
+        );
+        let whole_mb = buf.len() as f64 / (1u64 << 20) as f64;
+
+        eprintln!(
+            "\n{:<42} {:>5} {:>9} {:>9} {:>8} {:>8} {:>7}",
+            "crossover needle", "len", "line-anch", "line-skip", "buf-anch", "buf-skip", "hits"
+        );
+        let crossover: Vec<&[u8]> = [8usize, 12, 16, 20, 24, 28, 32, 40, 48]
+            .iter()
+            .map(|&n| &CROSSOVER[..n.min(CROSSOVER.len())])
+            .collect();
+        for needle in crossover.into_iter().chain([CROSSOVER]) {
+            let anchor_mbs = line_mb / strategy_sweep(&buf, &lines, needle, Strat::Anchor);
+            let skip_mbs = line_mb / strategy_sweep(&buf, &lines, needle, Strat::Skip);
+            eprintln!(
+                "{:<42} {:>5} {:>9.0} {:>9.0} {:>8.0} {:>8.0} {:>7}",
+                String::from_utf8_lossy(needle),
+                needle.len(),
+                anchor_mbs,
+                skip_mbs,
+                whole_mb / whole_sweep(&buf, needle, Strat::Anchor),
+                whole_mb / whole_sweep(&buf, needle, Strat::Skip),
+                count_lines(&buf, &lines, needle, false)
+            );
+        }
+
+        // A whole-buffer sweep at one byte per call, which is exactly how the line splitter
+        // drives `find_byte`; absent bytes make it a single full pass.
+        eprintln!("\nwhole-buffer single-byte sweep of {whole_mb:.1} MiB, one call per hit");
+        eprintln!(
+            "{:<12} {:>7} {:>10} {:>10} {:>8}",
+            "byte", "hits", "old GB/s", "new GB/s", "speedup"
+        );
+        for (label, b) in [
+            ("newline", b'\n'),
+            ("e", b'e'),
+            ("q", b'q'),
+            ("absent", 0x01),
+        ] {
+            let old = best_secs(|| find_sweep(black_box(&buf), b, true));
+            let new = best_secs(|| find_sweep(black_box(&buf), b, false));
+            eprintln!(
+                "{label:<12} {:>7} {:>10.2} {:>10.2} {:>7.2}x",
+                count_byte(&buf, b),
+                whole_mb / 1024.0 / old,
+                whole_mb / 1024.0 / new,
+                old / new
+            );
+        }
+
+        eprintln!();
+        for needle in BENCH_NEEDLES {
+            let label = String::from_utf8_lossy(needle).escape_debug().to_string();
+            let label: String = label.chars().take(40).collect();
+            let old = sweep(&buf, &lines, needle, true);
+            let new = sweep(&buf, &lines, needle, false);
+            let hits = count_lines(&buf, &lines, needle, false);
+            assert_eq!(
+                hits,
+                count_lines(&buf, &lines, needle, true),
+                "hit count differs for {label}"
+            );
+            let anchor_mbs = line_mb / strategy_sweep(&buf, &lines, needle, Strat::Anchor);
+            let skip_mbs = if needle.len() >= 2 {
+                line_mb / strategy_sweep(&buf, &lines, needle, Strat::Skip)
+            } else {
+                0.0
+            };
+            eprintln!(
+                "{label:<42} {:>5} {:>9.0} {:>9.0} {:>7.2}x {:>9.0} {:>9.0} {hits:>7}",
+                needle.len(),
+                line_mb / old,
+                line_mb / new,
+                old / new,
+                anchor_mbs,
+                skip_mbs
+            );
+        }
+    }
+
+    #[test]
+    fn every_needle_length_agrees_with_naive() {
+        // A distinct run per offset keeps accidental repeats out of the picture for needles up
+        // to 40 bytes, which is where an off-by-one in the block/tail split would show up.
+        let hay: Vec<u8> = (0..=250u16)
+            .map(|i| (i % 251) as u8)
+            .cycle()
+            .take(600)
+            .collect();
+        for n in 1..=40usize {
+            let starts = [
+                0,
+                1,
+                7,
+                8,
+                9,
+                15,
+                16,
+                17,
+                31,
+                32,
+                33,
+                63,
+                64,
+                65,
+                200,
+                600 - n,
+            ];
+            for at in starts {
+                let needle = &hay[at..at + n];
+                assert_eq!(memmem(&hay, needle), naive(&hay, needle), "len {n} at {at}");
+                assert_eq!(
+                    Finder::new(needle, false).find(&hay),
+                    naive(&hay, needle),
+                    "finder len {n} at {at}"
+                );
+                for from in [at.saturating_sub(1), at, at + 1, hay.len() - n] {
+                    let want = naive(&hay[from..], needle).map(|p| from + p);
+                    assert_eq!(memmem_from(&hay, needle, from), want, "from {from}");
+                    assert_eq!(Finder::new(needle, false).find_from(&hay, from), want);
+                }
+                // A needle that differs in one interior byte must miss.
+                if n > 2 {
+                    let mut miss = needle.to_vec();
+                    miss[1] ^= 0x80;
+                    assert_eq!(memmem(&hay, &miss), naive(&hay, &miss), "miss len {n}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_byte_needles() {
+        let runs = [b"a".as_slice(), b"\\", &[0u8], &[0xFF]];
+        for run in runs {
+            for len in 1..=40usize {
+                let needle = vec![run[0]; len];
+                for hay_len in [0, len.saturating_sub(1), len, len + 1, 64, 200] {
+                    let hay = vec![run[0]; hay_len];
+                    assert_eq!(
+                        memmem(&hay, &needle),
+                        naive(&hay, &needle),
+                        "{hay_len}/{len}"
+                    );
+                    assert_eq!(Finder::new(&needle, false).find(&hay), naive(&hay, &needle));
+                    assert_eq!(count_matches(&hay, &needle), naive_count(&hay, &needle));
+                }
+                // One byte short at the end: the needle must not match.
+                let mut hay = vec![run[0]; len + 8];
+                hay[len + 4] = b'x';
+                assert_eq!(memmem(&hay, &needle), naive(&hay, &needle));
+            }
+        }
+        for (hay, needle) in [
+            (&b"abababababab"[..], &b"abab"[..]),
+            (&b"abababababab"[..], &b"babab"[..]),
+            (&b"aaaaaaaaab"[..], &b"aaaab"[..]),
+            (&b"abcabcabcabc"[..], &b"abcabc"[..]),
+        ] {
+            assert_eq!(memmem(hay, needle), naive(hay, needle));
+            for from in 0..=hay.len() {
+                assert_eq!(
+                    memmem_from(hay, needle, from),
+                    naive(&hay[from..], needle).map(|p| from + p)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn needles_at_buffer_boundaries() {
+        let mut rng = Lcg::new(0xB0A7_DA7A);
+        for n in 1..=40usize {
+            for extra in [0usize, 1, 7, 8, 9, 16, 31, 32, 33, 64, 65] {
+                let hay_len = n + extra;
+                let hay: Vec<u8> = (0..hay_len).map(|_| b'a' + rng.below(3) as u8).collect();
+                for at in [0, hay_len - n] {
+                    let needle = hay[at..at + n].to_vec();
+                    assert_eq!(memmem(&hay, &needle), naive(&hay, &needle), "{n}/{extra}");
+                    assert_eq!(Finder::new(&needle, false).find(&hay), naive(&hay, &needle));
+                    assert_eq!(memmem_from(&hay, &needle, at), Some(at));
+                    for from in 0..=hay_len {
+                        assert_eq!(
+                            memmem_from(&hay, &needle, from),
+                            naive(&hay[from.min(hay_len)..], &needle)
+                                .map(|p| p + from.min(hay_len))
+                        );
+                    }
+                }
+            }
+        }
+        // Every byte position of a buffer that ends mid-word is reachable by `find_byte`.
+        for len in 1..=70usize {
+            let mut hay = vec![b'.'; len];
+            hay[len - 1] = b'X';
+            assert_eq!(find_byte(&hay, b'X', 0), Some(len - 1), "len {len}");
+            assert_eq!(find_byte(&hay, b'X', len - 1), Some(len - 1));
+            assert_eq!(find_byte(&hay, b'X', len), None);
+            let mut front = vec![b'.'; len];
+            front[0] = b'X';
+            assert_eq!(find_byte(&front, b'X', 0), Some(0), "len {len}");
+            assert_eq!(find_byte(&front, b'X', 1), None);
+        }
+    }
+
+    #[test]
+    fn overlapping_matches_advance_one_byte() {
+        let hay = b"aaaaabaaaaabaaaaa";
+        for needle in [&b"aab"[..], &b"aaab"[..], &b"aaaaab"[..], &b"ba"[..]] {
+            for from in 0..=hay.len() {
+                assert_eq!(
+                    memmem_from(hay, needle, from),
+                    naive(&hay[from..], needle).map(|p| from + p),
+                    "needle {needle:?} from {from}"
+                );
+            }
+            assert_eq!(count_matches(hay, needle), naive_count(hay, needle));
+        }
+        assert_eq!(memmem(b"aaa", b"aa"), Some(0));
+        assert_eq!(memmem_from(b"aaa", b"aa", 1), Some(1));
+        assert_eq!(count_matches(b"aaaa", b"aa"), 2);
+    }
+
+    #[test]
+    fn case_insensitive_mixed_case_lengths() {
+        let mut rng = Lcg::new(0x1CE_5EED);
+        let alpha = *b"abABcC-_";
+        for n in 1..=40usize {
+            for _ in 0..8 {
+                let hay_len = 20 + rng.below(120) as usize;
+                let hay: Vec<u8> = (0..hay_len)
+                    .map(|_| alpha[rng.below(alpha.len() as u32) as usize])
+                    .collect();
+                let mut needle: Vec<u8> = (0..n)
+                    .map(|_| alpha[rng.below(alpha.len() as u32) as usize])
+                    .collect();
+                if rng.below(2) == 0 && n <= hay_len {
+                    let at = rng.below((hay_len - n + 1) as u32) as usize;
+                    needle.copy_from_slice(&hay[at..at + n]);
+                    // Flip the case of every other letter, so only folding can match.
+                    for b in needle.iter_mut().step_by(2) {
+                        b.make_ascii_uppercase();
+                    }
+                }
+                assert_eq!(
+                    memmem_ci(&hay, &needle),
+                    naive_ci(&hay, &needle),
+                    "len {n} hay {hay:?} needle {needle:?}"
+                );
+                assert_eq!(
+                    Finder::new(&needle, true).find(&hay),
+                    naive_ci(&hay, &needle),
+                    "finder len {n}"
+                );
+                for from in 0..=hay_len + 1 {
+                    let want = if from > hay_len {
+                        None
+                    } else {
+                        naive_ci(&hay[from..], &needle).map(|p| from + p)
+                    };
+                    assert_eq!(memmem_ci_from(&hay, &needle, from), want);
+                    assert_eq!(Finder::new(&needle, true).find_from(&hay, from), want);
+                }
+            }
+        }
+    }
+
+    /// Thousands of deterministic random cases, both case rules, both the free functions and
+    /// the prepared `Finder`, all against the naive reference.
+    #[test]
+    fn cross_check_thousands_of_random_cases() {
+        let mut rng = Lcg::new(0xD15C_0DE5);
+        let alpha = *b"abAB\n().,;:";
+        let mut cases = 0;
+        for _ in 0..2500 {
+            let hay_len = rng.below(200) as usize;
+            let hay: Vec<u8> = (0..hay_len)
+                .map(|_| alpha[rng.below(alpha.len() as u32) as usize])
+                .collect();
+            let n = 1 + rng.below(45) as usize;
+            let needle: Vec<u8> = if rng.below(2) == 0 && n <= hay_len {
+                let at = rng.below((hay_len - n + 1) as u32) as usize;
+                hay[at..at + n].to_vec()
+            } else {
+                (0..n)
+                    .map(|_| alpha[rng.below(alpha.len() as u32) as usize])
+                    .collect()
+            };
+            let exact = Finder::new(&needle, false);
+            let folded = Finder::new(&needle, true);
+            assert_eq!(memmem(&hay, &needle), naive(&hay, &needle));
+            assert_eq!(exact.find(&hay), naive(&hay, &needle));
+            assert_eq!(memmem_ci(&hay, &needle), naive_ci(&hay, &needle));
+            assert_eq!(folded.find(&hay), naive_ci(&hay, &needle));
+            assert_eq!(count_matches(&hay, &needle), naive_count(&hay, &needle));
+            let from = rng.below((hay_len + 2) as u32) as usize;
+            let want = if from > hay_len {
+                None
+            } else {
+                naive(&hay[from..], &needle).map(|p| from + p)
+            };
+            assert_eq!(memmem_from(&hay, &needle, from), want);
+            assert_eq!(exact.find_from(&hay, from), want);
+            let _ = find_byte(&hay, needle[0], from);
+            cases += 1;
+        }
+        assert_eq!(cases, 2500);
+    }
+
+    #[test]
+    fn finder_keeps_the_free_function_semantics() {
+        let cases: [(&[u8], &[u8]); 8] = [
+            (b"", b""),
+            (b"abc", b""),
+            (b"", b"a"),
+            (b"hello world", b"world"),
+            (b"ab", b"abc"),
+            (b"Hello World", b"hello"),
+            (b"\xC1\xE1", b"\xE1"),
+            (b"aaaa", b"aa"),
+        ];
+        for (hay, needle) in cases {
+            for ci in [false, true] {
+                let finder = Finder::new(needle, ci);
+                let (want, want_ci) = (naive(hay, needle), naive_ci(hay, needle));
+                assert_eq!(finder.find(hay), if ci { want_ci } else { want });
+                for from in 0..=hay.len() + 1 {
+                    let want = if from > hay.len() {
+                        None
+                    } else if ci {
+                        naive_ci(&hay[from..], needle).map(|p| from + p)
+                    } else {
+                        naive(&hay[from..], needle).map(|p| from + p)
+                    };
+                    assert_eq!(finder.find_from(hay, from), want, "ci {ci} from {from}");
+                }
+            }
+        }
     }
 
     #[test]

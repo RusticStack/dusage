@@ -72,6 +72,9 @@ pub struct SearchOptions {
     pub encoding: Option<Encoding>,
     /// Separate the file name from the rest with a NUL byte (`-Z`/`--null`).
     pub null: bool,
+    /// Ask the walk for each entry's size and mtime: only the modes that print or filter on
+    /// them need it, and every other walk saves an lstat per file.
+    pub details: bool,
 }
 
 impl SearchOptions {
@@ -104,6 +107,7 @@ impl SearchOptions {
             max_columns: 0,
             encoding: None,
             null: false,
+            details: false,
         }
     }
 }
@@ -232,7 +236,7 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
         rules.push_dir(&job.dir, &job.rel);
     }
     let mut ents = Vec::new();
-    if let Err(e) = enumerate::DirReader::new().read(&job.dir, &mut ents, &mut out.stats.errors) {
+    if let Err(e) = enumerate::list(&job.dir, &mut ents, &mut out.stats.errors) {
         if e.kind() != io::ErrorKind::NotFound {
             out.stats.errors.record(&e);
         }
@@ -283,7 +287,7 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
                 out.cands.push(Candidate {
                     path: child.clone(),
                     rel: child_rel.clone(),
-                    size: e.size,
+                    size: 0,
                     modified: None,
                     is_dir: true,
                     is_link: false,
@@ -299,16 +303,29 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
                 });
             }
         } else {
-            if let Some(limit) = o.max_file_size {
-                if e.size > limit {
-                    continue;
+            // The inode is read only when a mode prints or filters on it.
+            let (mut size, mut modified) = (0u64, None);
+            if o.details || o.max_file_size.is_some() {
+                let path = job.dir.join(&e.name);
+                match e.stat(&path) {
+                    Ok(st) => {
+                        if o.max_file_size.is_some_and(|limit| st.size > limit) {
+                            continue;
+                        }
+                        size = st.size;
+                        modified = Some(st.modified());
+                    }
+                    Err(err) => {
+                        out.stats.errors.record(&err);
+                        continue;
+                    }
                 }
             }
             out.cands.push(Candidate {
                 path: job.dir.join(&e.name),
                 rel: child_rel,
-                size: e.size,
-                modified: Some(e.modified()),
+                size,
+                modified,
                 is_dir: false,
                 is_link: false,
             });

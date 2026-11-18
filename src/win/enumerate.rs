@@ -153,6 +153,77 @@ impl Entry {
     }
 }
 
+/// One entry's inode data, filled from the batched directory query so no extra syscall is
+/// needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stat {
+    pub size: u64,
+    pub alloc: u64,
+    pub file_id: u128,
+    pub dev: u64,
+    modified: SystemTime,
+}
+
+impl Stat {
+    pub fn modified(&self) -> SystemTime {
+        self.modified
+    }
+}
+
+/// A directory entry with its type already known and its inode data fetched on demand. The
+/// batched query returns both, so nothing here costs an extra syscall; the shape matches the
+/// Linux side so the walker can be written once.
+#[derive(Debug, Clone)]
+pub struct Lite {
+    pub name: OsString,
+    is_dir: bool,
+    is_link: bool,
+    stat: std::cell::Cell<Option<Stat>>,
+}
+
+impl Lite {
+    pub fn is_dir(&self) -> bool {
+        self.is_dir
+    }
+
+    pub fn is_reparse(&self) -> bool {
+        self.is_link
+    }
+
+    pub fn stat(&self, _path: &Path) -> io::Result<Stat> {
+        match self.stat.get() {
+            Some(s) => Ok(s),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "entry has no inode data",
+            )),
+        }
+    }
+}
+
+/// List `dir` into `out`, reusing the caller's vector.
+pub fn list(dir: &Path, out: &mut Vec<Lite>, errs: &mut ErrorCounts) -> io::Result<()> {
+    let mut ents = Vec::new();
+    DirReader::new().read(dir, &mut ents, errs)?;
+    out.clear();
+    out.reserve(ents.len());
+    for e in ents {
+        out.push(Lite {
+            is_dir: e.is_dir(),
+            is_link: e.is_reparse(),
+            stat: std::cell::Cell::new(Some(Stat {
+                size: e.size,
+                alloc: e.alloc,
+                file_id: e.file_id,
+                dev: 0,
+                modified: e.modified(),
+            })),
+            name: e.name,
+        });
+    }
+    Ok(())
+}
+
 fn filetime_to_system_time(ticks: u64) -> SystemTime {
     let dur = |t: u64| Duration::new(t / 10_000_000, (t % 10_000_000) as u32 * 100);
     if ticks >= EPOCH_DIFF_TICKS {

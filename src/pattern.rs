@@ -3,6 +3,7 @@
 //! "does this line match, and where".
 
 use crate::bytes;
+use crate::pcre::Pcre;
 use crate::regex::{Flags, Regex};
 
 pub use crate::regex::Match;
@@ -11,7 +12,10 @@ pub use crate::regex::Match;
 pub enum PatternKind {
     /// A plain substring (the `-F` form, or a pattern with no regex syntax).
     Literal,
+    /// The Pike VM: everything without lookaround or backreferences.
     Regex,
+    /// A backtracking matcher, used when the pattern needs lookaround or backreferences.
+    Pcre,
 }
 
 #[derive(Debug)]
@@ -20,9 +24,14 @@ pub struct Pattern {
     source: String,
     /// The literal bytes, for `Literal` patterns.
     lit: Vec<u8>,
+    /// The same bytes with the scan plan already built: which byte to look for and the skip
+    /// table. `dusage search` asks this per line, so nothing about the needle is recomputed.
+    finder: Option<bytes::Finder>,
     ci: bool,
     word: bool,
     re: Option<Regex>,
+    /// The backtracking matcher, when the pattern is beyond the Pike VM.
+    pcre: Option<Pcre>,
     /// A byte every match must contain, used to skip lines without running the VM.
     required: Option<u8>,
 }
@@ -31,25 +40,71 @@ impl Pattern {
     /// Compile `text`. `fixed` forces a literal; otherwise regex syntax is honoured and a
     /// pattern that compiles to a plain literal gets the fast path anyway.
     pub fn new(text: &str, fixed: bool, ignore_case: bool, word: bool) -> Result<Pattern, String> {
+        Pattern::with_engine(text, fixed, ignore_case, word, false)
+    }
+
+    /// Like [`Pattern::new`], with `pcre` forcing the backtracking engine the way `-P` does.
+    pub fn with_engine(
+        text: &str,
+        fixed: bool,
+        ignore_case: bool,
+        word: bool,
+        pcre: bool,
+    ) -> Result<Pattern, String> {
         if text.is_empty() {
             return Err("empty pattern".to_string());
+        }
+        if pcre && !fixed {
+            return Ok(Pattern {
+                kind: PatternKind::Pcre,
+                source: text.to_string(),
+                lit: Vec::new(),
+                finder: None,
+                ci: ignore_case,
+                word,
+                re: None,
+                pcre: Some(Pcre::new(text)?),
+                required: None,
+            });
         }
         if fixed {
             return Ok(Pattern {
                 kind: PatternKind::Literal,
                 source: text.to_string(),
                 lit: text.as_bytes().to_vec(),
+                finder: Some(bytes::Finder::new(text.as_bytes(), ignore_case)),
                 ci: ignore_case,
                 word,
                 re: None,
-                required: ignore_case.then(|| text.as_bytes()[0].to_ascii_lowercase()),
+                pcre: None,
+                required: None,
             });
         }
         let flags = Flags {
             case_insensitive: ignore_case,
             ..Default::default()
         };
-        let re = Regex::new_with(text, flags)?;
+        let re = match Regex::new_with(text, flags) {
+            Ok(re) => re,
+            // Lookaround and backreferences are beyond the Pike VM; a bounded backtracking
+            // engine covers exactly those, so a pattern that needs them still works.
+            Err(err) => match Pcre::new(text) {
+                Ok(pcre) => {
+                    return Ok(Pattern {
+                        kind: PatternKind::Pcre,
+                        source: text.to_string(),
+                        lit: Vec::new(),
+                        finder: None,
+                        ci: ignore_case,
+                        word,
+                        re: None,
+                        pcre: Some(pcre),
+                        required: None,
+                    })
+                }
+                Err(_) => return Err(err),
+            },
+        };
         // A literal whole pattern is the common "grep for a word" case: scan bytes. The
         // literal fast path is disabled inside the regex when `-i` folds, so the checker
         // parses the pattern once more without folding to see whether it is plain.
@@ -62,15 +117,16 @@ impl Pattern {
         };
         if let Some(lit) = plain {
             if !lit.is_empty() {
-                let required = rarest_byte(&lit);
                 return Ok(Pattern {
                     kind: PatternKind::Literal,
                     source: text.to_string(),
+                    finder: Some(bytes::Finder::new(&lit, ignore_case)),
                     lit,
                     ci: ignore_case,
                     word,
                     re: None,
-                    required,
+                    pcre: None,
+                    required: None,
                 });
             }
         }
@@ -79,9 +135,11 @@ impl Pattern {
             kind: PatternKind::Regex,
             source: text.to_string(),
             lit: Vec::new(),
+            finder: None,
             ci: ignore_case,
             word,
             re: Some(re),
+            pcre: None,
             required,
         })
     }
@@ -111,6 +169,21 @@ impl Pattern {
         }
         match self.kind {
             PatternKind::Literal => self.find_literal(hay, from),
+            PatternKind::Pcre => {
+                let pcre = self.pcre.as_ref()?;
+                let mut at = from;
+                while at <= hay.len() {
+                    let m = pcre.find_at(hay, at)?;
+                    if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
+                        return Some(Match {
+                            start: m.start,
+                            end: m.end,
+                        });
+                    }
+                    at = m.start + 1;
+                }
+                None
+            }
             PatternKind::Regex => {
                 // Cheap prefilter: a line without the required byte cannot match.
                 if let Some(b) = self.required {
@@ -138,8 +211,9 @@ impl Pattern {
                 return Some(m);
             }
         }
-        if !self.word && !self.ci {
-            let i = bytes::memmem_from(hay, &self.lit, from)?;
+        let finder = self.finder.as_ref()?;
+        if !self.word {
+            let i = finder.find_from(hay, from)?;
             return Some(Match {
                 start: i,
                 end: i + self.lit.len(),
@@ -147,16 +221,12 @@ impl Pattern {
         }
         let mut at = from;
         while at <= hay.len() {
-            let i = if self.ci {
-                bytes::memmem_ci_from(hay, &self.lit, at)?
-            } else {
-                bytes::memmem_from(hay, &self.lit, at)?
-            };
+            let i = finder.find_from(hay, at)?;
             let m = Match {
                 start: i,
                 end: i + self.lit.len(),
             };
-            if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
+            if bytes::at_word_boundary(hay, m.start, m.end) {
                 return Some(m);
             }
             at = i + 1;
@@ -210,24 +280,6 @@ impl Pattern {
         }
         out
     }
-}
-
-/// The least frequent byte of a needle, by a plain frequency table of English-ish text. It is
-/// only a filter, so a wrong guess costs a false positive, never a missed match.
-fn rarest_byte(lit: &[u8]) -> Option<u8> {
-    // Rough probabilities: letters in the middle of a word are common, digits and symbols are
-    // not, whitespace sits in between.
-    fn weight(b: u8) -> u32 {
-        match b {
-            b'e' | b't' | b'a' | b'o' | b'i' | b'n' | b's' | b'r' => 100,
-            b' ' | b'h' | b'l' | b'd' | b'c' | b'u' | b'm' | b'f' | b'p' | b'g' | b'y' => 60,
-            b'w' | b'b' | b'v' | b'k' | b'x' | b'j' | b'q' | b'z' => 12,
-            b'0'..=b'9' => 20,
-            b'\n' | b'\t' | b'\r' => 5,
-            _ => 30,
-        }
-    }
-    lit.iter().copied().min_by_key(|b| weight(*b))
 }
 
 /// Lowercase `s` and return, for every byte of the folded form, the byte offset of the

@@ -12,6 +12,7 @@ pub mod guard;
 pub mod ignore;
 pub mod model;
 pub mod pattern;
+pub mod pcre;
 pub mod preset;
 pub mod prune;
 pub mod queue;
@@ -19,6 +20,7 @@ pub mod regex;
 pub mod report;
 pub mod scan;
 pub mod search;
+pub mod unicode;
 
 #[cfg(target_os = "linux")]
 pub mod unix;

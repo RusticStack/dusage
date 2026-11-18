@@ -25,6 +25,7 @@ PATTERN SYNTAX (regular expressions):
 
 OPTIONS:
     -F, --fixed-strings    treat the pattern as literal text
+    -P, --pcre2            force the backtracking engine (lookaround, backreferences)
     -i, --ignore-case      case-insensitive (ASCII folding)
     -w, --word-regexp      match whole words only
     -v, --invert-match     select lines that do not match
@@ -214,6 +215,8 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
 const SEARCH_BOOL_FLAGS: &[&str] = &[
     "-F",
     "--fixed-strings",
+    "-P",
+    "--pcre2",
     "-i",
     "--ignore-case",
     "-w",
@@ -379,11 +382,12 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     // with `--fixed`), so a literal placeholder is all the engine needs.
     let fixed = (a.flag("-F") || a.flag("--fixed-strings")) && !multi_pattern;
     let mut o = SearchOptions::new(
-        Pattern::new(
+        Pattern::with_engine(
             &pattern_text,
             scope == Scope::Paths || fixed,
             a.flag("-i") || a.flag("--ignore-case"),
             a.flag("-w") || a.flag("--word-regexp"),
+            a.flag("-P") || a.flag("--pcre2"),
         )?,
         roots,
     );
@@ -476,6 +480,11 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 Some(Glob::new(&pattern_text)?)
             };
             o.pattern = Pattern::new(&pattern_text, true, false, false)?;
+            o.details = json
+                || a.flag("--long")
+                || a.value("--size").is_some()
+                || a.value("--older").is_some()
+                || a.value("--newer").is_some();
             let mut r = search(&o).map_err(|e| Fail(1, e.to_string()))?;
             let size_filter = match a.value("--size") {
                 None => None,
