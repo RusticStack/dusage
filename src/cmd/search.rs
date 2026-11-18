@@ -53,6 +53,7 @@ OPTIONS:
     --max-filesize SIZE    skip files larger than SIZE (e.g. 10M)
     --max-columns N        truncate printed lines at N bytes
     --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
+    --files                with no pattern, list the files a search would read
     -Z, --null             NUL instead of ':' after each file name (for xargs -0)
 
 A path of `-` is standard input, and with no paths a piped stdin is searched instead of `.`.
@@ -598,8 +599,14 @@ impl SizeFilter {
     }
 }
 
-/// `dusage search <pattern> [paths...]`
+/// `dusage search <pattern> [paths...]`, and `dusage search --files` to list the files a
+/// search would read (the same walk `find '*' --files` does).
 pub fn run_search(raw: Vec<String>) -> Result<(), Fail> {
+    if raw.iter().any(|t| t == "--files") && !raw.iter().any(|t| t == "-e" || t == "--regexp") {
+        let mut args = vec!["*".to_string(), "--files".to_string()];
+        args.extend(raw.iter().filter(|t| *t != "--files").cloned());
+        return run_query(args, Scope::Paths);
+    }
     run_query(raw, Scope::Content)
 }
 
