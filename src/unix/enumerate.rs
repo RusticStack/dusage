@@ -1,18 +1,28 @@
-//! Directory enumeration for Linux, built on `std::fs::read_dir` plus one `lstat`
-//! per entry. Symlinks take the place of Windows reparse points: they are reported
-//! and never followed.
+//! Directory enumeration for Linux, in two layers.
 //!
-//! Per-entry failures are recorded in the caller's `ErrorCounts` and the walk
+//! [`list`] is the primitive: one `getdents64` batch sequence through `std::fs::read_dir`,
+//! a name copy per entry, and a `dirent` type that costs nothing when the filesystem fills
+//! `d_type` (std falls back to one `lstat` only on filesystems that leave it `DT_UNKNOWN`).
+//! Anything that needs the inode — size, allocation, mtime, device, file id — is
+//! [`Lite::stat`], one `lstat` on demand, cached in the entry. A walk that only reads names
+//! and types therefore never stats.
+//!
+//! [`DirReader::read`] keeps the eager contract its other callers rely on (every entry
+//! carries its `lstat` data, exactly as before) and is built on a single `readdir` loop.
+//!
+//! Symlinks take the place of Windows reparse points: they are reported and never
+//! followed. Per-entry failures are recorded in the caller's `ErrorCounts` and the walk
 //! continues; only an unreadable directory is returned as `Err`.
 
 use crate::model::ErrorCounts;
+use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One directory entry: the Unix shape of `win::enumerate::Entry`.
 pub struct Entry {
@@ -43,6 +53,123 @@ impl Entry {
     }
 }
 
+/// The `dirent` type, which is exact and free: `getdents64` reports it, so neither `list`
+/// nor a walk that only needs names pays a syscall for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Dir,
+    File,
+    Link,
+    Other,
+}
+
+impl Kind {
+    fn of(t: fs::FileType) -> Kind {
+        if t.is_dir() {
+            Kind::Dir
+        } else if t.is_symlink() {
+            Kind::Link
+        } else if t.is_file() {
+            Kind::File
+        } else {
+            Kind::Other
+        }
+    }
+}
+
+/// What one `lstat` reports, as [`Lite::stat`] hands it over.
+#[derive(Clone, Copy)]
+pub struct Stat {
+    pub size: u64,
+    pub alloc: u64,
+    pub file_id: u128,
+    pub dev: u64,
+    modified: SystemTime,
+}
+
+impl Stat {
+    pub fn modified(&self) -> SystemTime {
+        self.modified
+    }
+}
+
+fn stat_of(p: &Path) -> io::Result<Stat> {
+    let md = fs::symlink_metadata(p)?;
+    Ok(Stat {
+        size: if md.is_dir() { 0 } else { md.len() },
+        alloc: md.blocks() * 512,
+        file_id: (md.dev() as u128) << 64 | md.ino() as u128,
+        dev: md.dev(),
+        modified: md.modified().unwrap_or(UNIX_EPOCH),
+    })
+}
+
+/// One name from a directory, as cheaply as the kernel gives it up: a name, a type that
+/// came with the `dirent`, and an empty slot for the `lstat` data.
+///
+/// `stat` is the only thing that costs a syscall, and it runs once: the entry remembers the
+/// answer, so a size asked for in a filter and again in the output is one `lstat`.
+pub struct Lite {
+    pub name: OsString,
+    kind: Kind,
+    stat: Cell<Option<Stat>>,
+}
+
+impl Lite {
+    pub fn is_dir(&self) -> bool {
+        self.kind == Kind::Dir
+    }
+
+    pub fn is_reparse(&self) -> bool {
+        self.kind == Kind::Link
+    }
+
+    /// `lstat` this entry at `path`, its full path in the directory just listed. The result
+    /// is cached: a second call is free. Exact, never a shortcut — the scan and prune paths
+    /// decide on size and mtime from it.
+    pub fn stat(&self, path: &Path) -> io::Result<Stat> {
+        match self.stat.get() {
+            Some(s) => Ok(s),
+            None => {
+                let s = stat_of(path)?;
+                self.stat.set(Some(s));
+                Ok(s)
+            }
+        }
+    }
+}
+
+/// List one directory into `out`: names and types only, no `stat`.
+///
+/// `out` is cleared and its allocation reused, so a walk keeps one entry vector instead of
+/// allocating one per directory. An entry that cannot be typed is recorded in `errs` and
+/// dropped, like an entry that vanishes between `getdents` and `lstat` always was.
+pub fn list(dir: &Path, out: &mut Vec<Lite>, errs: &mut ErrorCounts) -> io::Result<()> {
+    out.clear();
+    for e in fs::read_dir(dir)? {
+        let e = match e {
+            Ok(e) => e,
+            Err(err) => {
+                errs.record(&err);
+                continue;
+            }
+        };
+        // `file_type` is the `dirent`'s own `d_type`; std stats only when the filesystem
+        // reports `DT_UNKNOWN`.
+        match e.file_type() {
+            Ok(t) => out.push(Lite {
+                name: e.file_name(),
+                kind: Kind::of(t),
+                stat: Cell::new(None),
+            }),
+            Err(err) => {
+                errs.record(&err);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// True for entries that are counted as links and never descended into.
 pub fn is_skipped(e: &Entry) -> bool {
     e.is_link
@@ -66,9 +193,13 @@ fn entry(name: OsString, md: &fs::Metadata, detail: bool) -> Entry {
     }
 }
 
-/// List one directory. `detail` fills allocation size, device and file id, which
-/// costs nothing extra here (one `lstat` per entry either way) but keeps the
+/// List one directory with an `lstat` per entry. `detail` fills allocation size, device and
+/// file id, which costs nothing extra here (one `lstat` per entry either way) but keeps the
 /// `readdir` backend's documented "on-disk unknown, no file ids" behaviour.
+///
+/// This keeps the `DirEntry::metadata` call rather than rebuilding a path and statting it:
+/// it is `fstatat(dirfd, name)`, one syscall with no path to resolve, which is what the
+/// eager callers (scan, prune, delete, watch) want for every single entry.
 fn read_with(
     dir: &Path,
     out: &mut Vec<Entry>,
@@ -187,6 +318,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Instant;
 
     struct Fixture(PathBuf);
     impl Fixture {
@@ -302,5 +434,162 @@ mod tests {
         assert!(!same_filesystem(&v[0], dev + 1));
         assert!(!other_filesystem(&v[0], 0), "unknown root device");
         assert!(same_filesystem(&v[0], 0), "unknown parent dev accepts");
+    }
+
+    #[test]
+    fn lite_types_come_from_the_dirent() {
+        let f = Fixture::new("lite");
+        fs::create_dir(f.0.join("sub")).unwrap();
+        fs::write(f.0.join("a.bin"), vec![0u8; 4096]).unwrap();
+        std::os::unix::fs::symlink(f.0.join("a.bin"), f.0.join("link")).unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        let mut got: Vec<String> = v
+            .iter()
+            .map(|e| e.name.to_string_lossy().into_owned())
+            .collect();
+        got.sort();
+        assert_eq!(got, ["a.bin", "link", "sub"]);
+        assert_eq!(errs.total(), 0);
+        let dir = |n: &str| v.iter().find(|e| e.name == n).unwrap().is_dir();
+        assert!(dir("sub") && !dir("a.bin") && !dir("link"));
+        let link = v.iter().find(|e| e.name == "link").unwrap();
+        assert!(link.is_reparse());
+        // `list` clears and reuses the buffer.
+        list(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(v.len(), 3);
+        list(&f.0.join("sub"), &mut v, &mut errs).unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn lite_stat_is_exact_and_cached() {
+        let f = Fixture::new("stat");
+        fs::write(f.0.join("a"), vec![0u8; 5000]).unwrap();
+        std::os::unix::fs::symlink(f.0.join("a"), f.0.join("lnk")).unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        for e in &v {
+            let p = f.0.join(&e.name);
+            let s = e.stat(&p).unwrap();
+            let md = fs::symlink_metadata(&p).unwrap();
+            assert_eq!(
+                s.size,
+                if md.is_dir() { 0 } else { md.len() },
+                "{:?}",
+                e.name
+            );
+            assert_eq!(s.alloc, md.blocks() * 512, "{:?}", e.name);
+            assert_eq!(s.dev, md.dev(), "{:?}", e.name);
+            assert_eq!(s.file_id, (md.dev() as u128) << 64 | md.ino() as u128);
+            assert_eq!(s.modified(), md.modified().unwrap(), "{:?}", e.name);
+            // Cached: the same answer, and the same copy, on a second call.
+            let again = e.stat(&f.0.join("does-not-exist")).unwrap();
+            assert_eq!(again.size, s.size);
+        }
+        // A link stats as itself: its own length, not its target's 5000 bytes.
+        let lone = v.iter().find(|e| e.name == "lnk").unwrap();
+        assert_ne!(lone.stat(&f.0.join("lnk")).unwrap().size, 5000);
+    }
+
+    #[test]
+    fn lite_stat_reports_a_vanished_entry() {
+        let f = Fixture::new("gone");
+        fs::write(f.0.join("a"), b"x").unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        let gone = f.0.join("vanished");
+        assert!(v[0].stat(&gone).is_err());
+    }
+
+    /// Enumeration cost over a real tree, eager versus cheap. Ignored: it needs a big
+    /// directory. `DUSAGE_ENUM_BENCH=/usr cargo test --release -- --ignored --nocapture
+    /// bench_enumeration`.
+    #[test]
+    #[ignore]
+    fn bench_enumeration() {
+        let root = std::env::var_os("DUSAGE_ENUM_BENCH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/usr"));
+        let mut stack = vec![root.clone()];
+        let mut dirs = Vec::new();
+        while let Some(d) = stack.pop() {
+            let mut ents = Vec::new();
+            if list(&d, &mut ents, &mut ErrorCounts::default()).is_ok() {
+                dirs.push(d.clone());
+                for e in &ents {
+                    if e.is_dir() {
+                        stack.push(d.join(&e.name));
+                    }
+                }
+            }
+        }
+        let t0 = Instant::now();
+        let mut n = 0usize;
+        let mut buf = Vec::new();
+        for d in &dirs {
+            if list(d, &mut buf, &mut ErrorCounts::default()).is_ok() {
+                n += buf.len();
+            }
+        }
+        let cheap = t0.elapsed();
+
+        let t0 = Instant::now();
+        let mut m = 0usize;
+        let mut reader = DirReader::new();
+        let mut out = Vec::new();
+        for d in &dirs {
+            out.clear();
+            if reader
+                .read(d, &mut out, &mut ErrorCounts::default())
+                .is_ok()
+            {
+                m += out.len();
+            }
+        }
+        let eager = t0.elapsed();
+
+        let t0 = Instant::now();
+        let mut k = 0usize;
+        let mut st = PathBuf::with_capacity(256);
+        for d in &dirs {
+            if list(d, &mut buf, &mut ErrorCounts::default()).is_ok() {
+                for e in &buf {
+                    st.clear();
+                    st.push(d);
+                    st.push(&e.name);
+                    if e.stat(&st).is_ok() {
+                        k += 1;
+                    }
+                }
+            }
+        }
+        let lazy = t0.elapsed();
+
+        println!(
+            "enum bench {}: {} dirs, {} entries",
+            root.display(),
+            dirs.len(),
+            n
+        );
+        println!(
+            "  list (names + types only)         {:>8.1} ms  {n} entries",
+            ms(cheap)
+        );
+        println!(
+            "  read (names + one lstat each)     {:>8.1} ms  {m} entries",
+            ms(eager)
+        );
+        println!(
+            "  list + stat every entry           {:>8.1} ms  {k} entries",
+            ms(lazy)
+        );
+    }
+
+    fn ms(d: std::time::Duration) -> f64 {
+        d.as_secs_f64() * 1e3
     }
 }

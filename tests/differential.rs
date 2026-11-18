@@ -891,6 +891,17 @@ fn corpus() -> Vec<Case> {
             &["-rnE"],
         ),
         case(
+            "unicode_class_letters",
+            Agree,
+            Rg,
+            "plain",
+            ".",
+            "\\p{L}{4,}",
+            &["-o", "-n"],
+            &["-o", "-n", "--pcre2"],
+            &["-rE"],
+        ),
+        case(
             "unicode_case_fold",
             Agree,
             Both,

@@ -11,9 +11,12 @@
 //! *  +  ?  {n}  {n,}  {n,m}                     greedy, or lazy with a trailing ?
 //! |                    alternation, leftmost-first (Perl) preference
 //! ( ... )  (?: ... )   capturing and non-capturing groups (captures are not reported)
-//! [abc]  [^abc]  [a-z]  [\d_]  [\]]            byte classes
+//! [abc]  [^abc]  [a-z]  [\d_]  [\]]            character classes, ASCII or not
+//! [\p{L}a]  [^\p{Nd}]                          Unicode classes, negated or not
 //! ^  $  \A  \z  \b  \B  anchors and word boundaries
-//! \d \D \w \W \s \S    ASCII digit / word / space classes and their negations
+//! \d \D \w \W \s \S    digit / word / space classes and their negations
+//! \p{L} \p{Lu} \p{Ll} \p{N} \p{Nd} \p{P} \p{Z} \p{S} \p{C}
+//!                      Unicode general categories (see `crate::unicode`)
 //! [[:alpha:]] [^[:space:]]  POSIX bracket expressions inside a class
 //! \n \r \t \f \v \0 \xHH   escapes; \. matches a literal dot
 //! (?i) (?s) (?m) (?-i) (?ism)   inline flags, at the pattern start or a group start
@@ -21,13 +24,35 @@
 //!
 //! # Semantics
 //!
-//! Matching is byte-oriented: the haystack is `&[u8]` and every atom consumes bytes, so
-//! `.` matches one byte of a multi-byte character. `^` and `$` anchor at the ends of the
-//! haystack, or at line boundaries with `(?m)`/`multi_line`. `$` matches only at the end of
-//! the haystack (or before a `\n` when multi-line), never before a trailing newline.
-//! Case-insensitive mode folds ASCII letters only. Alternation and repetition are
-//! leftmost-first, not POSIX longest. Lookaround, backreferences and Unicode classes
-//! (`\p{..}`) are rejected with an error naming the offset.
+//! Two execution paths share one VM. The byte path runs the program over the haystack
+//! bytes, so `.` matches one byte of a multi-byte character and `\d`, `\w`, `\s` and
+//! `\b` are ASCII. The character path runs the same VM over the characters of the line,
+//! so `.` matches one code point, `\d` is `\p{Nd}`, `\w` and `\b` are Unicode, and
+//! `[[:alpha:]]` matches `é`. A pattern needs the character path when it names something
+//! only Unicode can answer: a character outside ASCII, a `\p{..}` class, a POSIX class,
+//! a `\d`-style shorthand, `\b`, or `-i` folding over a non-ASCII character.
+//!
+//! Which path runs is decided per line, not per pattern. An ASCII line is answered by the
+//! byte program, which is exact for it and costs what it always did; only a line holding
+//! a non-ASCII byte is decoded and given to the character program. That keeps the engine's
+//! speed on ASCII text while `\w+` matches `café` and `\d` matches `٣`. A pattern that is
+//! a plain literal never reaches either path: it is searched for as bytes, as it always
+//! was.
+//!
+//! `^` and `$` anchor at the ends of the haystack, or at line boundaries with
+//! `(?m)`/`multi_line`. `$` matches only at the end of the haystack (or before a `\n`
+//! when multi-line), never before a trailing newline. `-i` folds with the simple case
+//! folding of `crate::unicode`, so `Σ`, `σ` and `ς` are one character to it. Alternation
+//! and repetition are leftmost-first, not POSIX longest. Lookaround, backreferences and
+//! property names outside the categories `crate::unicode` holds are rejected with an error
+//! naming the offset.
+//!
+//! A line that is not valid UTF-8 has no characters to be right about, so it is matched
+//! byte-wise, exactly as before: the byte meanings apply to binary and Latin-1 content,
+//! which is also what keeps a binary file from turning into millions of replacement
+//! characters.
+
+use crate::unicode::{self, CharClass};
 
 /// Compile-time flags, also settable inline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -152,10 +177,12 @@ enum Assert {
     NotWordBoundary,
 }
 
+/// One instruction of a program. `S` is the symbol set it consumes: a `ByteSet` on the
+/// byte path, a `CharClass` on the character path.
 #[derive(Debug)]
-enum Inst {
-    /// Consume one byte from a set.
-    Set(ByteSet),
+enum Inst<S> {
+    /// Consume one symbol from a set.
+    Set(S),
     /// Continue at one of two program counters, preferring the first.
     Split(usize, usize),
     Jmp(usize),
@@ -163,11 +190,93 @@ enum Inst {
     Match,
 }
 
+/// A set of symbols an instruction consumes.
+trait Symbols {
+    type Sym: Copy;
+    fn permits(&self, s: Self::Sym) -> bool;
+}
+
+impl Symbols for ByteSet {
+    type Sym = u8;
+
+    fn permits(&self, b: u8) -> bool {
+        self.contains(b)
+    }
+}
+
+impl Symbols for CharClass {
+    type Sym = char;
+
+    fn permits(&self, c: char) -> bool {
+        self.contains(c)
+    }
+}
+
+/// The haystack the VM walks: bytes, or the characters decoded from them.
+trait Hay {
+    type Sym: Copy;
+    fn sym(&self, at: usize) -> Option<Self::Sym>;
+    fn assert_holds(&self, a: Assert, at: usize) -> bool;
+}
+
+impl Hay for [u8] {
+    type Sym = u8;
+
+    fn sym(&self, at: usize) -> Option<u8> {
+        self.get(at).copied()
+    }
+
+    fn assert_holds(&self, a: Assert, at: usize) -> bool {
+        let is_word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+        let before = if at == 0 { None } else { self.get(at - 1) };
+        let after = self.get(at);
+        match a {
+            Assert::StartText => at == 0,
+            Assert::EndText => at == self.len(),
+            Assert::StartLine => at == 0 || self.get(at - 1) == Some(&b'\n'),
+            Assert::EndLine => at == self.len() || self.get(at) == Some(&b'\n'),
+            Assert::WordBoundary => is_word(before) != is_word(after),
+            Assert::NotWordBoundary => is_word(before) == is_word(after),
+        }
+    }
+}
+
+impl Hay for [char] {
+    type Sym = char;
+
+    fn sym(&self, at: usize) -> Option<char> {
+        self.get(at).copied()
+    }
+
+    fn assert_holds(&self, a: Assert, at: usize) -> bool {
+        let is_word = |c: Option<&char>| c.is_some_and(|c| unicode::is_word(*c));
+        let before = if at == 0 { None } else { self.get(at - 1) };
+        let after = self.get(at);
+        match a {
+            Assert::StartText => at == 0,
+            Assert::EndText => at == self.len(),
+            Assert::StartLine => at == 0 || self.get(at - 1) == Some(&'\n'),
+            Assert::EndLine => at == self.len() || self.get(at) == Some(&'\n'),
+            Assert::WordBoundary => is_word(before) != is_word(after),
+            Assert::NotWordBoundary => is_word(before) == is_word(after),
+        }
+    }
+}
+
 /// AST node produced by the parser.
 enum Node {
     Empty,
+    /// One ASCII byte of the pattern.
     Byte(u8),
+    /// One byte class, matched byte by byte.
     Set(ByteSet),
+    /// One character outside ASCII, matched as one code point.
+    Char(char),
+    /// A code-point class: `\p{..}`, `\d\w\s` in their Unicode meaning, a class with a
+    /// non-ASCII member, a negated class when the pattern needs Unicode semantics.
+    CharSet(CharClass),
+    /// `.`: one byte, or one code point, depending on the path.
+    Dot(bool),
     Concat(Vec<Node>),
     Alt(Vec<Node>),
     Repeat(Box<Node>, u32, Option<u32>, bool),
@@ -177,7 +286,11 @@ enum Node {
 /// A compiled pattern.
 #[derive(Debug)]
 pub struct Regex {
-    prog: Vec<Inst>,
+    /// The byte program, always present: it runs on ASCII haystacks, where it is exact
+    /// for a pattern that needs Unicode semantics elsewhere.
+    prog: Vec<Inst<ByteSet>>,
+    /// The character program, present when the pattern needs Unicode semantics.
+    cprog: Option<Vec<Inst<CharClass>>>,
     flags: Flags,
     /// The whole pattern, when it is a case-sensitive literal.
     lit: Option<Vec<u8>>,
@@ -191,22 +304,13 @@ impl Regex {
     }
 
     pub fn new_with(pattern: &str, flags: Flags) -> Result<Regex, String> {
-        let mut p = Parser {
-            src: pattern.as_bytes(),
-            at: 0,
-            flags,
-            depth: 0,
-            folded: flags.case_insensitive,
-        };
-        let node = p.parse_alternation()?;
-        if p.at < p.src.len() {
-            return Err(p.err_at("unexpected character", p.at));
-        }
+        let parsed = Parser::parse(pattern, flags, false)?;
+        let node = parsed.node;
         let mut prog = Vec::new();
-        let compiled = compile_node(&node, &mut prog);
+        compile(&node, &mut prog, byte_symbols);
         prog.push(Inst::Match);
         // An inline `(?i)` anywhere in the pattern rules out the literal fast path.
-        let lit = literal_of(&node, p.folded);
+        let lit = literal_of(&node, parsed.folded);
         let required = required_byte(&node);
         // A literal's rarest byte is the best prefilter the parser can give us cheaply;
         // for everything else use the single mandatory byte of the leftmost atom.
@@ -214,9 +318,23 @@ impl Regex {
             Some(bytes) => rarest_byte(bytes).or(required),
             None => required,
         };
-        let _ = compiled;
+        // A pattern that needs Unicode semantics is parsed again in character mode:
+        // `\d` is `\p{Nd}`, `[^a-z]` excludes every non-ASCII character, `.` is one code
+        // point. The byte program above keeps the byte meanings, which are what an ASCII
+        // haystack can tell apart. A pure literal never reaches the VM at all.
+        let cprog = match parsed.unicode && lit.is_none() {
+            true => {
+                let chars = Parser::parse(pattern, flags, true)?.node;
+                let mut cprog = Vec::new();
+                compile(&chars, &mut cprog, char_symbols);
+                cprog.push(Inst::Match);
+                Some(cprog)
+            }
+            false => None,
+        };
         Ok(Regex {
             prog,
+            cprog,
             flags,
             lit,
             required,
@@ -225,6 +343,12 @@ impl Regex {
 
     pub fn flags(&self) -> Flags {
         self.flags
+    }
+
+    /// True when the pattern needs Unicode semantics and so runs a character program on
+    /// haystacks that are not pure ASCII.
+    pub fn is_unicode(&self) -> bool {
+        self.cprog.is_some()
     }
 
     /// A byte every match must contain, or `None` when the pattern gives no hint.
@@ -254,7 +378,17 @@ impl Regex {
                 end: i + lit.len(),
             });
         }
-        self.run(hay, start, true)
+        match &self.cprog {
+            // An ASCII line and a line that is not UTF-8 are both answered by the byte
+            // program: the first is exact for it, and the second has no characters to
+            // speak of, so it keeps the byte semantics it had before this engine learned
+            // any. Only text is decoded.
+            Some(cprog) if !hay.is_ascii() => match std::str::from_utf8(hay) {
+                Ok(text) => self.run_chars(cprog, text, start),
+                Err(_) => self.run(&self.prog, hay, start),
+            },
+            _ => self.run(&self.prog, hay, start),
+        }
     }
 
     /// True when the pattern matches anywhere in `hay`.
@@ -262,14 +396,18 @@ impl Regex {
         if let Some(lit) = &self.lit {
             return crate::bytes::memmem(hay, lit).is_some();
         }
-        self.run(hay, 0, false).is_some()
+        self.find_at(hay, 0).is_some()
     }
 
-    /// Pike VM: leftmost-first semantics, linear time in the haystack length.
-    /// `capture` false stops at the first match (an existence test).
-    fn run(&self, hay: &[u8], start: usize, capture: bool) -> Option<Match> {
-        let _ = capture;
-        let n = self.prog.len();
+    /// Pike VM: leftmost-first semantics, linear time in the haystack length. Returns
+    /// symbol offsets, which are byte offsets on the byte path and character offsets on
+    /// the character path.
+    fn run<H, S>(&self, prog: &[Inst<S>], hay: &H, start: usize) -> Option<Match>
+    where
+        H: Hay + ?Sized,
+        S: Symbols<Sym = H::Sym>,
+    {
+        let n = prog.len();
         let mut clist: Vec<Thread> = Vec::with_capacity(n);
         let mut nlist: Vec<Thread> = Vec::with_capacity(n);
         let mut cl_marks = vec![false; n];
@@ -281,17 +419,18 @@ impl Regex {
             // lower priority than the threads carried over from earlier positions.
             st.cut = false;
             if st.best.is_none() {
-                self.add_thread(&mut clist, &mut cl_marks, 0, sp, hay, sp, &mut st);
+                self.add_thread(prog, &mut clist, &mut cl_marks, 0, sp, hay, sp, &mut st);
             }
-            let Some(byte) = hay.get(sp).copied() else {
-                // Past the last byte: the closures above have recorded any match that
+            let Some(sym) = hay.sym(sp) else {
+                // Past the last symbol: the closures above have recorded any match that
                 // ends here, and no thread can advance further.
                 break;
             };
             for t in clist.drain(..) {
-                if let Inst::Set(set) = &self.prog[t.pc] {
-                    if set.contains(byte) {
+                if let Inst::Set(set) = &prog[t.pc] {
+                    if set.permits(sym) {
                         self.add_thread(
+                            prog,
                             &mut nlist,
                             &mut nl_marks,
                             t.pc + 1,
@@ -314,18 +453,22 @@ impl Regex {
         st.best
     }
 
-    /// Epsilon closure: follow Split/Jmp/Assert/Save from `pc`, recording matches.
+    /// Epsilon closure: follow Split/Jmp/Assert from `pc`, recording matches.
     #[allow(clippy::too_many_arguments)]
-    fn add_thread(
+    fn add_thread<H, S>(
         &self,
+        prog: &[Inst<S>],
         list: &mut Vec<Thread>,
         visited: &mut [bool],
         mut pc: usize,
         start: usize,
-        hay: &[u8],
+        hay: &H,
         sp: usize,
         st: &mut Pending,
-    ) {
+    ) where
+        H: Hay + ?Sized,
+        S: Symbols<Sym = H::Sym>,
+    {
         if st.cut || visited[pc] {
             return;
         }
@@ -334,7 +477,7 @@ impl Regex {
             if st.cut {
                 return;
             }
-            match &self.prog[pc] {
+            match &prog[pc] {
                 Inst::Jmp(to) => {
                     if visited[*to] {
                         return;
@@ -343,7 +486,7 @@ impl Regex {
                     pc = *to;
                 }
                 Inst::Split(a, b) => {
-                    self.add_thread(list, visited, *a, start, hay, sp, st);
+                    self.add_thread(prog, list, visited, *a, start, hay, sp, st);
                     if visited[*b] {
                         return;
                     }
@@ -351,7 +494,7 @@ impl Regex {
                     pc = *b;
                 }
                 Inst::Assert(a) => {
-                    if !assert_holds(*a, hay, sp) {
+                    if !hay.assert_holds(*a, sp) {
                         return;
                     }
                     if visited[pc + 1] {
@@ -381,6 +524,34 @@ impl Regex {
             }
         }
     }
+
+    /// The character path: decode the line once, run the character program over it, and
+    /// report the match as byte offsets.
+    fn run_chars(&self, cprog: &[Inst<CharClass>], text: &str, from: usize) -> Option<Match> {
+        let (chars, bytes) = decode(text);
+        // `bytes[i]` is the offset of character `i`; the sentinel at the end makes
+        // `partition_point` land on the first character at or after `from`.
+        let start = bytes.partition_point(|&at| at < from);
+        let m = self.run(cprog, &chars[..], start)?;
+        Some(Match {
+            start: bytes[m.start],
+            end: bytes[m.end],
+        })
+    }
+}
+
+/// Decode `text` into characters and, beside them, the byte offset each one starts at
+/// plus one sentinel holding `text.len()`. The sentinel is what turns a character offset
+/// from the VM back into a byte offset into the line.
+fn decode(text: &str) -> (Vec<char>, Vec<usize>) {
+    let mut chars = Vec::with_capacity(text.len());
+    let mut bytes = Vec::with_capacity(text.len() + 1);
+    for (at, c) in text.char_indices() {
+        bytes.push(at);
+        chars.push(c);
+    }
+    bytes.push(text.len());
+    (chars, bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -397,32 +568,16 @@ struct Pending {
     cut: bool,
 }
 
-fn assert_holds(a: Assert, hay: &[u8], sp: usize) -> bool {
-    let is_word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
-    let before = if sp == 0 { None } else { hay.get(sp - 1) };
-    let after = hay.get(sp);
-    match a {
-        Assert::StartText => sp == 0,
-        Assert::EndText => sp == hay.len(),
-        Assert::StartLine => sp == 0 || hay.get(sp - 1) == Some(&b'\n'),
-        Assert::EndLine => sp == hay.len() || hay.get(sp) == Some(&b'\n'),
-        Assert::WordBoundary => is_word(before) != is_word(after),
-        Assert::NotWordBoundary => is_word(before) == is_word(after),
-    }
-}
-
-fn compile_node(n: &Node, prog: &mut Vec<Inst>) -> usize {
+/// Compile `n` into `prog`, asking `symbols` what each consuming atom matches.
+fn compile<S>(n: &Node, prog: &mut Vec<Inst<S>>, symbols: fn(&Node) -> S) -> usize {
     match n {
         Node::Empty => {}
-        Node::Byte(b) => {
-            let mut set = ByteSet::empty();
-            set.add(*b);
-            prog.push(Inst::Set(set));
+        Node::Byte(_) | Node::Set(_) | Node::Char(_) | Node::CharSet(_) | Node::Dot(_) => {
+            prog.push(Inst::Set(symbols(n)));
         }
-        Node::Set(s) => prog.push(Inst::Set(*s)),
         Node::Concat(parts) => {
             for p in parts {
-                compile_node(p, prog);
+                compile(p, prog, symbols);
             }
         }
         Node::Alt(branches) => {
@@ -430,11 +585,11 @@ fn compile_node(n: &Node, prog: &mut Vec<Inst>) -> usize {
             let mut jumps = Vec::new();
             for (i, b) in branches.iter().enumerate() {
                 if i + 1 == branches.len() {
-                    compile_node(b, prog);
+                    compile(b, prog, symbols);
                 } else {
                     let split = prog.len();
                     prog.push(Inst::Split(0, 0));
-                    compile_node(b, prog);
+                    compile(b, prog, symbols);
                     jumps.push(prog.len());
                     prog.push(Inst::Jmp(0));
                     let next = prog.len();
@@ -451,7 +606,7 @@ fn compile_node(n: &Node, prog: &mut Vec<Inst>) -> usize {
         }
         Node::Repeat(inner, min, max, greedy) => {
             for _ in 0..*min {
-                compile_node(inner, prog);
+                compile(inner, prog, symbols);
             }
             match max {
                 None => {
@@ -459,7 +614,7 @@ fn compile_node(n: &Node, prog: &mut Vec<Inst>) -> usize {
                     let split = prog.len();
                     prog.push(Inst::Split(0, 0));
                     let body = prog.len();
-                    compile_node(inner, prog);
+                    compile(inner, prog, symbols);
                     prog.push(Inst::Jmp(split));
                     let out = prog.len();
                     prog[split] = if *greedy {
@@ -475,7 +630,7 @@ fn compile_node(n: &Node, prog: &mut Vec<Inst>) -> usize {
                         let split = prog.len();
                         prog.push(Inst::Split(0, 0));
                         splits.push(split);
-                        compile_node(inner, prog);
+                        compile(inner, prog, symbols);
                     }
                     let out = prog.len();
                     for split in splits {
@@ -494,6 +649,62 @@ fn compile_node(n: &Node, prog: &mut Vec<Inst>) -> usize {
     prog.len()
 }
 
+/// What an atom consumes on the byte path. A pattern that needs Unicode semantics gets
+/// its ASCII projection here: an ASCII haystack holds no other byte, so this program is
+/// exact for it and much cheaper than decoding the line.
+fn byte_symbols(n: &Node) -> ByteSet {
+    match n {
+        Node::Byte(b) => {
+            let mut set = ByteSet::empty();
+            set.add(*b);
+            set
+        }
+        Node::Set(s) => *s,
+        Node::Char(c) if c.is_ascii() => {
+            let mut set = ByteSet::empty();
+            set.add(*c as u8);
+            set
+        }
+        Node::Char(_) => ByteSet::empty(),
+        Node::CharSet(cc) => project(cc),
+        Node::Dot(true) => ByteSet::full(),
+        Node::Dot(false) => ByteSet(full_without_newline()),
+        _ => ByteSet::empty(),
+    }
+}
+
+/// What an atom consumes on the character path: one code point.
+fn char_symbols(n: &Node) -> CharClass {
+    let mut class = CharClass::new();
+    match n {
+        Node::Byte(b) => class.add(*b as char),
+        Node::Set(_) => {
+            let set = byte_symbols(n);
+            for b in 0..=0x7fu8 {
+                if set.contains(b) {
+                    class.add(b as char);
+                }
+            }
+        }
+        Node::Char(c) => class.add(*c),
+        Node::CharSet(cc) => return cc.clone(),
+        Node::Dot(matches_newline) => return unicode::dot(*matches_newline),
+        _ => {}
+    }
+    class
+}
+
+/// The ASCII bytes a code-point class can match, which is what a byte program needs.
+fn project(cc: &CharClass) -> ByteSet {
+    let mut set = ByteSet::empty();
+    for b in 0..=0x7fu8 {
+        if cc.contains(b as char) {
+            set.add(b);
+        }
+    }
+    set
+}
+
 /// The whole pattern as bytes when it is a case-sensitive literal.
 fn literal_of(n: &Node, ci: bool) -> Option<Vec<u8>> {
     if ci {
@@ -502,6 +713,10 @@ fn literal_of(n: &Node, ci: bool) -> Option<Vec<u8>> {
     match n {
         Node::Empty => Some(Vec::new()),
         Node::Byte(b) => Some(vec![*b]),
+        Node::Char(c) => {
+            let mut buf = [0u8; 4];
+            Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+        }
         Node::Concat(parts) => {
             let mut out = Vec::new();
             for p in parts {
@@ -518,6 +733,8 @@ fn required_byte(n: &Node) -> Option<u8> {
     match n {
         Node::Byte(b) => Some(*b),
         Node::Set(s) => s.sole(),
+        Node::Char(c) => Some(first_byte(*c)),
+        Node::CharSet(cc) => cc.sole().map(first_byte),
         Node::Concat(parts) => parts.first().and_then(required_byte),
         Node::Alt(branches) => {
             let mut it = branches.iter().filter_map(required_byte);
@@ -525,10 +742,15 @@ fn required_byte(n: &Node) -> Option<u8> {
             it.all(|b| b == first).then_some(first)
         }
         Node::Repeat(inner, _, _, _) => required_byte(inner),
-        Node::Assert(_) | Node::Empty => None,
+        Node::Assert(_) | Node::Dot(_) | Node::Empty => None,
     }
 }
 
+/// The first byte of `c` in UTF-8: every haystack holding `c` holds this byte.
+fn first_byte(c: char) -> u8 {
+    let mut buf = [0u8; 4];
+    c.encode_utf8(&mut buf).as_bytes()[0]
+}
 /// The least frequent byte of a literal, a better prefilter than the first one.
 fn rarest_byte(lit: &[u8]) -> Option<u8> {
     if lit.is_empty() {
@@ -556,9 +778,48 @@ struct Parser<'a> {
     depth: usize,
     /// Case-insensitive matching was enabled somewhere, inline flags included.
     folded: bool,
+    /// Build code-point classes and note that the pattern needs Unicode semantics. The
+    /// first parse runs with this off to find out whether a second one is needed at all.
+    code_points: bool,
+    /// The pattern names something only Unicode can answer: a `\p{..}` class, a
+    /// shorthand (`\d`, `\w`, `\s`, `\b`), a POSIX class, a character outside ASCII,
+    /// or `-i` over one.
+    needs_unicode: bool,
 }
 
-impl Parser<'_> {
+/// What one parse produced.
+struct Parsed {
+    node: Node,
+    /// Case-insensitive matching was on somewhere in the pattern.
+    folded: bool,
+    /// The pattern needs Unicode semantics, so it also needs a character program.
+    unicode: bool,
+}
+
+impl<'a> Parser<'a> {
+    /// Parse `pattern`. With `code_points` off, `\d`, `\w`, `\s`, POSIX classes and
+    /// negated classes keep their byte meanings and the result says whether the pattern
+    /// needs a second, Unicode parse.
+    fn parse(pattern: &'a str, flags: Flags, code_points: bool) -> Result<Parsed, String> {
+        let mut p = Parser {
+            src: pattern.as_bytes(),
+            at: 0,
+            flags,
+            depth: 0,
+            folded: flags.case_insensitive,
+            code_points,
+            needs_unicode: false,
+        };
+        let node = p.parse_alternation()?;
+        if p.at < p.src.len() {
+            return Err(p.err_at("unexpected character", p.at));
+        }
+        Ok(Parsed {
+            node,
+            folded: p.folded,
+            unicode: p.needs_unicode,
+        })
+    }
     fn err_at(&self, msg: &str, at: usize) -> String {
         format!(
             "{msg} at offset {at} in pattern {:?}",
@@ -700,12 +961,7 @@ impl Parser<'_> {
             b'[' => self.parse_class(),
             b'.' => {
                 self.at += 1;
-                let set = if self.flags.dot_matches_newline {
-                    ByteSet::full()
-                } else {
-                    ByteSet(full_without_newline())
-                };
-                Ok(Node::Set(set))
+                Ok(Node::Dot(self.flags.dot_matches_newline))
             }
             b'*' | b'+' | b'?' => Err(self.err_at("nothing to repeat", start)),
             b'{' => {
@@ -737,22 +993,21 @@ impl Parser<'_> {
             }
             b'\\' => self.parse_escape(),
             _ => {
-                // One UTF-8 character becomes the sequence of its bytes.
-                let s = std::str::from_utf8(&self.src[self.at..])
-                    .map_err(|_| self.err_at("invalid UTF-8 in pattern", self.at))?;
-                let ch = s
-                    .chars()
-                    .next()
-                    .ok_or_else(|| self.err_at("unexpected end", self.at))?;
-                let mut buf = [0u8; 4];
-                let bytes = ch.encode_utf8(&mut buf).as_bytes().to_vec();
-                self.at += bytes.len();
-                if bytes.len() == 1 {
-                    Ok(self.literal_node(bytes[0]))
+                let ch = self.next_char()?;
+                if ch.is_ascii() {
+                    return Ok(self.literal_node(ch as u8));
+                }
+                // A character outside ASCII is one code point on the character path, so
+                // the pattern needs Unicode semantics. Under `-i` it becomes the class of
+                // the characters it folds together with.
+                self.needs_unicode = true;
+                if self.flags.case_insensitive {
+                    let mut class = CharClass::new();
+                    class.add(ch);
+                    class.fold();
+                    Ok(Node::CharSet(class))
                 } else {
-                    Ok(Node::Concat(
-                        bytes.iter().map(|b| self.literal_node(*b)).collect(),
-                    ))
+                    Ok(Node::Char(ch))
                 }
             }
         }
@@ -924,25 +1179,20 @@ impl Parser<'_> {
             }
             b'd' | b'D' | b'w' | b'W' | b's' | b'S' => {
                 self.at += 1;
-                let mut s = ByteSet::empty();
-                match c {
-                    b'd' | b'D' => s.add_range(b'0', b'9'),
-                    b'w' | b'W' => {
-                        s.add_range(b'0', b'9');
-                        s.add_range(b'a', b'z');
-                        s.add_range(b'A', b'Z');
-                        s.add(b'_');
+                self.needs_unicode = true;
+                let negate = c.is_ascii_uppercase();
+                if self.code_points {
+                    let mut class = match c.to_ascii_lowercase() {
+                        b'd' => unicode::digit(),
+                        b'w' => unicode::word(),
+                        _ => unicode::space(),
+                    };
+                    if negate {
+                        class.negate();
                     }
-                    _ => {
-                        for b in [b' ', b'\t', b'\n', b'\r', 0x0b, 0x0c] {
-                            s.add(b);
-                        }
-                    }
+                    return Ok(Node::CharSet(class));
                 }
-                if c.is_ascii_uppercase() {
-                    s.negate();
-                }
-                Ok(Node::Set(s))
+                Ok(Node::Set(perl_class(c.to_ascii_lowercase(), negate)))
             }
             b'A' => {
                 self.at += 1;
@@ -954,16 +1204,26 @@ impl Parser<'_> {
             }
             b'b' => {
                 self.at += 1;
+                self.needs_unicode = true;
                 Ok(Node::Assert(Assert::WordBoundary))
             }
             b'B' => {
                 self.at += 1;
+                self.needs_unicode = true;
                 Ok(Node::Assert(Assert::NotWordBoundary))
             }
-            b'p' | b'P' => Err(self.err_at(
-                "Unicode property classes (\\p{..}) are not supported",
-                start,
-            )),
+            b'p' | b'P' => {
+                self.at += 1;
+                self.needs_unicode = true;
+                let mut class = self.property_class(start)?;
+                if self.flags.case_insensitive {
+                    class.fold();
+                }
+                if c == b'P' {
+                    class.negate();
+                }
+                Ok(Node::CharSet(class))
+            }
             b'1'..=b'9' => Err(self.err_at("backreferences are not supported", start)),
             c if c.is_ascii_alphanumeric() => Err(self.err_at("unknown escape", start)),
             c => {
@@ -973,8 +1233,34 @@ impl Parser<'_> {
         }
     }
 
-    /// `[:name:]` inside a class: the POSIX bracket expressions grep users write.
-    fn posix_class(&mut self) -> Result<ByteSet, String> {
+    /// `\p{Name}` or `\p{N}`: a Unicode general category, with a leading `^` negating.
+    fn property_class(&mut self, start: usize) -> Result<CharClass, String> {
+        let name = if self.peek() == Some(b'{') {
+            self.at += 1;
+            let rest = &self.src[self.at..];
+            let len = rest
+                .iter()
+                .position(|&b| b == b'}')
+                .ok_or_else(|| self.err_at("unterminated \\p{...}", start))?;
+            let name = std::str::from_utf8(&rest[..len]).unwrap_or("");
+            self.at += len + 1;
+            name.to_string()
+        } else {
+            match self.peek() {
+                Some(c) if c.is_ascii_alphabetic() => {
+                    self.at += 1;
+                    (c as char).to_string()
+                }
+                _ => return Err(self.err_at("\\p needs a property name", start)),
+            }
+        };
+        unicode::property(&name)
+            .ok_or_else(|| self.err_at(&format!("unknown Unicode property {name:?}"), start))
+    }
+
+    /// `[:name:]` inside a class: the POSIX bracket expressions grep users write, in
+    /// their Unicode meaning, which the byte program then narrows to ASCII.
+    fn posix_class(&mut self) -> Result<CharClass, String> {
         let open = self.at;
         let rest = &self.src[self.at..];
         let end = rest.windows(2).position(|w| w == b":]");
@@ -983,57 +1269,8 @@ impl Parser<'_> {
         };
         let name = std::str::from_utf8(&rest[2..end]).unwrap_or("");
         self.at += end + 2;
-        let mut set = ByteSet::empty();
-        match name {
-            "alnum" => {
-                set.add_range(b'0', b'9');
-                set.add_range(b'A', b'Z');
-                set.add_range(b'a', b'z');
-            }
-            "alpha" => {
-                set.add_range(b'A', b'Z');
-                set.add_range(b'a', b'z');
-            }
-            "ascii" => set.add_range(0, 0x7f),
-            "blank" => {
-                set.add(b' ');
-                set.add(b'\t');
-            }
-            "cntrl" => {
-                set.add_range(0, 0x1f);
-                set.add(0x7f);
-            }
-            "digit" => set.add_range(b'0', b'9'),
-            "graph" => set.add_range(0x21, 0x7e),
-            "lower" => set.add_range(b'a', b'z'),
-            "print" => set.add_range(0x20, 0x7e),
-            "punct" => {
-                set.add_range(0x21, 0x2f);
-                set.add_range(0x3a, 0x40);
-                set.add_range(0x5b, 0x60);
-                set.add_range(0x7b, 0x7e);
-            }
-            "space" => {
-                set.add(b' ');
-                set.add_range(0x09, 0x0d);
-            }
-            "upper" => set.add_range(b'A', b'Z'),
-            "word" => {
-                set.add_range(b'0', b'9');
-                set.add_range(b'A', b'Z');
-                set.add_range(b'a', b'z');
-                set.add(b'_');
-            }
-            "xdigit" => {
-                set.add_range(b'0', b'9');
-                set.add_range(b'A', b'F');
-                set.add_range(b'a', b'f');
-            }
-            _ => {
-                return Err(self.err_at(&format!("unknown POSIX class {name:?}"), open));
-            }
-        }
-        Ok(set)
+        unicode::posix(name)
+            .ok_or_else(|| self.err_at(&format!("unknown POSIX class {name:?}"), open))
     }
 
     fn parse_class(&mut self) -> Result<Node, String> {
@@ -1044,10 +1281,11 @@ impl Parser<'_> {
             negated = true;
             self.at += 1;
         }
-        let mut set = ByteSet::empty();
-        // Multi-byte class members become alternatives: `[é]` is one character, not one
-        // of its two bytes.
-        let mut seqs: Vec<Vec<u8>> = Vec::new();
+        let mut bytes = ByteSet::empty();
+        let mut chars = CharClass::new();
+        // A member that only Unicode can answer: a POSIX class, a `\d`-style escape, or a
+        // character outside ASCII. Such a class is compiled as a code point set.
+        let mut wide = false;
         let mut first = true;
         loop {
             let Some(c) = self.peek() else {
@@ -1058,103 +1296,100 @@ impl Parser<'_> {
                 break;
             }
             first = false;
-            if c == b'[' && self.src.get(self.at + 1) == Some(&b':') {
-                let inner = self.posix_class()?;
-                or_set(&mut set, &inner);
+            // One member: a literal character, a byte escape, or a whole class.
+            let lo: Option<(char, Option<u8>)> =
+                if c == b'[' && self.src.get(self.at + 1) == Some(&b':') {
+                    let class = self.posix_class()?;
+                    self.needs_unicode = true;
+                    wide = true;
+                    or_set(&mut bytes, &project(&class));
+                    chars.union(&class);
+                    None
+                } else if c == b'\\' {
+                    let (item, end) = self.class_escape()?;
+                    self.at = end;
+                    match item {
+                        ClassItem::Byte(b) => Some((b as char, Some(b))),
+                        ClassItem::Class(class) => {
+                            wide = true;
+                            or_set(&mut bytes, &project(&class));
+                            chars.union(&class);
+                            None
+                        }
+                    }
+                } else {
+                    let ch = self.next_char()?;
+                    if !ch.is_ascii() {
+                        self.needs_unicode = true;
+                        wide = true;
+                    }
+                    Some((ch, ch.is_ascii().then_some(ch as u8)))
+                };
+            let Some((lo, lo_byte)) = lo else { continue };
+            if self.peek() != Some(b'-') || self.src.get(self.at + 1) == Some(&b']') {
+                chars.add(lo);
+                if let Some(b) = lo_byte {
+                    bytes.add(b);
+                }
                 continue;
             }
-            if c == b'\\' {
+            self.at += 1;
+            let hi = if self.peek() == Some(b'\\') {
                 let (item, end) = self.class_escape()?;
                 self.at = end;
                 match item {
-                    ClassItem::Byte(b) => set.add(b),
-                    ClassItem::Set(s) => or_set(&mut set, &s),
-                }
-                continue;
-            }
-            let ch = self.next_char()?;
-            if ch.is_ascii() {
-                let lo = ch as u8;
-                // A range needs an ASCII end; non-ASCII ranges are rejected rather than
-                // silently matched byte-wise.
-                if self.peek() == Some(b'-') && self.src.get(self.at + 1) != Some(&b']') {
-                    self.at += 1;
-                    let hi = match self.peek() {
-                        Some(b'\\') => {
-                            let (item, end) = self.class_escape()?;
-                            self.at = end;
-                            match item {
-                                ClassItem::Byte(b) => b,
-                                ClassItem::Set(s) => {
-                                    set.add(lo);
-                                    or_set(&mut set, &s);
-                                    continue;
-                                }
-                            }
+                    ClassItem::Byte(b) => (b as char, Some(b)),
+                    // A set at the end of a range is not a range: keep the low end and
+                    // the set as separate members.
+                    ClassItem::Class(class) => {
+                        chars.add(lo);
+                        if let Some(b) = lo_byte {
+                            bytes.add(b);
                         }
-                        Some(_) => {
-                            let h = self.next_char()?;
-                            if !h.is_ascii() {
-                                return Err(self.err_at(
-                                    "non-ASCII ranges in a class are not supported",
-                                    self.at,
-                                ));
-                            }
-                            h as u8
-                        }
-                        None => return Err(self.err_at("unterminated character class", open)),
-                    };
-                    if hi < lo {
-                        return Err(self.err_at("character class range is backwards", self.at));
+                        wide = true;
+                        or_set(&mut bytes, &project(&class));
+                        chars.union(&class);
+                        continue;
                     }
-                    set.add_range(lo, hi);
-                } else {
-                    set.add(lo);
                 }
             } else {
-                if self.peek() == Some(b'-') && self.src.get(self.at + 1) != Some(&b']') {
-                    return Err(
-                        self.err_at("non-ASCII ranges in a class are not supported", self.at)
-                    );
+                let h = self.next_char()?;
+                if !h.is_ascii() {
+                    self.needs_unicode = true;
+                    wide = true;
                 }
-                let mut buf = [0u8; 4];
-                seqs.push(ch.encode_utf8(&mut buf).as_bytes().to_vec());
+                (h, h.is_ascii().then_some(h as u8))
+            };
+            if hi.0 < lo {
+                return Err(self.err_at("character class range is backwards", self.at));
+            }
+            chars.add_range(lo, hi.0);
+            if let (Some(lo_byte), Some(hi_byte)) = (lo_byte, hi.1) {
+                bytes.add_range(lo_byte, hi_byte);
             }
         }
-        if !seqs.is_empty() {
+        if !self.code_points && !wide {
+            if self.flags.case_insensitive {
+                bytes.fold_ascii();
+            }
             if negated {
-                return Err(self.err_at(
-                    "a negated class with a non-ASCII character is not supported",
-                    open,
-                ));
+                bytes.negate();
             }
-            let mut alts = Vec::new();
-            if !set.is_empty() {
-                let mut s = set;
-                if self.flags.case_insensitive {
-                    s.fold_ascii();
-                }
-                alts.push(Node::Set(s));
+            if bytes.is_empty() {
+                return Err(self.err_at("empty character class", open));
             }
-            for seq in seqs {
-                alts.push(Node::Concat(seq.into_iter().map(Node::Byte).collect()));
-            }
-            return Ok(if alts.len() == 1 {
-                alts.pop().unwrap()
-            } else {
-                Node::Alt(alts)
-            });
+            return Ok(Node::Set(bytes));
         }
         if self.flags.case_insensitive {
-            set.fold_ascii();
+            chars.fold();
         }
         if negated {
-            set.negate();
+            chars.negate();
         }
-        if set.is_empty() {
+        if chars.is_empty() {
             return Err(self.err_at("empty character class", open));
         }
-        Ok(Node::Set(set))
+        Ok(Node::CharSet(chars))
     }
 
     /// Decode and consume one character, or fail with an offset.
@@ -1193,20 +1428,55 @@ impl Parser<'_> {
                     .map_err(|_| self.err_at("\\x needs two hex digits", start))?;
                 Ok((ClassItem::Byte(b), start + 4))
             }
-            b'd' | b'w' | b's' => Ok((ClassItem::Set(perl_class(c, false)), start + 2)),
-            b'D' | b'W' | b'S' => Ok((
-                ClassItem::Set(perl_class(c.to_ascii_lowercase(), true)),
-                start + 2,
-            )),
+            b'd' | b'w' | b's' => {
+                self.needs_unicode = true;
+                let mut class = match c {
+                    b'd' => unicode::digit(),
+                    b'w' => unicode::word(),
+                    _ => unicode::space(),
+                };
+                if self.flags.case_insensitive {
+                    class.fold();
+                }
+                Ok((ClassItem::Class(class), start + 2))
+            }
+            b'D' | b'W' | b'S' => {
+                self.needs_unicode = true;
+                let mut class = match c.to_ascii_lowercase() {
+                    b'd' => unicode::digit(),
+                    b'w' => unicode::word(),
+                    _ => unicode::space(),
+                };
+                if self.flags.case_insensitive {
+                    class.fold();
+                }
+                class.negate();
+                Ok((ClassItem::Class(class), start + 2))
+            }
+            b'p' | b'P' => {
+                self.needs_unicode = true;
+                self.at = start + 2;
+                let mut class = self.property_class(start)?;
+                if self.flags.case_insensitive {
+                    class.fold();
+                }
+                if c == b'P' {
+                    class.negate();
+                }
+                Ok((ClassItem::Class(class), self.at))
+            }
             c if c.is_ascii_alphanumeric() => Err(self.err_at("unknown escape in class", start)),
             c => Ok(single(c)),
         }
     }
 }
 
+/// One member of a character class, as `class_escape` reports it.
 enum ClassItem {
+    /// A single byte: `\n`, `\xHH`, or a `\]`-style escape.
     Byte(u8),
-    Set(ByteSet),
+    /// A whole class of code points: `\d`, `\w`, `\s`, `\p{..}`.
+    Class(CharClass),
 }
 
 fn or_set(into: &mut ByteSet, from: &ByteSet) {
@@ -1339,7 +1609,7 @@ mod tests {
         assert!(matched(r"a\.c", "a.c"));
         assert!(!matched(r"a\.c", "abc"));
         assert!(matched(r"a\nb", "a\nb"));
-        assert!(Regex::new(r"\p{L}").is_err());
+        assert!(Regex::new(r"\p{L}").unwrap().is_match("é".as_bytes()));
         assert!(Regex::new(r"\1").is_err());
         assert!(Regex::new(r"\q").is_err());
     }
@@ -1467,6 +1737,178 @@ mod tests {
         assert_eq!(m("é", "café"), Some((3, 5)));
         assert!(matched("日本", "a日本語b"));
         assert_eq!(m("[é]", "aé"), Some((1, 3)));
+    }
+
+    fn ci(pat: &str, hay: &str) -> Option<(usize, usize)> {
+        Regex::new_with(
+            pat,
+            Flags {
+                case_insensitive: true,
+                ..Flags::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{pat:?}: {e}"))
+        .find(hay.as_bytes())
+        .map(|m| (m.start, m.end))
+    }
+
+    #[test]
+    fn ascii_patterns_stay_on_the_byte_path() {
+        for pat in ["needle", "[a-z]+", "^a.c$", r"\x41+", "é"] {
+            // `é` alone is a literal, so it keeps the memmem fast path instead.
+            assert!(!Regex::new(pat).unwrap().is_unicode(), "{pat:?}");
+        }
+        for pat in [
+            r"\d",
+            r"\w",
+            r"\s",
+            r"\b",
+            r"[\d]",
+            r"[^\w]",
+            "[[:alpha:]]",
+            r"\p{L}",
+            r"[\p{Lu}_]",
+            "[é]",
+            "[à-ÿ]",
+        ] {
+            assert!(Regex::new(pat).unwrap().is_unicode(), "{pat:?}");
+        }
+        // `-i` over ASCII text is still the byte path.
+        assert!(!Regex::new_with(
+            "needle",
+            Flags {
+                case_insensitive: true,
+                ..Flags::default()
+            }
+        )
+        .unwrap()
+        .is_unicode());
+    }
+
+    #[test]
+    fn word_class_is_unicode() {
+        assert_eq!(m(r"\w+", "café"), Some((0, 5)), "é is one word character");
+        assert_eq!(m(r"^\w+$", "café"), Some((0, 5)));
+        assert_eq!(m(r"\w+", "Привет!"), Some((0, 12)));
+        assert_eq!(m(r"\w+", "日本語"), Some((0, 9)));
+        assert_eq!(m(r"\w+", "٣٤٥"), Some((0, 6)), "Arabic-Indic digits");
+        assert_eq!(m(r"^\W+$", " ,.! "), Some((0, 5)));
+        assert_eq!(
+            m(r"\w+", "a_b 12"),
+            Some((0, 3)),
+            "ASCII text is unaffected"
+        );
+    }
+
+    #[test]
+    fn digit_class_is_unicode() {
+        assert_eq!(m(r"\d+", "no ٣٤ digits"), Some((3, 7)));
+        assert_eq!(
+            m(r"\d+", "abc123"),
+            Some((3, 6)),
+            "ASCII digits still match"
+        );
+        assert_eq!(m(r"^\D+$", "café"), Some((0, 5)));
+        assert_eq!(m(r"\p{Nd}+", "٤٢"), Some((0, 4)));
+    }
+
+    #[test]
+    fn unicode_general_categories() {
+        for (pat, hay) in [
+            (r"^\p{L}+$", "Ελληνικά"),
+            (r"^\p{L}+$", "Привет"),
+            (r"^\p{L}+$", "日本語"),
+            (r"^\p{L}+$", "café"),
+        ] {
+            assert_eq!(m(pat, hay), Some((0, hay.len())), "{pat:?} on {hay:?}");
+        }
+        assert_eq!(m(r"^\p{Lu}+$", "ΕΛΛΗΝΙΚΆ"), Some((0, 16)));
+        assert_eq!(m(r"^\p{Ll}+$", "ελληνικά"), Some((0, 16)));
+        assert_eq!(m(r"^\p{Lu}\p{Ll}+$", "Abc"), Some((0, 3)));
+        assert_eq!(m(r"^\p{P}+$", "«»—…"), Some((0, 10)));
+        assert_eq!(m(r"^\p{S}+$", "€₽+"), Some((0, 7)));
+        assert_eq!(m(r"^\p{Z}$", "\u{2003}"), Some((0, 3)));
+        assert_eq!(m(r"^\p{C}+$", "\u{1}\u{200b}"), Some((0, 4)));
+        assert!(Regex::new(r"\p{Bogus}").is_err());
+        assert!(Regex::new(r"\p{").is_err());
+    }
+
+    #[test]
+    fn case_folding_reaches_non_ascii() {
+        assert_eq!(ci("CAF[É]", "café"), Some((0, 5)));
+        assert_eq!(ci("café", "CAFÉ"), Some((0, 5)));
+        assert_eq!(ci("É", "é"), Some((0, 2)));
+        assert_eq!(ci("é", "É"), Some((0, 2)));
+        assert_eq!(ci("Σ", "ς"), Some((0, 2)), "final sigma folds to sigma");
+        assert_eq!(ci("σ+", "Σςσ"), Some((0, 6)));
+        assert_eq!(ci("ПРИВЕТ", "привет"), Some((0, 12)));
+        assert_eq!(ci("[É]", "é"), Some((0, 2)));
+        assert_eq!(ci("é+", "ÉÉ"), Some((0, 4)), "a folded quantifier");
+        assert_eq!(ci(r"[\p{Lu}]+", "abc"), Some((0, 3)), "`-i` folds a class");
+        assert_eq!(ci("(?i)é", "É"), Some((0, 2)));
+    }
+
+    #[test]
+    fn classes_above_ascii() {
+        assert_eq!(m("[à-ÿ]+", "café"), Some((3, 5)), "a range above 0x7f");
+        assert_eq!(m("[é]+", "café"), Some((3, 5)));
+        assert_eq!(m("^[^é]+", "café"), Some((0, 3)), "a negated Unicode class");
+        assert_eq!(m(r"^[^\p{L}]+$", " 12 "), Some((0, 4)));
+        assert_eq!(m(r"^[\p{L}\d]+$", "abc٣"), Some((0, 5)));
+        assert_eq!(m("[α-ω]+", "αβγ x"), Some((0, 6)));
+        assert_eq!(m("[;é]", "bé"), Some((1, 3)));
+        assert!(
+            Regex::new("[ÿ-à]").is_err(),
+            "a backwards range still fails"
+        );
+    }
+
+    #[test]
+    fn posix_classes_are_unicode() {
+        assert_eq!(m("[[:alpha:]]+", "café 1"), Some((0, 5)));
+        assert_eq!(m("[[:digit:]]+", "x٣"), Some((1, 3)));
+        assert_eq!(m("[[:space:]]+$", "ab\u{2003}"), Some((2, 5)));
+        assert_eq!(m("[[:word:]]+", "naïve"), Some((0, 6)));
+        assert_eq!(m("[[:upper:]]+", "ÉÈ"), Some((0, 4)));
+        assert_eq!(m("[[:punct:]]+", "hi, there"), Some((2, 3)));
+        assert!(Regex::new("[[:bogus:]]").is_err());
+    }
+
+    #[test]
+    fn matches_after_a_multibyte_character_report_byte_offsets() {
+        assert_eq!(m(r"\d+", "é 42"), Some((3, 5)));
+        assert_eq!(m(r"\w+", "é abc"), Some((0, 2)), "the first word is the é");
+        assert_eq!(m(r"\d+", "日本語 42"), Some((10, 12)));
+        assert_eq!(m(r"\p{L}+", "…é"), Some((3, 5)));
+        let re = Regex::new(r"\w+").unwrap();
+        let hay = "é αβ 中".as_bytes();
+        let mut all = Vec::new();
+        let mut at = 0;
+        while let Some(m) = re.find_at(hay, at) {
+            all.push((m.start, m.end));
+            at = m.end;
+        }
+        assert_eq!(all, [(0, 2), (3, 7), (8, 11)]);
+    }
+
+    #[test]
+    fn dot_is_one_character_on_the_character_path() {
+        assert_eq!(m(r"\p{Lu}.", "Aé"), Some((0, 3)));
+        assert_eq!(m(r".\p{Lu}", "éA"), Some((0, 3)));
+        // An ASCII-only pattern keeps the byte meaning, as documented for `^caf.$`.
+        assert_eq!(m("^caf.$", "café"), None);
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_keeps_the_byte_meanings() {
+        for pat in [r"\w+", r"\p{L}+"] {
+            let re = Regex::new(pat).unwrap();
+            assert_eq!(
+                re.find(b"na\xefve").map(|m| (m.start, m.end)),
+                Some((0, 2)),
+                "{pat:?}: bytes, not lossy characters"
+            );
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@
 
 use crate::glob::Glob;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Directory and file names skipped unless `--no-ignore` is given.
 const BUILTIN: &[&str] = &[
@@ -37,7 +38,7 @@ const BUILTIN: &[&str] = &[
 const RULE_FILES: &[&str] = &[".gitignore", ".ignore"];
 
 /// One directory's parsed rules.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Layer {
     /// Path of the directory the rules were read from, relative to the walk root ("").
     base: String,
@@ -132,10 +133,12 @@ impl GlobFilter {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct IgnoreRules {
     builtin: bool,
-    layers: Vec<Layer>,
+    /// Layers are shared by reference so a walk can snapshot its rules for another thread
+    /// for the price of a few `Arc` clones.
+    layers: Vec<Arc<Layer>>,
     globs: GlobFilter,
 }
 
@@ -226,10 +229,10 @@ impl IgnoreRules {
             read_rules(&dir.join(".git/info/exclude"), &mut rules);
         }
         if !rules.is_empty() {
-            self.layers.push(Layer {
+            self.layers.push(Arc::new(Layer {
                 base: rel.trim_end_matches('/').to_string(),
                 rules,
-            });
+            }));
         }
         mark
     }
@@ -284,10 +287,10 @@ impl IgnoreRules {
                 read_rules_anchored(&dir.join(".git/info/exclude"), &prefix, &mut rules);
             }
             if !rules.is_empty() {
-                self.layers.push(Layer {
+                self.layers.push(Arc::new(Layer {
                     base: String::new(),
                     rules,
-                });
+                }));
             }
         }
         mark
