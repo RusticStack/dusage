@@ -7,6 +7,7 @@ use crate::glob::Glob;
 use crate::pattern::Pattern;
 use crate::report;
 use crate::search::{search, Scope, SearchOptions};
+use std::io::Read;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -52,6 +53,8 @@ OPTIONS:
     --max-columns N        truncate printed lines at N bytes
     --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
     -Z, --null             NUL instead of ':' after each file name (for xargs -0)
+
+A path of `-` is standard input, and with no paths a piped stdin is searched instead of `.`.
     --hidden               also search hidden files and directories
     --no-ignore            do not skip .gitignore/.ignore rules or cache directories
     -x, --one-filesystem   stay on the starting filesystem
@@ -277,11 +280,25 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     if pattern_text.is_empty() {
         return Err("empty pattern".to_string().into());
     }
+    // `-` is standard input, as in grep and rg.
+    let stdin_wanted = paths.iter().any(|p| p == "-");
+    let piped = scope == Scope::Content && !std::io::stdin().is_terminal();
     let roots: Vec<PathBuf> = if paths.is_empty() {
-        vec![PathBuf::from(".")]
+        // A piped stdin with no paths searches the pipe, not the directory.
+        if piped {
+            Vec::new()
+        } else {
+            vec![PathBuf::from(".")]
+        }
     } else {
-        paths.into_iter().map(PathBuf::from).collect()
+        paths
+            .iter()
+            .filter(|p| p.as_str() != "-")
+            .map(PathBuf::from)
+            .collect()
     };
+    // An explicit path always wins: stdin is only read when `-` names it or nothing else does.
+    let read_stdin = scope == Scope::Content && (stdin_wanted || (paths.is_empty() && piped));
     for r in &roots {
         if !r.exists() {
             return Err(format!("{}: no such file or directory", r.display()).into());
@@ -390,7 +407,19 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             if let Some(v) = a.value("--max-filesize") {
                 o.max_file_size = Some(parse_size(v)?);
             }
-            search(&o).map_err(|e| Fail(1, e.to_string()))?
+            if read_stdin {
+                let mut data = Vec::new();
+                std::io::stdin()
+                    .read_to_end(&mut data)
+                    .map_err(|e| Fail(2, e.to_string()))?;
+                if o.with_filename.is_none() {
+                    o.with_filename = Some(false);
+                }
+                crate::search::search_buffer(&o, "(standard input)", &data)
+                    .map_err(|e| Fail(1, e.to_string()))?
+            } else {
+                search(&o).map_err(|e| Fail(1, e.to_string()))?
+            }
         }
         Scope::Paths => {
             // The walk takes every path the filters allow; the positional glob decides
@@ -449,7 +478,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 true
             });
             let long = a.flag("--long");
-            let mut out = std::io::stdout().lock();
+            let mut out = std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock());
             let res = if json {
                 report::render_paths_json(&r, &mut out)
             } else {
@@ -480,7 +509,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     }
     let stats = a.flag("--stats");
     {
-        let mut out = std::io::stdout().lock();
+        let mut out = std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock());
         let res = if json {
             report::render_search_json(&report, &o, &mut out)
         } else {
