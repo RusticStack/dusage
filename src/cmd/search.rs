@@ -37,6 +37,7 @@ OPTIONS:
     -L, --files-without-match
                            print only the names of files with no match
     -c, --count            print the number of matching lines per file
+        --count-matches    print the number of individual matches per file
     -o, --only-matching    print only the matching part of each line
     -q, --quiet            print nothing; exit 0 on the first match
     -m, --max-count N      stop after N matching lines per file
@@ -52,6 +53,7 @@ OPTIONS:
     --max-filesize SIZE    skip files larger than SIZE (e.g. 10M)
     --max-columns N        truncate printed lines at N bytes
     --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
+    --files                with no pattern, list the files a search would read
     -Z, --null             NUL instead of ':' after each file name (for xargs -0)
 
 A path of `-` is standard input, and with no paths a piped stdin is searched instead of `.`.
@@ -120,6 +122,39 @@ fn color_enabled(mode: Option<&str>) -> bool {
         Some("never" | "no" | "false") => false,
         _ => std::io::stdout().is_terminal(),
     }
+}
+
+/// One pattern that matches any of `patterns`, for a repeated `-e`. Literal patterns are
+/// escaped individually; the rest are wrapped so a top-level `|` in one cannot leak.
+fn alternation(patterns: &[String], fixed: bool) -> String {
+    let escape = |p: &str| -> String {
+        let mut out = String::with_capacity(p.len() + 4);
+        for c in p.chars() {
+            if matches!(
+                c,
+                '\\' | '^' | '$' | '.' | '[' | ']' | '{' | '}' | '(' | ')' | '|' | '*' | '+' | '?'
+            ) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    };
+    if patterns.len() == 1 {
+        return if fixed {
+            escape(&patterns[0])
+        } else {
+            patterns[0].clone()
+        };
+    }
+    patterns
+        .iter()
+        .map(|p| {
+            let body = if fixed { escape(p) } else { p.clone() };
+            format!("(?:{body})")
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn ext_globs(t: &str) -> Result<Vec<String>, String> {
@@ -197,6 +232,7 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--files-without-match",
     "-c",
     "--count",
+    "--count-matches",
     "-o",
     "--only-matching",
     "-q",
@@ -270,12 +306,20 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         println!("dusage {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let (pattern_text, paths) = match a.value("-e").or(a.value("--regexp")) {
-        Some(p) => (p.to_string(), a.positionals().to_vec()),
-        None => match a.positionals().split_first() {
+    let mut multi_pattern = false;
+    let mut given: Vec<String> = a.values("-e").to_vec();
+    given.extend(a.values("--regexp").iter().cloned());
+    let (pattern_text, paths) = if given.is_empty() {
+        match a.positionals().split_first() {
             Some((p, rest)) => (p.clone(), rest.to_vec()),
             None => return Err("missing <pattern>".to_string().into()),
-        },
+        }
+    } else {
+        // `-e` may repeat: every pattern is an alternative, as in grep and rg.
+        let fixed = a.flag("-F") || a.flag("--fixed-strings");
+        // Several literals become one escaped regex, so the fixed-string path is off.
+        multi_pattern = given.len() > 1;
+        (alternation(&given, fixed), a.positionals().to_vec())
     };
     if pattern_text.is_empty() {
         return Err("empty pattern".to_string().into());
@@ -333,7 +377,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     };
     // Path mode never compiles the pattern as a regex: it is a glob (or a substring
     // with `--fixed`), so a literal placeholder is all the engine needs.
-    let fixed = a.flag("-F") || a.flag("--fixed-strings");
+    let fixed = (a.flag("-F") || a.flag("--fixed-strings")) && !multi_pattern;
     let mut o = SearchOptions::new(
         Pattern::new(
             &pattern_text,
@@ -371,6 +415,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             o.files_with_matches = a.flag("-l") || a.flag("--files-with-matches");
             o.files_without_matches = a.flag("-L") || a.flag("--files-without-match");
             o.count = a.flag("-c") || a.flag("--count");
+            o.count_matches = a.flag("--count-matches");
             o.quiet = a.flag("-q") || a.flag("--quiet");
             o.text = a.flag("-a") || a.flag("--text");
             o.max_columns = unsigned("--max-columns")?.unwrap_or(0);
@@ -554,8 +599,14 @@ impl SizeFilter {
     }
 }
 
-/// `dusage search <pattern> [paths...]`
+/// `dusage search <pattern> [paths...]`, and `dusage search --files` to list the files a
+/// search would read (the same walk `find '*' --files` does).
 pub fn run_search(raw: Vec<String>) -> Result<(), Fail> {
+    if raw.iter().any(|t| t == "--files") && !raw.iter().any(|t| t == "-e" || t == "--regexp") {
+        let mut args = vec!["*".to_string(), "--files".to_string()];
+        args.extend(raw.iter().filter(|t| *t != "--files").cloned());
+        return run_query(args, Scope::Paths);
+    }
     run_query(raw, Scope::Content)
 }
 

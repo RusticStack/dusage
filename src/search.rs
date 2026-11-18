@@ -52,6 +52,8 @@ pub struct SearchOptions {
     pub files_with_matches: bool,
     pub files_without_matches: bool,
     pub count: bool,
+    /// Print the total number of matches per file instead of matching lines (`--count-matches`).
+    pub count_matches: bool,
     pub quiet: bool,
     pub hidden: bool,
     pub no_ignore: bool,
@@ -88,6 +90,7 @@ impl SearchOptions {
             files_with_matches: false,
             files_without_matches: false,
             count: false,
+            count_matches: false,
             quiet: false,
             hidden: false,
             no_ignore: false,
@@ -124,6 +127,8 @@ pub struct FileHits {
     pub hits: Vec<LineHit>,
     /// Matching lines (not context lines).
     pub matches: u64,
+    /// Individual matches in the file, for `--count-matches`.
+    pub total: u64,
     /// The file looks binary (a NUL in its first 8 KiB) and `-a` was not given.
     pub binary: bool,
 }
@@ -157,7 +162,7 @@ impl SearchReport {
     fn files_matched_added(&mut self, got: &FileHits, o: &SearchOptions) {
         self.stats.files_matched += 1;
         self.any_match = true;
-        if o.count || o.files_with_matches {
+        if o.count || o.count_matches || o.files_with_matches {
             self.files.push(FileHits {
                 hits: Vec::new(),
                 ..got.clone()
@@ -488,7 +493,7 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
         stats.files_matched += 1;
         report.any_match = true;
         // `-c` and `-l` print a number or a path, so the lines are not kept.
-        if o.count || o.files_with_matches {
+        if o.count || o.count_matches || o.files_with_matches {
             report.files.push(FileHits {
                 hits: Vec::new(),
                 ..got
@@ -571,6 +576,8 @@ struct Scanner<'a> {
     stopped: bool,
     /// One reusable buffer per file: the current line, so no line costs an allocation.
     line: Vec<u8>,
+    /// Individual matches over the whole file (a line can hold several).
+    total: u64,
 }
 
 impl<'a> Scanner<'a> {
@@ -588,6 +595,7 @@ impl<'a> Scanner<'a> {
             limit: o.max_count.unwrap_or(u64::MAX),
             stopped: false,
             line: Vec::new(),
+            total: 0,
         }
     }
 
@@ -654,6 +662,7 @@ impl<'a> Scanner<'a> {
             &mut self.history,
             &mut self.hits,
             &mut self.matches,
+            &mut self.total,
             &mut self.remaining_after,
             &mut self.last_emitted,
             self.want_lines,
@@ -677,6 +686,7 @@ fn finished(
                 path: path.to_string_lossy().into_owned(),
                 hits: Vec::new(),
                 matches: 0,
+                total: 0,
                 binary,
             })
         } else {
@@ -699,6 +709,7 @@ fn finished(
         path: path.to_string_lossy().into_owned(),
         hits: sc.hits,
         matches: sc.matches,
+        total: sc.total,
         binary,
     }))
 }
@@ -712,6 +723,7 @@ fn handle_line(
     history: &mut VecDeque<(u64, Vec<u8>)>,
     hits: &mut Vec<LineHit>,
     matches: &mut u64,
+    total: &mut u64,
     remaining_after: &mut usize,
     last_emitted: &mut u64,
     want_lines: bool,
@@ -739,6 +751,11 @@ fn handle_line(
         return false;
     }
     *matches += 1;
+    // `--count-matches` counts individual matches, so they are tallied even when no line is
+    // kept for printing.
+    if !o.invert && o.count_matches {
+        *total += o.pattern.find_all(text, MAX_PER_LINE).len() as u64;
+    }
     if !want_lines {
         return *matches >= limit;
     }
@@ -804,7 +821,7 @@ pub fn has_output(r: &SearchReport, o: &SearchOptions) -> bool {
     if o.scope == Scope::Paths {
         return !r.paths.is_empty();
     }
-    if o.count || o.files_with_matches || o.files_without_matches {
+    if o.count || o.count_matches || o.files_with_matches || o.files_without_matches {
         return !r.files.is_empty();
     }
     r.files.iter().any(|f| !f.hits.is_empty())
