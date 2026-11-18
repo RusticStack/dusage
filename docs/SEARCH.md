@@ -149,7 +149,8 @@ The help text is the shipped contract for the dialect (`src/cmd/search.rs:20-22`
 > `\A` `\z` `\b` `\B` `\d` `\w` `\s` and their negations; inline flags `(?i)`
 > `(?s)` `(?m)`. No lookaround or backreferences.
 
-The engine is `src/regex.rs` — a Pike VM over a Thompson NFA, so there is no
+The engine is `src/regex.rs` — a lazily built DFA over a Thompson NFA, with the
+Pike VM it is built from answering what the DFA cannot, so there is no
 backtracking and no pathological pattern (`src/regex.rs:1-30`). Its module
 documentation is the fuller contract, and it is *wider* than the help text: the
 help omits POSIX bracket expressions, lazy quantifiers, `{n,}`, the `\n \r \t \f
@@ -651,9 +652,11 @@ dusage find '*.go'                108     find 62
 ```
 
 The shape is consistent with the recorded table: a literal scan is roughly 2–3×
-slower than rg, and a general regex is an order of magnitude slower, because the
-Pike VM is unoptimised beyond the one-byte prefilter while rg runs a lazily
-compiled DFA. None of that changes a result — §5.3 guarantees identical output —
+slower than rg, and a general regex used to be an order of magnitude slower, on a
+per-line Pike VM with only a one-byte prefilter. That line is now a lazily built
+DFA of the same program (`docs/BENCHMARKS.md` has the before/after): the
+`[A-Z][a-zA-Z0-9_]*\.go` row above went from 2322 ms to 0.16 s for `-c` on the
+same tree. None of that changes a result — §5.3 guarantees identical output —
 so the cost is latency, not correctness, and it stays inside the same order of
 magnitude as `grep`.
 

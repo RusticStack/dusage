@@ -75,6 +75,8 @@ pub struct SearchOptions {
     /// Ask the walk for each entry's size and mtime: only the modes that print or filter on
     /// them need it, and every other walk saves an lstat per file.
     pub details: bool,
+    /// Colour will be used, so match spans have to be located per line.
+    pub paint: bool,
 }
 
 impl SearchOptions {
@@ -108,6 +110,7 @@ impl SearchOptions {
             encoding: None,
             null: false,
             details: false,
+            paint: false,
         }
     }
 }
@@ -652,6 +655,9 @@ impl<'a> Scanner<'a> {
         if self.stopped || self.matches >= self.limit {
             return;
         }
+        if self.block_scan(chunk) {
+            return;
+        }
         let mut start = 0;
         while let Some(pos) = bytes::find_byte(chunk, b'\n', start) {
             self.line_no += 1;
@@ -681,6 +687,123 @@ impl<'a> Scanner<'a> {
         if start < chunk.len() {
             self.carry.extend_from_slice(&chunk[start..]);
         }
+    }
+
+    /// Find literal matches block-wise and expand only the lines that hold one, instead of
+    /// splitting every line. This is the path ripgrep takes, and it is what makes a search
+    /// for a rare word cost one scan of the data rather than one pass per line.
+    ///
+    /// Only for the modes where a match means "print or count this line": context, inversion,
+    /// `-o` and `-m` need the line-at-a-time machinery and decline here.
+    fn block_scan(&mut self, chunk: &[u8]) -> bool {
+        if self.o.invert
+            || self.o.before > 0
+            || self.o.after > 0
+            || self.o.only_matching
+            || self.o.max_count.is_some()
+            || self.stopped
+        {
+            return false;
+        }
+        if !self.o.pattern.block_safe() {
+            return false;
+        }
+        // A line continued from the previous block is finished the ordinary way first.
+        let mut from = 0;
+        if !self.carry.is_empty() {
+            let Some(nl) = bytes::find_byte(chunk, b'\n', 0) else {
+                self.carry.extend_from_slice(chunk);
+                return true;
+            };
+            let mut buf = std::mem::take(&mut self.line);
+            buf.clear();
+            buf.extend_from_slice(&self.carry);
+            buf.extend_from_slice(&chunk[..nl]);
+            self.carry.clear();
+            self.line_no += 1;
+            let stop = self.emit(&buf);
+            self.line = buf;
+            if stop || self.matches >= self.limit {
+                self.stopped = stop;
+                return true;
+            }
+            from = nl + 1;
+        }
+        // Everything after the last newline is a partial line: hand it to the next block.
+        let body = &chunk[from..];
+        let end = match bytes::rfind_byte(body, b'\n', body.len()) {
+            Some(i) => i,
+            None => {
+                self.carry.extend_from_slice(body);
+                return true;
+            }
+        };
+        let body = &body[..end];
+        // Line numbers are carried forward from match to match, so each byte of the block is
+        // counted once rather than once per match.
+        let base = self.line_no;
+        let mut line_no = base;
+        let mut line_start = 0;
+        let mut pos = 0;
+        while let Some(m) = self.o.pattern.block_match(body, pos) {
+            // A match that runs across a newline is not a line match: the per-line semantics
+            // never see the newline at all, so a class like `[^a-z]` must not match one.
+            if bytes::find_byte(&body[m.start..m.end.max(m.start)], b'\n', 0).is_some() {
+                pos = m.start + 1;
+                line_start = match bytes::rfind_byte(body, b'\n', m.start) {
+                    Some(i) => i + 1,
+                    None => 0,
+                };
+                continue;
+            }
+            let hit = m.start;
+            let ls = match bytes::rfind_byte(body, b'\n', hit) {
+                Some(i) => i + 1,
+                None => line_start,
+            };
+            let le = match bytes::find_byte(body, b'\n', hit) {
+                Some(i) => i,
+                None => body.len(),
+            };
+            line_no += bytes::count_byte(&body[line_start..ls], b'\n') as u64 + 1;
+            self.line_no = line_no;
+            self.matches += 1;
+            let line = strip_cr(&body[ls..le]);
+            if self.o.count_matches {
+                let mut at = 0;
+                while let Some(cm) = self.o.pattern.block_match(line, at) {
+                    self.total += 1;
+                    at = cm.end.max(cm.start + 1);
+                }
+            }
+            if self.want_lines {
+                let text = line.to_vec();
+                let mut spans: Vec<(usize, usize)> = Vec::new();
+                if self.o.paint {
+                    let mut at = 0;
+                    while let Some(cm) = self.o.pattern.block_match(&text, at) {
+                        spans.push((cm.start, cm.end));
+                        at = cm.end.max(cm.start + 1);
+                    }
+                }
+                self.hits.push(LineHit {
+                    number: line_no,
+                    text,
+                    matched: true,
+                    spans,
+                });
+            }
+            if self.matches >= self.limit {
+                break;
+            }
+            // One line is reported once however many matches it holds.
+            pos = le + 1;
+            line_start = pos;
+        }
+        // The block ends right before a newline, so it holds one line more than its newlines.
+        self.line_no = base + bytes::count_byte(body, b'\n') as u64 + 1;
+        self.carry.extend_from_slice(&chunk[from + end + 1..]);
+        true
     }
 
     /// Handle the trailing line of a file that does not end in a newline.
@@ -934,7 +1057,9 @@ mod tests {
         let f = Fixture::new("basic");
         f.file("a.txt", "alpha\nneedle here\nomega\n");
         f.file("b/c.txt", "no match\n\nanother needle and needle\n");
-        let r = search(&opts(&f, "needle")).unwrap();
+        let mut o = opts(&f, "needle");
+        o.paint = true;
+        let r = search(&o).unwrap();
         let got = lines(&r);
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(got[0].1, 2);
@@ -996,6 +1121,7 @@ mod tests {
         assert_eq!(got[0].2, "foo");
         let mut o = opts(&f, "foo");
         o.only_matching = false;
+        o.paint = true;
         let r = search(&o).unwrap();
         assert_eq!(r.files[0].hits[0].spans, vec![(2, 5), (8, 11)]);
     }

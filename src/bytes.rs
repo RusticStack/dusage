@@ -115,19 +115,31 @@ fn load8(hay: &[u8], at: usize) -> u64 {
 
 /// Case rule for byte comparisons: `Exact` or `Ci`.
 trait Case {
-    /// Broadcasts of the needle byte that a matching haystack byte may equal: one for a
-    /// non-letter, both the lower and the upper form for a letter under `Ci`.
-    fn targets(b: u8) -> (u64, u64);
-    /// Zero flags (high bits) for the bytes of `chunk` that match. Several flags from one block
-    /// can be OR-ed and tested once, which is what keeps the scan loop branch-light. A borrow
-    /// out of a zero byte also flags the byte above it, so these flags are only ever tested
-    /// for "any match here?".
-    fn flags(chunk: u64, targets: (u64, u64)) -> u64;
+    /// Broadcast of the needle byte as the scan sees it: one target, because the haystack word
+    /// is folded first.
+    fn target(b: u8) -> u64;
+    /// Folds all eight bytes of `chunk` the way the model folds one haystack byte: the
+    /// identity for `Exact`, bit 5 OR-ed in for `Ci`. Folding only ever adds candidates, never
+    /// loses one, so a false candidate costs one window compare and never an answer.
+    fn fold_word(chunk: u64) -> u64;
+    /// Zero flags (high bits) for the folded bytes of `chunk` that equal the target. Several
+    /// flags from one block can be OR-ed and tested once, which is what keeps the scan loop
+    /// branch-light. A borrow out of a zero byte also flags the byte above it, so these flags
+    /// are only ever tested for "any match here?".
+    #[inline]
+    fn flags(chunk: u64, target: u64) -> u64 {
+        zero_flags(Self::fold_word(chunk) ^ target)
+    }
     /// Exactly one high bit per matching byte, no borrow artefacts: what locates the lane.
-    fn flags_exact(chunk: u64, targets: (u64, u64)) -> u64;
+    #[inline]
+    fn flags_exact(chunk: u64, target: u64) -> u64 {
+        zero_bytes(Self::fold_word(chunk) ^ target)
+    }
     fn eq(a: u8, b: u8) -> bool;
-    /// The byte's equality key: itself under `Exact`, its ASCII lowercase under `Ci`.
-    fn fold(b: u8) -> u8;
+    /// Key for Horspool's bad-byte table. Two bytes that match under this rule always share a
+    /// key; `Ci` also ties the seven pairs that differ only in bit 5 (`@`/`` ` ``, and `[\]^_`
+    /// with `{|}~`), which can only make the table's shift shorter, never skip a match.
+    fn skip_key(b: u8) -> u8;
     /// Whole-window compare of two equal-length slices.
     fn slice_eq(a: &[u8], b: &[u8]) -> bool;
     /// Rarity of the haystack byte that matches `b`, for anchor choice.
@@ -138,19 +150,13 @@ struct Exact;
 
 impl Case for Exact {
     #[inline]
-    fn targets(b: u8) -> (u64, u64) {
-        let t = broadcast(b);
-        (t, t)
+    fn target(b: u8) -> u64 {
+        broadcast(b)
     }
 
     #[inline]
-    fn flags(chunk: u64, targets: (u64, u64)) -> u64 {
-        zero_flags(chunk ^ targets.0)
-    }
-
-    #[inline]
-    fn flags_exact(chunk: u64, targets: (u64, u64)) -> u64 {
-        zero_bytes(chunk ^ targets.0)
+    fn fold_word(chunk: u64) -> u64 {
+        chunk
     }
 
     #[inline]
@@ -159,7 +165,7 @@ impl Case for Exact {
     }
 
     #[inline]
-    fn fold(b: u8) -> u8 {
+    fn skip_key(b: u8) -> u8 {
         b
     }
 
@@ -176,36 +182,21 @@ impl Case for Exact {
 
 struct Ci;
 
+/// Bit 5 of every byte: `A-Z` become `a-z`, every other byte keeps its value. Seven byte pairs
+/// share a folded value without being the same character — `@`/`` ` ``, and `[\]^_` with
+/// `{|}~` — so a folded hit there is a candidate `eq` then rejects. Letters, digits and every
+/// other pair are exact. Latin-1 is deliberately not folded: `LOWER` decides what matches.
+const OR20: u64 = 0x2020_2020_2020_2020;
+
 impl Case for Ci {
     #[inline]
-    fn targets(b: u8) -> (u64, u64) {
-        let lo = LOWER[b as usize];
-        let up = if b.is_ascii_alphabetic() {
-            lo & !0x20
-        } else {
-            lo
-        };
-        (broadcast(lo), broadcast(up))
+    fn target(b: u8) -> u64 {
+        broadcast(b | 0x20)
     }
 
     #[inline]
-    fn flags(chunk: u64, targets: (u64, u64)) -> u64 {
-        let lo = zero_flags(chunk ^ targets.0);
-        if targets.0 == targets.1 {
-            lo
-        } else {
-            lo | zero_flags(chunk ^ targets.1)
-        }
-    }
-
-    #[inline]
-    fn flags_exact(chunk: u64, targets: (u64, u64)) -> u64 {
-        let lo = zero_bytes(chunk ^ targets.0);
-        if targets.0 == targets.1 {
-            lo
-        } else {
-            lo | zero_bytes(chunk ^ targets.1)
-        }
+    fn fold_word(chunk: u64) -> u64 {
+        chunk | OR20
     }
 
     #[inline]
@@ -214,8 +205,8 @@ impl Case for Ci {
     }
 
     #[inline]
-    fn fold(b: u8) -> u8 {
-        LOWER[b as usize]
+    fn skip_key(b: u8) -> u8 {
+        b | 0x20
     }
 
     #[inline]
@@ -239,7 +230,7 @@ fn find_candidate<C: Case>(hay: &[u8], byte: u8, from: usize, last: usize) -> Op
     if from > last || last >= hay.len() {
         return None;
     }
-    let targets = C::targets(byte);
+    let target = C::target(byte);
     let end = last + 1;
     let mut i = from;
     while i + 32 <= end {
@@ -247,24 +238,24 @@ fn find_candidate<C: Case>(hay: &[u8], byte: u8, from: usize, last: usize) -> Op
         let w1 = load8(hay, i + 8);
         let w2 = load8(hay, i + 16);
         let w3 = load8(hay, i + 24);
-        let flags = C::flags(w0, targets)
-            | C::flags(w1, targets)
-            | C::flags(w2, targets)
-            | C::flags(w3, targets);
+        let flags = C::flags(w0, target)
+            | C::flags(w1, target)
+            | C::flags(w2, target)
+            | C::flags(w3, target);
         if flags & HI != 0 {
-            let m = C::flags_exact(w0, targets);
+            let m = C::flags_exact(w0, target);
             if m != 0 {
                 return Some(i + (m.trailing_zeros() as usize >> 3));
             }
-            let m = C::flags_exact(w1, targets);
+            let m = C::flags_exact(w1, target);
             if m != 0 {
                 return Some(i + 8 + (m.trailing_zeros() as usize >> 3));
             }
-            let m = C::flags_exact(w2, targets);
+            let m = C::flags_exact(w2, target);
             if m != 0 {
                 return Some(i + 16 + (m.trailing_zeros() as usize >> 3));
             }
-            let m = C::flags_exact(w3, targets);
+            let m = C::flags_exact(w3, target);
             if m != 0 {
                 return Some(i + 24 + (m.trailing_zeros() as usize >> 3));
             }
@@ -274,12 +265,12 @@ fn find_candidate<C: Case>(hay: &[u8], byte: u8, from: usize, last: usize) -> Op
     while i + 16 <= end {
         let a = load8(hay, i);
         let b = load8(hay, i + 8);
-        if (C::flags(a, targets) | C::flags(b, targets)) & HI != 0 {
-            let m = C::flags_exact(a, targets);
+        if (C::flags(a, target) | C::flags(b, target)) & HI != 0 {
+            let m = C::flags_exact(a, target);
             if m != 0 {
                 return Some(i + (m.trailing_zeros() as usize >> 3));
             }
-            let m = C::flags_exact(b, targets);
+            let m = C::flags_exact(b, target);
             if m != 0 {
                 return Some(i + 8 + (m.trailing_zeros() as usize >> 3));
             }
@@ -288,8 +279,8 @@ fn find_candidate<C: Case>(hay: &[u8], byte: u8, from: usize, last: usize) -> Op
     }
     while i + 8 <= end {
         let word = load8(hay, i);
-        if C::flags(word, targets) & HI != 0 {
-            let m = C::flags_exact(word, targets);
+        if C::flags(word, target) & HI != 0 {
+            let m = C::flags_exact(word, target);
             if m != 0 {
                 return Some(i + (m.trailing_zeros() as usize >> 3));
             }
@@ -308,8 +299,25 @@ fn find_candidate<C: Case>(hay: &[u8], byte: u8, from: usize, last: usize) -> Op
     // The last word ends exactly at `end`; the lanes below `i` are already known to be clean.
     let base = end - 8;
     let lanes = (i - base) * 8;
-    let m = C::flags_exact(load8(hay, base), targets) & (u64::MAX << lanes);
+    let m = C::flags_exact(load8(hay, base), target) & (u64::MAX << lanes);
     (m != 0).then(|| base + (m.trailing_zeros() as usize >> 3))
+}
+
+/// First index in `from..=last` holding a byte that *matches* `byte` under `C`.
+///
+/// [`find_candidate`] answers "could a match be here" from the folded flags, so under `Ci` it
+/// also reports the seven bytes that fold onto another character (`@` for `` ` ``); a
+/// single-byte needle has no window to compare, so it confirms each candidate with `eq`.
+#[inline]
+fn find_match<C: Case>(hay: &[u8], byte: u8, from: usize, last: usize) -> Option<usize> {
+    let mut at = from;
+    loop {
+        let p = find_candidate::<C>(hay, byte, at, last)?;
+        if C::eq(hay[p], byte) {
+            return Some(p);
+        }
+        at = p + 1;
+    }
 }
 
 /// Whether `hay[pos..pos + needle.len()]` equals `needle` under `C`.
@@ -382,7 +390,7 @@ impl Skip {
         let n = needle.len();
         let mut table = Skip([broadcast((n - 1).min(255) as u8); 32]);
         for (k, &b) in needle[..n - 1].iter().enumerate() {
-            let key = C::fold(b) as usize;
+            let key = C::skip_key(b) as usize;
             let shift = (key & 7) * 8;
             let lane = !(0xFFu64 << shift);
             let step = ((n - 1 - k).min(255) as u64) << shift;
@@ -405,13 +413,16 @@ fn search_skip<C: Case>(hay: &[u8], needle: &[u8], from: usize, skips: &Skip) ->
     let n = needle.len();
     let tail = n - 1;
     let last = hay.len() - n;
+    // The needle's tail key cannot change, so under `Ci` the step pays one table read for the
+    // haystack byte instead of two.
+    let key = C::skip_key(needle[tail]);
     let mut at = from;
     while at <= last {
-        if C::eq(hay[at + tail], needle[tail]) && C::slice_eq(&hay[at..at + tail], &needle[..tail])
-        {
+        let k = C::skip_key(hay[at + tail]);
+        if k == key && C::slice_eq(&hay[at..at + tail], &needle[..tail]) {
             return Some(at);
         }
-        at += skips.get(C::fold(hay[at + tail]));
+        at += skips.get(k);
     }
     None
 }
@@ -429,7 +440,7 @@ const SKIP_MIN_LEN: usize = 16;
 /// `dusage search` runs the matcher once per line, and a 40-byte line is over before a plan
 /// paid for itself, so the plan is built with the pattern and reused. The public free functions
 /// below build one per call for the callers that match a single big buffer.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Finder {
     needle: Vec<u8>,
     anchor: usize,
@@ -474,6 +485,16 @@ impl Finder {
 
     /// First occurrence in `hay`.
     #[inline]
+    /// The needle length, so a caller can turn a found offset into a span.
+    pub fn len(&self) -> usize {
+        self.needle.len()
+    }
+
+    /// A needle is never empty, but the pair keeps the lint quiet.
+    pub fn is_empty(&self) -> bool {
+        self.needle.is_empty()
+    }
+
     pub fn find(&self, hay: &[u8]) -> Option<usize> {
         self.find_from(hay, 0)
     }
@@ -492,7 +513,7 @@ impl Finder {
             return None;
         }
         if n == 1 {
-            return find_candidate::<C>(hay, needle[0], from, hay.len() - 1);
+            return find_match::<C>(hay, needle[0], from, hay.len() - 1);
         }
         match &self.skips {
             Some(skips) => search_skip::<C>(hay, needle, from, skips),
@@ -540,7 +561,7 @@ fn search<C: Case>(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         return None;
     }
     if n == 1 {
-        return find_candidate::<C>(hay, needle[0], from, hay.len() - 1);
+        return find_match::<C>(hay, needle[0], from, hay.len() - 1);
     }
     if n >= SKIP_MIN_LEN && hay.len() - from >= SKIP_MIN_HAY {
         search_skip::<C>(hay, needle, from, &Skip::build::<C>(needle))
@@ -625,6 +646,42 @@ pub fn find_byte(hay: &[u8], b: u8, from: usize) -> Option<usize> {
         return None;
     }
     find_candidate::<Exact>(hay, b, from, hay.len() - 1)
+}
+
+/// First byte at or after `from` inside one of `ranges`, or None. Every range must lie
+/// below 0x7f: the word test compares the low seven bits of each byte, which is exact only
+/// there. One masked word answers all the ranges at once, so a caller that skips the bytes
+/// which cannot start a match pays a word per eight instead of a byte each.
+pub fn find_in_ranges(hay: &[u8], ranges: &[(u8, u8)], from: usize) -> Option<usize> {
+    let mut i = from;
+    while i + 8 <= hay.len() {
+        if in_ranges(load8(hay, i), ranges) & HI != 0 {
+            break;
+        }
+        i += 8;
+    }
+    hay.get(i..)?
+        .iter()
+        .position(|b| ranges.iter().any(|&(lo, hi)| *b >= lo && *b <= hi))
+        .map(|k| i + k)
+}
+
+/// High bit set per byte of `w` that falls in one of `ranges`. Borrows can flag a byte
+/// above a match, so this only ever answers "is there one in this word?".
+#[inline]
+fn in_ranges(w: u64, ranges: &[(u8, u8)]) -> u64 {
+    let ascii = HI & !w;
+    let mut flags = 0;
+    for &(lo, hi) in ranges {
+        flags |= at_least(w, lo) & HI & !at_least(w, hi + 1) & ascii;
+    }
+    flags
+}
+
+/// High bit set per byte of `w` that is at least `t`, for `t` below 0x80.
+#[inline]
+fn at_least(w: u64, t: u8) -> u64 {
+    ((w & M7) | HI).wrapping_sub(u64::from(t) * LO) & HI
 }
 
 /// Last `b` strictly before `before` (`before` is clamped to `hay.len()`).
@@ -1870,6 +1927,216 @@ mod tests {
                     assert_eq!(finder.find_from(hay, from), want, "ci {ci} from {from}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn case_insensitive_mixed_case_needles() {
+        let hay = b"the Memmove ctor and MEMMOVE again";
+        for needle in [&b"memmove"[..], b"MeMmOvE", b"MEMMOVE", b"mEmMoVe"] {
+            assert_eq!(memmem_ci(hay, needle), Some(4), "{needle:?}");
+            assert_eq!(Finder::new(needle, true).find(hay), Some(4), "{needle:?}");
+        }
+        // A mixed-case needle past the first word of a longer buffer, so the block loop and
+        // the tail word are both exercised.
+        let long: Vec<u8> = (0..41).map(|_| b'.').chain("MemMove".bytes()).collect();
+        for needle in [&b"mEmMoVe"[..], b"MEMmove", b"memmove"] {
+            assert_eq!(memmem_ci(&long, needle), Some(41), "{needle:?}");
+            assert_eq!(Finder::new(needle, true).find(&long), Some(41));
+        }
+        assert_eq!(memmem_ci_from(&long, b"mEmmove", 42), None);
+        assert_eq!(memmem_ci_from(&long, b"mEmmove", 41), Some(41));
+    }
+
+    #[test]
+    fn case_insensitive_needle_at_every_offset_of_33_bytes() {
+        // 33 bytes whose folded values are all distinct, so a needle cut from offset `at`
+        // occurs exactly once and the expected answer is `at`, whichever side of a word
+        // boundary it starts and ends on.
+        let base: Vec<u8> = (0..33u8)
+            .map(|i| if i < 26 { b'a' + i } else { b'0' + (i - 26) })
+            .collect();
+        for mode in 0..4 {
+            let hay: Vec<u8> = base
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| match (mode, i % 2) {
+                    (1, _) | (2, 0) | (3, 1) if c.is_ascii_alphabetic() => c - 32,
+                    _ => c,
+                })
+                .collect();
+            assert_eq!(hay.len(), 33);
+            for at in 0..hay.len() {
+                for len in 1..=hay.len() - at {
+                    let needle = &hay[at..at + len];
+                    assert_eq!(
+                        memmem_ci(&hay, needle),
+                        Some(at),
+                        "mode {mode} at {at} len {len}"
+                    );
+                    assert_eq!(Finder::new(needle, true).find(&hay), Some(at));
+                    assert_eq!(memmem_ci_from(&hay, needle, at), Some(at));
+                    assert_eq!(memmem_ci_from(&hay, needle, at + 1), None);
+                    assert_eq!(memmem(&hay, needle), Some(at), "exact at {at} len {len}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn case_insensitive_bytes_around_the_case_bit() {
+        // `@` (0x40) and `` ` `` (0x60) differ only in bit 5, which folding forces to 1, so a
+        // folded hit on one is only a candidate for the other: nothing may match it outright.
+        assert_eq!(memmem_ci(b"\x40", b"\x60"), None);
+        assert_eq!(memmem_ci(b"\x60", b"\x40"), None);
+        assert_eq!(Finder::new(b"\x60", true).find(b"\x40"), None);
+        assert_eq!(Finder::new(b"\x40", true).find(b"\x60"), None);
+        assert_eq!(memmem_ci(&[b'@'; 40], b"`"), None);
+        assert_eq!(memmem_ci(&[b'`'; 40], b"@"), None);
+        assert_eq!(memmem_ci(b"@`@`@`@`@`", b"@"), Some(0));
+        assert_eq!(memmem_ci(b"@`@`@`@`@`", b"`"), Some(1));
+        assert_eq!(memmem_ci(&[b'@'; 40], b"``"), None);
+        assert_eq!(memmem_ci(b"\x40\x40", b"``"), None);
+        for (lo, hi) in [
+            (b'[', b'{'),
+            (b'\\', b'|'),
+            (b']', b'}'),
+            (b'^', b'~'),
+            (b'_', 0x7F),
+        ] {
+            let left = [lo; 40];
+            let right = [hi; 40];
+            assert_eq!(memmem_ci(&left, &[hi]), None, "{lo:#x} vs {hi:#x}");
+            assert_eq!(memmem_ci(&right, &[lo]), None, "{hi:#x} vs {lo:#x}");
+            assert_eq!(memmem_ci(&left, &[lo]), Some(0));
+            assert_eq!(memmem_ci(&right, &[hi]), Some(0));
+            let mut mixed = left.to_vec();
+            mixed.extend_from_slice(&right);
+            assert_eq!(memmem_ci(&mixed, &[lo, lo]), Some(0));
+            assert_eq!(memmem_ci(&mixed, &[hi, hi]), Some(40));
+            assert_eq!(memmem_ci(&mixed, &[lo, hi]), Some(39));
+            assert_eq!(memmem_ci(&mixed, &[hi, lo]), None);
+            assert_eq!(Finder::new(&[hi], true).find(&left), None);
+            assert_eq!(Finder::new(&[lo], true).find(&right), None);
+        }
+        // Letters still fold across those neighbours, and a letter needle ignores them.
+        assert_eq!(memmem_ci(b"A@B`C", b"a@b`c"), Some(0));
+        assert_eq!(Finder::new(b"a@b`c", true).find(b"A@B`C"), Some(0));
+        assert_eq!(memmem_ci(&[b'@'; 40], b"a"), None);
+        assert_eq!(Finder::new(b"@", true).find(&[b'`'; 40]), None);
+    }
+
+    /// Cross-check against the naive folded search on input weighted towards the bytes the fold
+    /// has to be careful about, through both the free functions and the prepared `Finder`.
+    #[test]
+    fn case_insensitive_agrees_with_naive_on_awkward_bytes() {
+        const ALPHABET: &[u8] = b"aAbB@`[{\\^_]}~ zZ09.,-\x00\x7f\xc1\xe1";
+        let mut rng = Lcg::new(0x00C0_FFEE_1234);
+        let mut checked = 0;
+        for _ in 0..4000 {
+            let hay_len = rng.below(140) as usize;
+            let hay: Vec<u8> = (0..hay_len)
+                .map(|_| ALPHABET[rng.below(ALPHABET.len() as u32) as usize])
+                .collect();
+            // Half the needles are cut out of the haystack, so a fair share of them occur.
+            let n = 1 + rng.below(12) as usize;
+            let needle: Vec<u8> = if n <= hay_len && rng.below(2) == 0 {
+                let at = rng.below((hay_len - n + 1) as u32) as usize;
+                hay[at..at + n].to_vec()
+            } else {
+                (0..n)
+                    .map(|_| ALPHABET[rng.below(ALPHABET.len() as u32) as usize])
+                    .collect()
+            };
+            let finder = Finder::new(&needle, true);
+            assert_eq!(
+                memmem_ci(&hay, &needle),
+                naive_ci(&hay, &needle),
+                "hay {hay:?} needle {needle:?}"
+            );
+            assert_eq!(finder.find(&hay), naive_ci(&hay, &needle));
+            for from in [0, rng.below(hay_len as u32 + 2) as usize, hay_len] {
+                let want = if from > hay_len {
+                    None
+                } else {
+                    naive_ci(&hay[from..], &needle).map(|p| from + p)
+                };
+                assert_eq!(
+                    memmem_ci_from(&hay, &needle, from),
+                    want,
+                    "from {from} hay {hay:?} needle {needle:?}"
+                );
+                assert_eq!(finder.find_from(&hay, from), want);
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 4000);
+    }
+
+    /// The `-i` scan must cost what the case-sensitive scan costs per byte, on a whole buffer
+    /// and on the one-call-per-line sweep `dusage search` drives. `ratio` is `-i` over
+    /// case-sensitive, so 1.00 is parity.
+    #[test]
+    fn bench_ci_vs_exact() {
+        const HAY_LEN: usize = 4 << 20;
+        let hay = english_like(HAY_LEN, 0x1234_5678_9ABC);
+        let lines: Vec<&[u8]> = hay
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        let bytes = lines.iter().map(|l| l.len()).sum::<usize>();
+        // The word list has no 'z': these are absent, so the sweep measures scanning rather
+        // than verification while still folding every word it touches. The last needle is long
+        // enough to be searched by the Horspool table, which scans for no single byte at all.
+        let needles: [(&str, &[u8]); 3] = [
+            ("absent 2", b"zz"),
+            ("absent 8", b"zzwrtxcv"),
+            ("absent 20 (skip)", b"zzxw kvbx mnbx vcxx qz"),
+        ];
+        let iterations = if cfg!(debug_assertions) { 1 } else { 5 };
+        let mbs = |ms: f64, n: usize| n as f64 / 1e6 / (ms / 1e3);
+
+        eprintln!(
+            "\ncase-sensitive vs -i on {} MiB of English-like text, {} lines of {:.0} bytes \
+             (best of {iterations})",
+            HAY_LEN >> 20,
+            lines.len(),
+            bytes as f64 / lines.len() as f64
+        );
+        eprintln!(
+            "{:<20} {:>10} {:>10} {:>7} {:>10} {:>10} {:>7}",
+            "needle", "buffer cs", "buffer -i", "ratio", "lines cs", "lines -i", "ratio"
+        );
+
+        for (label, needle) in needles {
+            let exact = Finder::new(needle, false);
+            let folded = Finder::new(needle, true);
+            assert_eq!(exact.find(&hay), None);
+            assert_eq!(folded.find(&hay), None);
+            let hit_lines = |f: &Finder| {
+                lines
+                    .iter()
+                    .filter(|l| f.find(black_box(*l)).is_some())
+                    .count()
+            };
+            let buf_cs = best_millis(iterations, || {
+                exact.find(black_box(&hay)).unwrap_or(usize::MAX)
+            });
+            let buf_ci = best_millis(iterations, || {
+                folded.find(black_box(&hay)).unwrap_or(usize::MAX)
+            });
+            let line_cs = best_millis(iterations, || hit_lines(&exact));
+            let line_ci = best_millis(iterations, || hit_lines(&folded));
+            eprintln!(
+                "{:<20} {:>10.0} {:>10.0} {:>6.2}x {:>10.0} {:>10.0} {:>6.2}x",
+                label,
+                mbs(buf_cs, HAY_LEN),
+                mbs(buf_ci, HAY_LEN),
+                buf_ci / buf_cs,
+                mbs(line_cs, bytes),
+                mbs(line_ci, bytes),
+                line_ci / line_cs
+            );
         }
     }
 

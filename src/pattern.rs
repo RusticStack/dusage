@@ -144,6 +144,41 @@ impl Pattern {
         })
     }
 
+    /// The byte scanner for the block path: a plain literal whose matching rules the byte
+    /// scanner reproduces exactly. A literal that needs Unicode folding takes the line path,
+    /// because the scanner folds ASCII only.
+    pub fn block_finder(&self) -> Option<&bytes::Finder> {
+        if self.ci && !self.lit.is_ascii() {
+            return None;
+        }
+        self.finder.as_ref()
+    }
+
+    /// True when this pattern can be matched against a whole block: no line-relative
+    /// assertion, no word requirement, and a matcher whose semantics cover the block.
+    pub fn block_safe(&self) -> bool {
+        if self.word {
+            return false;
+        }
+        match self.kind {
+            // The regex engine's reverse walk starts at the end of the haystack it is given,
+            // so handing it a whole block would cost a block per match. It keeps the line
+            // path, where its lazy DFA is already the right tool.
+            PatternKind::Literal => self.block_finder().is_some(),
+            PatternKind::Regex | PatternKind::Pcre => false,
+        }
+    }
+
+    /// The next match at or after `from`, for the block scanner.
+    pub fn block_match(&self, hay: &[u8], from: usize) -> Option<Match> {
+        self.find_at(hay, from)
+    }
+
+    /// True for `-w`: a match must sit on word boundaries.
+    pub fn is_word(&self) -> bool {
+        self.word
+    }
+
     pub fn kind(&self) -> PatternKind {
         self.kind
     }
@@ -354,6 +389,21 @@ mod tests {
         let ci = Pattern::new("Needle", false, true, false).unwrap();
         assert!(ci.is_match(b"a NEEDLE b"));
         assert_eq!(ci.fast_literal(), None, "case folding needs the slow path");
+        assert_eq!(
+            ci.kind(),
+            PatternKind::Literal,
+            "a folded literal still scans bytes, not the regex VM"
+        );
+        assert!(
+            ci.finder.is_some(),
+            "the plan is built with the pattern, not per line"
+        );
+        assert_eq!(
+            Pattern::new("nEeDlE", false, true, false)
+                .unwrap()
+                .find_at(b"a NeEdLe b", 0),
+            Some(Match { start: 2, end: 8 })
+        );
         let w = Pattern::new("cat", false, false, true).unwrap();
         assert!(w.is_match(b"a cat."));
         assert!(!w.is_match(b"concatenate"));
