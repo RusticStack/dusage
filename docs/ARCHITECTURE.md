@@ -16,7 +16,7 @@ src/scan.rs           scanner engine: readdir/batched/mft backends, watch
 src/prune.rs          pruning engine: plan + execute
 src/search.rs         search engine: tree walk, candidate filters, content scanner
 src/pattern.rs        what a pattern is: literal or regex, case and word rules
-src/regex.rs          Pike VM over a Thompson NFA
+src/regex.rs          regex engine: lazy DFA over a Thompson NFA, Pike VM fallback
 src/glob.rs           gitignore-style glob matcher
 src/ignore.rs         ignore layers (builtin caches, .gitignore, .ignore) and -g filters
 src/bytes.rs          byte primitives: memmem, ASCII/Unicode folding, word boundaries
@@ -398,7 +398,8 @@ impl Pattern {
     pub fn find_all(&self, hay: &[u8], limit: usize) -> Vec<Match>;
 }
 
-// regex.rs — Pike VM. Flags { case_insensitive, multi_line, dot_matches_newline }
+// regex.rs — lazy DFA over the byte program, Pike VM underneath it and for the
+// character program. Flags { case_insensitive, multi_line, dot_matches_newline }
 pub struct Regex;
 impl Regex {
     pub fn new_with(pattern: &str, flags: Flags) -> Result<Regex, String>;  // error names an offset
@@ -406,6 +407,10 @@ impl Regex {
     pub fn required_byte(&self) -> Option<u8>;   // prefilter for the line scanner
     pub fn literal(&self) -> Option<&[u8]>;      // the whole pattern is plain text
 }
+
+// The DFA is built on demand and cached per thread (`DfaCache`), keyed by a pattern id:
+// states are pc sets folded with the assertion context of the position they sit at, and
+// the cache is capped (MAX_DFA_STATES) so a pattern that explodes falls back to the VM.
 
 // glob.rs — one gitignore-style pattern, matched against paths relative to the walk root
 pub struct Glob { pub negated: bool, pub dir_only: bool }

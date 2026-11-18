@@ -266,12 +266,33 @@ materialises the list. The cost of that design in isolation is the `find` row:
 936.7 ms for a pure walk over `/usr` against `find`'s 386.5 ms, 2.4x, and that
 floor sits under every search number in the table.
 
-**The literal matcher is competitive; the regex engine is not.** A plain
-literal, case-sensitive or folded, matches with a SWAR memmem scan
+**The literal matcher is competitive; the regex engine now nearly is.** A
+plain literal, case-sensitive or folded, matches with a SWAR memmem scan
 (`bytes::find_candidate`, `src/bytes.rs`: 32 bytes per iteration, first-byte
-candidates verified tail-first). Anything else runs a Pike VM per line
-(`Regex::run`, `src/regex.rs`) with only a required-byte prefilter, and that is
-where the 18x gap comes from.
+candidates verified tail-first). Anything else runs a lazily built DFA over the
+same Thompson program (`src/regex.rs`), a table lookup per byte, with a
+required-byte prefilter in front of it and a byte-range skip while the scan sits
+in a start state. The Pike VM still answers lines that need the character
+program and any pattern whose DFA blows the state cap.
+
+The engine change, measured the same way on `/usr/local/go` (4 vCPU, warm
+cache, the three binaries interleaved over five rounds and the median taken,
+`search -c`, seconds):
+
+| pattern | before | after | `rg -c` |
+| --- | --- | --- | --- |
+| `[A-Z][a-zA-Z0-9_]*\.go` | 0.91 | 0.18 | 0.05 |
+| `func \w+\(` | 0.51 | 0.14 | 0.09 |
+| `^package \w+` | 0.71 | 0.11 | 0.10 |
+| `\bvar\b \w+,` | 0.85 | 0.12 | 0.05 |
+| `[0-9]{2,4}` | 0.66 | 0.26 | 0.13 |
+| `(?i)memmove` | 0.79 | 0.16 | 0.05 |
+| `\.(rs\|toml)$` | 0.41 | 0.10 | 0.05 |
+
+`[0-9]{2,4}` is the smallest win because a third of the lines match, and every
+matching line pays the reverse pass and the anchored VM run described in
+`src/regex.rs`; printing the matching lines instead of counting them moves the
+first row from 1.07 s to 0.26 s.
 
 **Output is buffered now.** Both renderers wrap `stdout()` in a 64 KiB
 `BufWriter`, so `strace -c` counts 278 `write` calls for the 124,788-line
@@ -315,7 +336,8 @@ match count (`/usr/bin/time -v`: 43 MB peak RSS against `ripgrep`'s 11 MB and
   would not show up in this table at all.
 - **`ripgrep` is a mature, heavily tuned tool** using SIMD-assisted `memchr` and
   a hybrid automaton. dusage is a zero-dependency implementation with a SWAR
-  memmem and a Pike VM. An 18x gap on regex workloads is the expected outcome of
-  that difference in engineering effort, not a defect to be shrunk to 1x.
+  memmem and a lazily built DFA. A 2-4x remaining gap on regex workloads is the
+  expected outcome of that difference in engineering effort; the 6x gap this
+  section used to report closed when the DFA replaced the per-line Pike VM.
 - **One machine, one kernel.** Five rounds per command with medians reported,
   over a single 4-vCPU VM.

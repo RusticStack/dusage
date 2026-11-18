@@ -238,9 +238,10 @@ those docs were written.
   --no-ignore -x --json --color --stats`.
 - `find`: glob or `-F` substring over relative paths, with `-t --ext --size --older --newer
   --dirs --files --long --json` and the same walk filters.
-- A regex engine of our own (`regex.rs`): Thompson NFA, Pike VM, no backtracking, so a
-  pathological pattern costs time, never exponential time. A plain-literal pattern skips it
-  for a byte scan, and a required literal byte prefilters lines for the rest.
+- A regex engine of our own (`regex.rs`): Thompson NFA, run by a lazily built DFA (one
+  table lookup per byte) with the Pike VM underneath it, no backtracking, so a pathological
+  pattern costs time, never exponential time. A plain-literal pattern skips it for a byte
+  scan, and a required literal byte prefilters lines for the rest.
 - Ignore handling close enough to ripgrep to be unsurprising: the built-in cache list, then
   `.gitignore` and `.ignore` per directory with deeper files winning and `!` re-including,
   then `-g`; a positive `-g` switches the ignore layers off. `--no-ignore` switches them off

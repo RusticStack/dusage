@@ -400,6 +400,8 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.null = a.flag("-Z") || a.flag("--null");
     let json = a.flag("--json");
     let color = color_enabled(color_mode.as_deref());
+    // Colour and the JSON report both need each match located inside its line.
+    o.paint = color || json;
     if let Some(v) = a.value("-j").or(a.value("--threads")) {
         o.threads = cli::parse_threads(v)?;
     }

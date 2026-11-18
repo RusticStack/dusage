@@ -1,7 +1,9 @@
 //! A small, linear-time regular-expression engine (std only).
 //!
 //! Enough of the syntax to power a grep/rg replacement, compiled to a Thompson NFA and
-//! executed by a Pike VM: no backtracking, so `(a+)+$` cannot blow up.
+//! run two ways: a lazily built DFA that walks bytes at one table lookup each, and the
+//! Pike VM it is built from, which answers everything the DFA cannot. No backtracking, so
+//! `(a+)+$` cannot blow up either way.
 //!
 //! # Syntax
 //!
@@ -53,6 +55,9 @@
 //! characters.
 
 use crate::unicode::{self, CharClass};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Compile-time flags, also settable inline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -80,6 +85,9 @@ impl Match {
 
 /// Longest repetition bound accepted, so a pattern cannot explode the program.
 const MAX_REPEAT: u32 = 1000;
+
+/// Hands out the pattern ids a thread's DFA cache is keyed on.
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 /// 256-bit set of bytes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -289,6 +297,9 @@ pub struct Regex {
     /// The byte program, always present: it runs on ASCII haystacks, where it is exact
     /// for a pattern that needs Unicode semantics elsewhere.
     prog: Vec<Inst<ByteSet>>,
+    /// The byte program of the pattern read backwards, which is how a DFA search finds
+    /// where a match starts.
+    rprog: Vec<Inst<ByteSet>>,
     /// The character program, present when the pattern needs Unicode semantics.
     cprog: Option<Vec<Inst<CharClass>>>,
     flags: Flags,
@@ -296,6 +307,13 @@ pub struct Regex {
     lit: Option<Vec<u8>>,
     /// A byte every match must contain, for prefiltering.
     required: Option<u8>,
+    /// No `^`, `$`, `\b` or `\B` anywhere in the pattern.
+    assertion_free: bool,
+    /// The assertion context bits the byte program reads, which is what decides how many
+    /// assertion contexts a DFA state needs.
+    ctx_mask: u8,
+    /// Distinguishes this pattern from every other one in a thread's DFA cache.
+    id: u64,
 }
 
 impl Regex {
@@ -332,17 +350,32 @@ impl Regex {
             }
             false => None,
         };
+        let mut rprog = Vec::new();
+        compile(&reverse_node(&node), &mut rprog, byte_symbols);
+        rprog.push(Inst::Match);
+        let ctx_mask = ctx_mask(&prog);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         Ok(Regex {
             prog,
+            rprog,
             cprog,
             flags,
             lit,
             required,
+            ctx_mask,
+            id,
+            assertion_free: !has_assertion(&node),
         })
     }
 
     pub fn flags(&self) -> Flags {
         self.flags
+    }
+
+    /// True when the pattern uses no line-relative assertion, so a whole block can be
+    /// matched at once: `^` and `$` would otherwise mean "start and end of the block".
+    pub fn assertion_free(&self) -> bool {
+        self.assertion_free
     }
 
     /// True when the pattern needs Unicode semantics and so runs a character program on
@@ -378,15 +411,20 @@ impl Regex {
                 end: i + lit.len(),
             });
         }
-        match &self.cprog {
-            // An ASCII line and a line that is not UTF-8 are both answered by the byte
-            // program: the first is exact for it, and the second has no characters to
-            // speak of, so it keeps the byte semantics it had before this engine learned
-            // any. Only text is decoded.
-            Some(cprog) if !hay.is_ascii() => match std::str::from_utf8(hay) {
-                Ok(text) => self.run_chars(cprog, text, start),
-                Err(_) => self.run(&self.prog, hay, start),
-            },
+        // An ASCII line and a line that is not UTF-8 are both answered by the byte
+        // program: the first is exact for it, and the second has no characters to
+        // speak of, so it keeps the byte semantics it had before this engine learned
+        // any. Only text is decoded.
+        if let Some(cprog) = &self.cprog {
+            if !hay.is_ascii() {
+                if let Ok(text) = std::str::from_utf8(hay) {
+                    return self.run_chars(cprog, text, start);
+                }
+            }
+        }
+        match with_dfa(self, |c| c.find(&self.prog, &self.rprog, hay, start)) {
+            // The DFA answered; its `None` is a real answer, not a fallback.
+            Some(Some(found)) => found,
             _ => self.run(&self.prog, hay, start),
         }
     }
@@ -395,6 +433,11 @@ impl Regex {
     pub fn is_match(&self, hay: &[u8]) -> bool {
         if let Some(lit) = &self.lit {
             return crate::bytes::memmem(hay, lit).is_some();
+        }
+        if self.cprog.is_none() || hay.is_ascii() {
+            if let Some(Some(found)) = with_dfa(self, |c| c.is_match(&self.prog, hay, 0)) {
+                return found;
+            }
         }
         self.find_at(hay, 0).is_some()
     }
@@ -407,122 +450,7 @@ impl Regex {
         H: Hay + ?Sized,
         S: Symbols<Sym = H::Sym>,
     {
-        let n = prog.len();
-        let mut clist: Vec<Thread> = Vec::with_capacity(n);
-        let mut nlist: Vec<Thread> = Vec::with_capacity(n);
-        let mut cl_marks = vec![false; n];
-        let mut nl_marks = vec![false; n];
-        let mut st = Pending::default();
-        let mut sp = start;
-        loop {
-            // A fresh attempt starts at every position until something has matched; it is
-            // lower priority than the threads carried over from earlier positions.
-            st.cut = false;
-            if st.best.is_none() {
-                self.add_thread(prog, &mut clist, &mut cl_marks, 0, sp, hay, sp, &mut st);
-            }
-            let Some(sym) = hay.sym(sp) else {
-                // Past the last symbol: the closures above have recorded any match that
-                // ends here, and no thread can advance further.
-                break;
-            };
-            for t in clist.drain(..) {
-                if let Inst::Set(set) = &prog[t.pc] {
-                    if set.permits(sym) {
-                        self.add_thread(
-                            prog,
-                            &mut nlist,
-                            &mut nl_marks,
-                            t.pc + 1,
-                            t.start,
-                            hay,
-                            sp + 1,
-                            &mut st,
-                        );
-                    }
-                }
-            }
-            std::mem::swap(&mut clist, &mut nlist);
-            std::mem::swap(&mut cl_marks, &mut nl_marks);
-            nl_marks.fill(false);
-            sp += 1;
-            if st.best.is_some() && clist.is_empty() {
-                break;
-            }
-        }
-        st.best
-    }
-
-    /// Epsilon closure: follow Split/Jmp/Assert from `pc`, recording matches.
-    #[allow(clippy::too_many_arguments)]
-    fn add_thread<H, S>(
-        &self,
-        prog: &[Inst<S>],
-        list: &mut Vec<Thread>,
-        visited: &mut [bool],
-        mut pc: usize,
-        start: usize,
-        hay: &H,
-        sp: usize,
-        st: &mut Pending,
-    ) where
-        H: Hay + ?Sized,
-        S: Symbols<Sym = H::Sym>,
-    {
-        if st.cut || visited[pc] {
-            return;
-        }
-        visited[pc] = true;
-        loop {
-            if st.cut {
-                return;
-            }
-            match &prog[pc] {
-                Inst::Jmp(to) => {
-                    if visited[*to] {
-                        return;
-                    }
-                    visited[*to] = true;
-                    pc = *to;
-                }
-                Inst::Split(a, b) => {
-                    self.add_thread(prog, list, visited, *a, start, hay, sp, st);
-                    if visited[*b] {
-                        return;
-                    }
-                    visited[*b] = true;
-                    pc = *b;
-                }
-                Inst::Assert(a) => {
-                    if !hay.assert_holds(*a, sp) {
-                        return;
-                    }
-                    if visited[pc + 1] {
-                        return;
-                    }
-                    visited[pc + 1] = true;
-                    pc += 1;
-                }
-                Inst::Set(_) => {
-                    list.push(Thread { pc, start });
-                    return;
-                }
-                Inst::Match => {
-                    // Leftmost-first: a match with a smaller start beats everything; with
-                    // the same start the thread that reaches Match later has the higher
-                    // priority (lower-priority ones were cut off here), so it overwrites.
-                    let m = Match { start, end: sp };
-                    if st.best.as_ref().is_none_or(|b| m.start <= b.start) {
-                        st.best = Some(m);
-                    }
-                    // Everything after this thread in this step is lower priority and can
-                    // no longer produce a better match; a thread that stays alive from
-                    // earlier has higher priority and may still overwrite this match.
-                    st.cut = true;
-                    return;
-                }
-            }
-        }
+        run_vm(prog, hay, start, false)
     }
 
     /// The character path: decode the line once, run the character program over it, and
@@ -566,6 +494,181 @@ struct Pending {
     best: Option<Match>,
     /// A match was recorded in this step: lower-priority threads are dropped.
     cut: bool,
+}
+
+/// Buffers the VM reuses across calls, so a search over a million lines does not allocate
+/// four of them per line.
+#[derive(Default)]
+struct Scratch {
+    clist: Vec<Thread>,
+    nlist: Vec<Thread>,
+    cl_marks: Vec<bool>,
+    nl_marks: Vec<bool>,
+}
+
+impl Scratch {
+    const fn new() -> Scratch {
+        Scratch {
+            clist: Vec::new(),
+            nlist: Vec::new(),
+            cl_marks: Vec::new(),
+            nl_marks: Vec::new(),
+        }
+    }
+}
+
+thread_local! {
+    static VM_SCRATCH: RefCell<Scratch> = const { RefCell::new(Scratch::new()) };
+}
+
+/// The Pike VM over `prog`: leftmost-first semantics, linear time in the haystack length.
+/// `anchored` starts a thread only at `start`, for the DFA path that already knows where
+/// the match begins.
+fn run_vm<H, S>(prog: &[Inst<S>], hay: &H, start: usize, anchored: bool) -> Option<Match>
+where
+    H: Hay + ?Sized,
+    S: Symbols<Sym = H::Sym>,
+{
+    VM_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let scratch = &mut *scratch;
+        scratch.clist.clear();
+        scratch.nlist.clear();
+        scratch.cl_marks.clear();
+        scratch.cl_marks.resize(prog.len(), false);
+        scratch.nl_marks.clear();
+        scratch.nl_marks.resize(prog.len(), false);
+        run_vm_scratch(scratch, prog, hay, start, anchored)
+    })
+}
+
+fn run_vm_scratch<H, S>(
+    scratch: &mut Scratch,
+    prog: &[Inst<S>],
+    hay: &H,
+    start: usize,
+    anchored: bool,
+) -> Option<Match>
+where
+    H: Hay + ?Sized,
+    S: Symbols<Sym = H::Sym>,
+{
+    let Scratch {
+        clist,
+        nlist,
+        cl_marks,
+        nl_marks,
+    } = scratch;
+    let mut st = Pending::default();
+    let mut sp = start;
+    loop {
+        // A fresh attempt starts at every position until something has matched; it is
+        // lower priority than the threads carried over from earlier positions.
+        st.cut = false;
+        if st.best.is_none() && !(anchored && sp > start) {
+            add_thread(prog, clist, cl_marks, 0, sp, hay, sp, &mut st);
+        }
+        let Some(sym) = hay.sym(sp) else {
+            // Past the last symbol: the closures above have recorded any match that
+            // ends here, and no thread can advance further.
+            break;
+        };
+        for t in clist.drain(..) {
+            if let Inst::Set(set) = &prog[t.pc] {
+                if set.permits(sym) {
+                    add_thread(
+                        prog,
+                        nlist,
+                        nl_marks,
+                        t.pc + 1,
+                        t.start,
+                        hay,
+                        sp + 1,
+                        &mut st,
+                    );
+                }
+            }
+        }
+        std::mem::swap(clist, nlist);
+        std::mem::swap(cl_marks, nl_marks);
+        nl_marks.fill(false);
+        sp += 1;
+        if st.best.is_some() && clist.is_empty() {
+            break;
+        }
+    }
+    st.best
+}
+
+/// Epsilon closure: follow Split/Jmp/Assert from `pc`, recording matches.
+#[allow(clippy::too_many_arguments)]
+fn add_thread<H, S>(
+    prog: &[Inst<S>],
+    list: &mut Vec<Thread>,
+    visited: &mut [bool],
+    mut pc: usize,
+    start: usize,
+    hay: &H,
+    sp: usize,
+    st: &mut Pending,
+) where
+    H: Hay + ?Sized,
+    S: Symbols<Sym = H::Sym>,
+{
+    if st.cut || visited[pc] {
+        return;
+    }
+    visited[pc] = true;
+    loop {
+        if st.cut {
+            return;
+        }
+        match &prog[pc] {
+            Inst::Jmp(to) => {
+                if visited[*to] {
+                    return;
+                }
+                visited[*to] = true;
+                pc = *to;
+            }
+            Inst::Split(a, b) => {
+                add_thread(prog, list, visited, *a, start, hay, sp, st);
+                if visited[*b] {
+                    return;
+                }
+                visited[*b] = true;
+                pc = *b;
+            }
+            Inst::Assert(a) => {
+                if !hay.assert_holds(*a, sp) {
+                    return;
+                }
+                if visited[pc + 1] {
+                    return;
+                }
+                visited[pc + 1] = true;
+                pc += 1;
+            }
+            Inst::Set(_) => {
+                list.push(Thread { pc, start });
+                return;
+            }
+            Inst::Match => {
+                // Leftmost-first: a match with a smaller start beats everything; with
+                // the same start the thread that reaches Match later has the higher
+                // priority (lower-priority ones were cut off here), so it overwrites.
+                let m = Match { start, end: sp };
+                if st.best.as_ref().is_none_or(|b| m.start <= b.start) {
+                    st.best = Some(m);
+                }
+                // Everything after this thread in this step is lower priority and can
+                // no longer produce a better match; a thread that stays alive from
+                // earlier has higher priority and may still overwrite this match.
+                st.cut = true;
+                return;
+            }
+        }
+    }
 }
 
 /// Compile `n` into `prog`, asking `symbols` what each consuming atom matches.
@@ -728,6 +831,16 @@ fn literal_of(n: &Node, ci: bool) -> Option<Vec<u8>> {
     }
 }
 
+/// True when any assertion (`^`, `$`, `\b`, `\B`, `\A`, `\z`) appears in the tree.
+fn has_assertion(n: &Node) -> bool {
+    match n {
+        Node::Assert(_) => true,
+        Node::Concat(parts) | Node::Alt(parts) => parts.iter().any(has_assertion),
+        Node::Repeat(inner, ..) => has_assertion(inner),
+        _ => false,
+    }
+}
+
 /// The single byte every match must contain, when the parser can prove one cheaply.
 fn required_byte(n: &Node) -> Option<u8> {
     match n {
@@ -735,13 +848,17 @@ fn required_byte(n: &Node) -> Option<u8> {
         Node::Set(s) => s.sole(),
         Node::Char(c) => Some(first_byte(*c)),
         Node::CharSet(cc) => cc.sole().map(first_byte),
-        Node::Concat(parts) => parts.first().and_then(required_byte),
+        // Every part of a concatenation must match, so the first one with a mandatory byte
+        // of its own is a mandatory byte of the whole.
+        Node::Concat(parts) => parts.iter().find_map(required_byte),
+        // A branch with no mandatory byte leaves the alternation without one.
         Node::Alt(branches) => {
-            let mut it = branches.iter().filter_map(required_byte);
-            let first = it.next()?;
-            it.all(|b| b == first).then_some(first)
+            let mut it = branches.iter().map(required_byte);
+            let first = it.next().flatten()?;
+            it.all(|b| b == Some(first)).then_some(first)
         }
-        Node::Repeat(inner, _, _, _) => required_byte(inner),
+        // An optional repetition matches zero times, and then its byte never appears.
+        Node::Repeat(inner, min, _, _) => (*min > 0).then(|| required_byte(inner)).flatten(),
         Node::Assert(_) | Node::Dot(_) | Node::Empty => None,
     }
 }
@@ -766,6 +883,576 @@ fn rarest_byte(lit: &[u8]) -> Option<u8> {
         }
     }
     Some(best)
+}
+
+// ---------------------------------------------------------------------------------------
+// Lazy DFA
+//
+// The VM pays for every alternative at every byte, and it restarts a thread at every
+// position on the chance that a match begins there. This is the usual cure: subset
+// construction over the same byte program, done lazily — a state is built the first time a
+// scan needs it and memoised by its set of program counters — so a byte costs one indexed
+// table lookup instead of an epsilon closure.
+//
+// A state is a set of pcs plus the assertion context of the position it sits at. That second
+// half is what keeps `^`, `$`, `\b` and `\B` exact without a second engine for them: the six
+// facts an assertion can ask about a position — is it the text start or end, does a line start
+// or end here, is the byte before it or the byte at it a word byte — are six bits, and states
+// differing only in them are different states. Only the bits a pattern's assertions actually
+// read are kept, so a pattern that reads none — most patterns — has one context and pays
+// nothing for this.
+//
+// A DFA finds where a match *starts*, not where it ends: leftmost-first preference is a
+// property of thread priority, which subset construction throws away (`ab|a` and `a|ab`
+// accept the same language and end differently on `ab`). So a search is three steps:
+//
+//   1. walk the forward DFA to the first position where a match ends — the leftmost match
+//      ends there or later, and the walk stops at that position;
+//   2. walk a DFA built from the *reversed* pattern leftwards from the end of the haystack,
+//      which accepts at `p` exactly when a match starts at `p`, and keep the last accept:
+//      that is the leftmost start;
+//   3. run the Pike VM anchored at that start, which costs one match length rather than one
+//      haystack length and settles the exact end by priority.
+//
+// Step 2 scans the whole remainder of the haystack, so it only runs on lines step 1 already
+// found a match on. Lines that need the character program never get here: they stay on the
+// VM, which is exact for code points and is not where the bytes are.
+//
+// Every state is built on demand and the cache is capped (`MAX_DFA_STATES`); a pattern that
+// blows the cap abandons the DFA for good and the VM answers from then on, so the worst case
+// is the engine this one replaces, never something worse.
+
+/// Cap on the states, and so the 1 KiB transition tables, one pattern may build.
+const MAX_DFA_STATES: usize = 10_000;
+/// Byte ranges a scan may skip over, when the start state escapes on few enough bytes: four
+/// keep the word-at-a-time test one masked word wide.
+const MAX_SKIP_RANGES: usize = 4;
+/// Bytes a skip set may hold before skipping is judged not worth the range test — a set this
+/// wide makes up most of what a line is.
+const MAX_SKIP_BYTES: u16 = 48;
+/// Patterns one thread keeps a DFA for. A `search` run holds one; a test that also builds a
+/// second pattern for comparison holds two.
+const MAX_CACHED_DFAS: usize = 2;
+
+/// `at == 0`.
+const CTX_TEXT_START: u8 = 1 << 0;
+/// `at == 0 || hay[at - 1] == b'\n'`: `^` holds.
+const CTX_LINE_START: u8 = 1 << 1;
+/// `at > 0` and `hay[at - 1]` is a word byte.
+const CTX_WORD_BEFORE: u8 = 1 << 2;
+/// `at == hay.len()`.
+const CTX_TEXT_END: u8 = 1 << 3;
+/// `at == hay.len() || hay[at] == b'\n'`: `$` holds.
+const CTX_LINE_END: u8 = 1 << 4;
+/// `at < hay.len()` and `hay[at]` is a word byte.
+const CTX_WORD_AT: u8 = 1 << 5;
+/// Number of distinct assertion contexts before folding.
+const CTX_VALUES: usize = 64;
+
+/// A word byte, in the byte program's ASCII sense (the character program has its own).
+#[inline]
+fn word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// What the assertions can ask about a position, given the byte before it and the byte at
+/// it. A `None` byte is "no such position": the text start or end.
+#[inline]
+fn ctx_of(before: Option<u8>, at: Option<u8>) -> u8 {
+    let mut ctx = match before {
+        None => CTX_TEXT_START | CTX_LINE_START,
+        Some(b'\n') => CTX_LINE_START,
+        Some(b) if word_byte(b) => CTX_WORD_BEFORE,
+        Some(_) => 0,
+    };
+    match at {
+        None => ctx |= CTX_TEXT_END | CTX_LINE_END,
+        Some(b'\n') => ctx |= CTX_LINE_END,
+        Some(b) if word_byte(b) => ctx |= CTX_WORD_AT,
+        Some(_) => {}
+    }
+    ctx
+}
+
+/// The context bits the assertions in `prog` read; a program with none needs no contexts.
+fn ctx_mask(prog: &[Inst<ByteSet>]) -> u8 {
+    let mut mask = 0;
+    for inst in prog {
+        if let Inst::Assert(a) = inst {
+            mask |= match a {
+                Assert::StartText => CTX_TEXT_START,
+                Assert::EndText => CTX_TEXT_END,
+                Assert::StartLine => CTX_LINE_START,
+                Assert::EndLine => CTX_LINE_END,
+                Assert::WordBoundary | Assert::NotWordBoundary => CTX_WORD_BEFORE | CTX_WORD_AT,
+            };
+        }
+    }
+    mask
+}
+
+/// Whether `a` holds in a raw context, matching `Hay::assert_holds` for bytes.
+#[inline]
+fn ctx_holds(a: Assert, ctx: u8) -> bool {
+    let before = ctx & CTX_WORD_BEFORE != 0;
+    let at = ctx & CTX_WORD_AT != 0;
+    match a {
+        Assert::StartText => ctx & CTX_TEXT_START != 0,
+        Assert::EndText => ctx & CTX_TEXT_END != 0,
+        Assert::StartLine => ctx & CTX_LINE_START != 0,
+        Assert::EndLine => ctx & CTX_LINE_END != 0,
+        Assert::WordBoundary => before != at,
+        Assert::NotWordBoundary => before == at,
+    }
+}
+
+/// The contexts a pattern has to tell apart, densely numbered: how many there are, the
+/// index each raw context folds to, and one raw context per index for closures to read.
+fn ctx_space(mask: u8) -> (usize, Box<[u8; CTX_VALUES]>, Vec<u8>) {
+    let bits: Vec<u8> = (0..6).map(|b| 1u8 << b).filter(|b| mask & b != 0).collect();
+    let nctx = 1usize << bits.len();
+    let mut fold = Box::new([0u8; CTX_VALUES]);
+    let mut raw = vec![0u8; nctx];
+    for value in 0..CTX_VALUES {
+        let mut dense = 0u8;
+        for (i, bit) in bits.iter().enumerate() {
+            if value as u8 & bit != 0 {
+                dense |= 1 << i;
+            }
+        }
+        fold[value] = dense;
+        raw[dense as usize] = value as u8;
+    }
+    (nctx, fold, raw)
+}
+
+/// The dense context bits each byte contributes as the byte before a position and as the
+/// byte at it. The two split cleanly because `ctx_of` is an OR of the two, and the mask's
+/// "before" bits all precede its "at" bits in the dense numbering.
+fn ctx_tables(fold: &[u8; CTX_VALUES]) -> ([u8; 257], [u8; 257]) {
+    let neutral = Some(b' ');
+    let mut before = [0u8; 257];
+    let mut cur = [0u8; 257];
+    for b in 0..257usize {
+        let byte = if b == 256 { None } else { Some(b as u8) };
+        before[b] = fold[ctx_of(byte, neutral) as usize];
+        cur[b] = fold[ctx_of(neutral, byte) as usize];
+    }
+    (before, cur)
+}
+
+/// A lazily built DFA over a byte program, with its transition tables packed flat.
+struct Dfa {
+    /// The pc sets the states are keyed on. Entry 0 is the empty set: because the start pc
+    /// is re-entered at every position, the empty set *is* the start state.
+    sets: Vec<Box<[u32]>>,
+    index: HashMap<Vec<u32>, u32>,
+    /// `trans[slot * 256 + byte]` is where the byte leads, already scaled by the context
+    /// count so that a scan adds the next context instead of multiplying.
+    trans: Vec<u32>,
+    /// Two flags per state: a match ends in it, and nothing at all is alive in it.
+    stop: Vec<u8>,
+    built: Vec<bool>,
+    built_count: usize,
+    /// Dense context count, and the raw context each index stands for.
+    nctx: usize,
+    raw: Vec<u8>,
+}
+
+/// A match ends in this state.
+const STOP_ACCEPT: u8 = 1;
+/// Nothing is alive in this state. For a pattern that may only begin at the text start,
+/// reaching one means the rest of the haystack is hopeless.
+const STOP_SINK: u8 = 2;
+
+impl Dfa {
+    fn new(nctx: usize, raw: Vec<u8>) -> Dfa {
+        let mut index = HashMap::new();
+        index.insert(Vec::new(), 0u32);
+        Dfa {
+            sets: vec![Box::new([])],
+            index,
+            trans: vec![0; nctx * 256],
+            stop: vec![0; nctx],
+            built: vec![false; nctx],
+            built_count: 0,
+            nctx,
+            raw,
+        }
+    }
+
+    /// The id of `set`, adding it to the state space if it is new.
+    fn intern(&mut self, set: &[u32]) -> u32 {
+        if let Some(&id) = self.index.get(set) {
+            return id;
+        }
+        let id = self.sets.len() as u32;
+        self.sets.push(set.to_vec().into_boxed_slice());
+        self.index.insert(set.to_vec(), id);
+        self.trans.resize(self.trans.len() + self.nctx * 256, 0);
+        self.stop.resize(self.stop.len() + self.nctx, 0);
+        self.built.resize(self.built.len() + self.nctx, false);
+        id
+    }
+
+    /// Build the transitions of one state on first use. `false` means the state cap is hit.
+    fn prepare(&mut self, prog: &[Inst<ByteSet>], slot: usize) -> bool {
+        if self.built[slot] {
+            return true;
+        }
+        if self.built_count == MAX_DFA_STATES {
+            return false;
+        }
+        let pid = slot / self.nctx;
+        let (pcs, accept) = closure(prog, &self.sets[pid], self.raw[slot % self.nctx]);
+        let sink = pcs.is_empty() && !accept;
+        self.stop[slot] =
+            (if accept { STOP_ACCEPT } else { 0 }) | (if sink { STOP_SINK } else { 0 });
+        let mut into = Vec::with_capacity(pcs.len());
+        for b in 0..=255u8 {
+            into.clear();
+            for &pc in &pcs {
+                if let Inst::Set(set) = &prog[pc as usize] {
+                    if set.contains(b) {
+                        into.push(pc + 1);
+                    }
+                }
+            }
+            // `pcs` ascends, so the target set is already sorted and unique.
+            if !into.is_empty() {
+                self.trans[slot * 256 + b as usize] = self.intern(&into) * self.nctx as u32;
+            }
+        }
+        self.built[slot] = true;
+        self.built_count += 1;
+        true
+    }
+
+    /// The byte ranges that leave the start state, in every context, when skipping the
+    /// others is worthwhile. Empty when a start state accepts, when too much of the byte
+    /// range escapes, or when it escapes above ASCII (the skip test is an ASCII word test).
+    fn skip_set(&mut self, prog: &[Inst<ByteSet>]) -> Vec<(u8, u8)> {
+        let mut escape = [false; 256];
+        for slot in 0..self.nctx {
+            if !self.prepare(prog, slot) || self.stop[slot] & STOP_ACCEPT != 0 {
+                return Vec::new();
+            }
+            for (b, &next) in self.trans[slot * 256..(slot + 1) * 256].iter().enumerate() {
+                escape[b] |= next != 0;
+            }
+        }
+        if escape[0x7f..].iter().any(|&e| e) {
+            return Vec::new();
+        }
+        let mut ranges: Vec<(u8, u8)> = Vec::new();
+        let mut count = 0u16;
+        let mut b = 0usize;
+        while b < 0x7f {
+            if !escape[b] {
+                b += 1;
+                continue;
+            }
+            let lo = b;
+            while b + 1 < 0x7f && escape[b + 1] {
+                b += 1;
+            }
+            count += (b - lo) as u16 + 1;
+            ranges.push((lo as u8, b as u8));
+            if ranges.len() > MAX_SKIP_RANGES || count > MAX_SKIP_BYTES {
+                return Vec::new();
+            }
+            b += 1;
+        }
+        ranges
+    }
+}
+
+/// The epsilon closure of `entry` plus the start pc — re-entered at every position, so that
+/// a scan finds a match beginning anywhere — under the assertion context `ctx`. Returns the
+/// pcs that consume a byte, ascending, and whether a match ends here.
+fn closure(prog: &[Inst<ByteSet>], entry: &[u32], ctx: u8) -> (Vec<u32>, bool) {
+    let mut seen = vec![false; prog.len()];
+    let mut stack: Vec<u32> = Vec::with_capacity(prog.len());
+    stack.push(0);
+    stack.extend(entry.iter().rev().copied());
+    let mut pcs = Vec::new();
+    let mut accept = false;
+    while let Some(pc) = stack.pop() {
+        let at = pc as usize;
+        if seen[at] {
+            continue;
+        }
+        seen[at] = true;
+        match &prog[at] {
+            Inst::Set(_) => pcs.push(pc),
+            Inst::Jmp(to) => stack.push(*to as u32),
+            Inst::Split(a, b) => {
+                stack.push(*b as u32);
+                stack.push(*a as u32);
+            }
+            Inst::Assert(a) => {
+                if ctx_holds(*a, ctx) {
+                    stack.push(pc + 1);
+                }
+            }
+            Inst::Match => accept = true,
+        }
+    }
+    pcs.sort_unstable();
+    (pcs, accept)
+}
+
+/// The pattern that matches a string backwards: the same language read right to left.
+/// Alternation and repetition order is kept because only the language matters here — the VM
+/// settles leftmost-first — and a character outside ASCII stays as it is: it consumes no
+/// byte in the byte program, so it can neither match nor anchor anything there.
+fn reverse_node(n: &Node) -> Node {
+    match n {
+        Node::Empty => Node::Empty,
+        Node::Byte(b) => Node::Byte(*b),
+        Node::Set(s) => Node::Set(*s),
+        Node::Char(c) => Node::Char(*c),
+        Node::CharSet(cc) => Node::CharSet(cc.clone()),
+        Node::Dot(m) => Node::Dot(*m),
+        Node::Concat(parts) => Node::Concat(parts.iter().rev().map(reverse_node).collect()),
+        Node::Alt(branches) => Node::Alt(branches.iter().map(reverse_node).collect()),
+        Node::Repeat(inner, min, max, greedy) => {
+            Node::Repeat(Box::new(reverse_node(inner)), *min, *max, *greedy)
+        }
+        Node::Assert(a) => Node::Assert(match a {
+            Assert::StartText => Assert::EndText,
+            Assert::EndText => Assert::StartText,
+            Assert::StartLine => Assert::EndLine,
+            Assert::EndLine => Assert::StartLine,
+            same => *same,
+        }),
+    }
+}
+
+/// One thread's DFA for one pattern. Patterns are shared by every worker thread and a
+/// `Regex` is immutable, so the states a scan discovers have to be cached per thread.
+struct DfaCache {
+    id: u64,
+    fwd: Dfa,
+    rev: Dfa,
+    /// The dense context bits a byte contributes as the byte before a position and as the
+    /// byte at it; index 256 is "no byte there". Adding the two gives the position's context
+    /// index without a branch.
+    before_bits: [u8; 257],
+    cur_bits: [u8; 257],
+    /// Bytes that leave the start state, for the forward walk to skip over: `None` until
+    /// the first scan works them out.
+    skip: Option<Vec<(u8, u8)>>,
+    /// Nothing can begin anywhere but at the start of the haystack, so a forward state with
+    /// nothing alive ends the search.
+    start_only: bool,
+    /// The DFA cannot answer this pattern (state cap): the VM takes over for good.
+    off: bool,
+}
+
+thread_local! {
+    static DFAS: RefCell<Vec<DfaCache>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Run `f` on this thread's DFA for `re`, building it on first use.
+fn with_dfa<T>(re: &Regex, f: impl FnOnce(&mut DfaCache) -> T) -> Option<T> {
+    DFAS.with(|cell| {
+        let mut caches = cell.borrow_mut();
+        let i = match caches.iter().position(|c| c.id == re.id) {
+            Some(i) => i,
+            None => {
+                if caches.len() == MAX_CACHED_DFAS {
+                    caches.remove(0);
+                }
+                caches.push(DfaCache::new(re));
+                caches.len() - 1
+            }
+        };
+        Some(f(&mut caches[i]))
+    })
+}
+
+impl DfaCache {
+    fn new(re: &Regex) -> DfaCache {
+        let (nctx, fold, raw) = ctx_space(re.ctx_mask);
+        let (before_bits, cur_bits) = ctx_tables(&fold);
+        DfaCache {
+            id: re.id,
+            fwd: Dfa::new(nctx, raw.clone()),
+            rev: Dfa::new(nctx, raw),
+            before_bits,
+            cur_bits,
+            skip: None,
+            start_only: starts_only_at_text_start(&re.prog),
+            off: false,
+        }
+    }
+
+    /// The context index at the position after the byte `before`, with `at` at it.
+    #[inline]
+    fn slot(&self, base: u32, before: Option<u8>, at: Option<u8>) -> usize {
+        let index = |b: Option<u8>| b.map_or(256, usize::from);
+        base as usize + self.before_bits[index(before)] as usize + self.cur_bits[index(at)] as usize
+    }
+
+    /// The leftmost-first match at or after `start`. The inner `None` is "no match"; the
+    /// outer one is "the DFA gave up", and the caller falls back to the VM.
+    fn find(
+        &mut self,
+        prog: &[Inst<ByteSet>],
+        rprog: &[Inst<ByteSet>],
+        hay: &[u8],
+        start: usize,
+    ) -> Option<Option<Match>> {
+        if self.off {
+            return None;
+        }
+        // Nothing can begin past the text start, so a later start has no answer to give.
+        if self.start_only && start > 0 {
+            return Some(None);
+        }
+        let Some(end) = self.forward(prog, hay, start) else {
+            self.off = true;
+            return None;
+        };
+        let Some(end) = end else {
+            return Some(None);
+        };
+        // A match ending at `start` cannot have begun anywhere else.
+        let begin = if end == start {
+            start
+        } else {
+            match self.reverse(rprog, hay, start) {
+                None => {
+                    self.off = true;
+                    return None;
+                }
+                Some(Some(begin)) => begin,
+                // A forward accept always has a start; anything else is a disagreement the
+                // VM should answer rather than something to guess at.
+                Some(None) => {
+                    self.off = true;
+                    return None;
+                }
+            }
+        };
+        if let Some(m) = run_vm(prog, hay, begin, true) {
+            return Some(Some(m));
+        }
+        Some(run_vm(prog, hay, start, false))
+    }
+
+    /// True when the pattern matches anywhere in `hay`.
+    fn is_match(&mut self, prog: &[Inst<ByteSet>], hay: &[u8], start: usize) -> Option<bool> {
+        if self.off {
+            return None;
+        }
+        match self.forward(prog, hay, start) {
+            Some(found) => Some(found.is_some()),
+            None => {
+                self.off = true;
+                None
+            }
+        }
+    }
+
+    /// Walk the forward DFA to the first position where a match ends.
+    fn forward(
+        &mut self,
+        prog: &[Inst<ByteSet>],
+        hay: &[u8],
+        start: usize,
+    ) -> Option<Option<usize>> {
+        let hopeless = self.start_only;
+        if self.skip.is_none() {
+            self.skip = Some(self.fwd.skip_set(prog));
+        }
+        let mut at = start;
+        let mut slot = self.slot(
+            0,
+            start.checked_sub(1).map(|i| hay[i]),
+            hay.get(start).copied(),
+        );
+        loop {
+            if !self.fwd.prepare(prog, slot) {
+                return None;
+            }
+            let stop = self.fwd.stop[slot];
+            if stop & STOP_ACCEPT != 0 {
+                return Some(Some(at));
+            }
+            if stop & STOP_SINK != 0 && hopeless {
+                return Some(None);
+            }
+            let Some(byte) = hay.get(at).copied() else {
+                return Some(None);
+            };
+            // In a start state only a byte that leaves it can begin a match: jump to the
+            // next one instead of stepping through the rest. Pointless when nothing may
+            // begin past the text start: the next position is already a dead end.
+            if !hopeless && slot < self.fwd.nctx {
+                if let Some(ranges) = &self.skip {
+                    if !ranges.is_empty() {
+                        match crate::bytes::find_in_ranges(hay, ranges, at) {
+                            Some(next) if next > at => {
+                                slot = self.slot(
+                                    0,
+                                    hay.get(next - 1).copied(),
+                                    hay.get(next).copied(),
+                                );
+                                at = next;
+                                continue;
+                            }
+                            Some(_) => {}
+                            None => return Some(None),
+                        }
+                    }
+                }
+            }
+            let next = self.fwd.trans[slot * 256 + byte as usize];
+            at += 1;
+            slot = self.slot(next, Some(byte), hay.get(at).copied());
+        }
+    }
+
+    /// Walk the reverse DFA leftwards from the end of the haystack, keeping the last
+    /// position where a match starts.
+    fn reverse(
+        &mut self,
+        rprog: &[Inst<ByteSet>],
+        hay: &[u8],
+        floor: usize,
+    ) -> Option<Option<usize>> {
+        let mut at = hay.len();
+        let mut slot = self.slot(0, at.checked_sub(1).map(|i| hay[i]), None);
+        let mut leftmost = None;
+        loop {
+            if !self.rev.prepare(rprog, slot) {
+                return None;
+            }
+            if self.rev.stop[slot] & STOP_ACCEPT != 0 {
+                leftmost = Some(at);
+            }
+            if at == floor {
+                return Some(leftmost);
+            }
+            let byte = hay[at - 1];
+            let next = self.rev.trans[slot * 256 + byte as usize];
+            at -= 1;
+            slot = self.slot(next, at.checked_sub(1).map(|i| hay[i]), Some(byte));
+        }
+    }
+}
+
+/// True when no match can begin at a position that is not the start of the haystack, which
+/// is what lets a forward walk stop as soon as nothing is alive.
+fn starts_only_at_text_start(prog: &[Inst<ByteSet>]) -> bool {
+    (0..CTX_VALUES).all(|raw| {
+        raw as u8 & CTX_TEXT_START != 0 || {
+            let (pcs, accept) = closure(prog, &[], raw as u8);
+            pcs.is_empty() && !accept
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1730,6 +2417,54 @@ mod tests {
         assert_eq!(Regex::new(r"\d+").unwrap().required_byte(), None);
         assert_eq!(Regex::new("z.*").unwrap().required_byte(), Some(b'z'));
         assert_eq!(Regex::new("x").unwrap().required_byte(), Some(b'x'));
+        // A byte an optional part might never match is not a prefilter.
+        assert_eq!(Regex::new("a?b").unwrap().required_byte(), Some(b'b'));
+        assert_eq!(Regex::new("(?:x)?z").unwrap().required_byte(), Some(b'z'));
+        assert_eq!(Regex::new("x?").unwrap().required_byte(), None);
+        // An alternation needs every branch to hold it, an empty one included.
+        assert_eq!(Regex::new("a|").unwrap().required_byte(), None);
+        assert_eq!(Regex::new("a?b|c?d").unwrap().required_byte(), None);
+        assert_eq!(Regex::new("ab|ac").unwrap().required_byte(), Some(b'a'));
+        // A concatenation may use a part after an assertion.
+        assert_eq!(Regex::new(r"\bvar\b").unwrap().required_byte(), Some(b'v'));
+        assert_eq!(
+            Regex::new(r"[A-Z][a-z]*\.go").unwrap().required_byte(),
+            Some(b'.')
+        );
+    }
+
+    /// The prefilter must never reject a line the engine would match.
+    #[test]
+    fn required_byte_is_never_a_false_negative() {
+        let pats = [
+            "a?b",
+            "(?:x)?z",
+            "a|",
+            "a?b|c?d",
+            "x?",
+            r"\bvar\b",
+            r"[A-Z][a-z]*\.go",
+            "a*b",
+            "(a|b)c?",
+            "",
+            r"(?i)needle",
+            r"\d{2,4}",
+        ];
+        let hays = [
+            "b", "z", "abc", "var", "Go.go", "", "x", "c", "abcd", "needle", "12",
+        ];
+        for pat in pats {
+            let re = Regex::new(pat).unwrap();
+            for hay in hays {
+                let hits = re.is_match(hay.as_bytes());
+                if let Some(b) = re.required_byte() {
+                    assert!(
+                        !hits || hay.as_bytes().contains(&b),
+                        "{pat:?} matched {hay:?} without its required byte {b:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1939,6 +2674,193 @@ mod tests {
             Regex::new("[[:alpha:]").is_err(),
             "an unterminated class fails"
         );
+    }
+
+    /// The pre-DFA answer: what `find_at` does once the DFA is out of the picture.
+    fn vm_find(re: &Regex, hay: &[u8], start: usize) -> Option<Match> {
+        if let Some(lit) = &re.lit {
+            let i = crate::bytes::memmem_from(hay, lit, start)?;
+            return Some(Match {
+                start: i,
+                end: i + lit.len(),
+            });
+        }
+        if let Some(cprog) = &re.cprog {
+            if !hay.is_ascii() {
+                if let Ok(text) = std::str::from_utf8(hay) {
+                    return re.run_chars(cprog, text, start);
+                }
+            }
+        }
+        run_vm(&re.prog, hay, start, false)
+    }
+
+    #[test]
+    fn dfa_agrees_with_the_vm() {
+        let hays: [&[u8]; 12] = [
+            b"",
+            b"x",
+            b"package main\nvar x, y int\nfunc f() {}\n",
+            br"a cat. concatenate cat",
+            b"caf\xc3\xa9 memmove memMOVE na\xc3\xafve",
+            b"abc\xff\xfe abc",
+            b"line one\r\nline two\r\n",
+            b"func a() {} func bb(1) {} Func cc(",
+            b"import \"internal/go.go\" and \"a.rs\"",
+            b"2026-11-18 19:33:07 build 42 of 1000\n",
+            b"\n\n\n",
+            b"var\tx, var  y, vary,",
+        ];
+        let pats = [
+            "[A-Z][a-zA-Z0-9_]*\\.go",
+            r"func \w+\(",
+            r"^package \w+",
+            r"\bvar\b \w+,",
+            "[0-9]{2,4}",
+            "(?i)memmove",
+            r"\.(rs|toml)$",
+            "abc|b",
+            "bc|abc",
+            "a|ba",
+            "cat|ca",
+            "(?:ab|a)*c",
+            "a*",
+            "",
+            "^",
+            "$",
+            r"\b",
+            r"\B",
+            "^a{2,3}?$",
+            "[^a-c]+",
+            r"\w+@\w+",
+            "x|y|z",
+            "(a+)+$",
+            r"\bcat\b",
+            r"^\s*$",
+            "nomatchanywhere",
+            r"go\.go|a\.rs",
+            "[[:digit:]]{3}",
+        ];
+        for pat in pats {
+            let re = Regex::new(pat).unwrap_or_else(|e| panic!("{pat:?}: {e}"));
+            for hay in hays {
+                for at in 0..=hay.len() {
+                    assert_eq!(
+                        re.find_at(hay, at),
+                        vm_find(&re, hay, at),
+                        "{pat:?} on {:?} from {at}",
+                        String::from_utf8_lossy(hay)
+                    );
+                }
+                assert_eq!(
+                    re.is_match(hay),
+                    vm_find(&re, hay, 0).is_some(),
+                    "{pat:?} is_match on {:?}",
+                    String::from_utf8_lossy(hay)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dfa_agrees_with_the_vm_on_random_haystacks() {
+        // A tiny LCG, so the corpus is deterministic and needs no dependency.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut byte = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u8
+        };
+        let alphabet = b"ab_ 01\n\t.xzAZ\xc3\xa9\xff";
+        let pats = [
+            r"\bvar\b",
+            r"\Bab",
+            "a.*b",
+            "(?:ab|_)+",
+            r"^[a-z]+$",
+            r"\b\w+\b",
+            "(?i)AZ",
+            "[^a-z]+",
+            "a{2,3}b?",
+            r"\s\d",
+            "x|y",
+            r"[0-9]{2,4}",
+            r"\.\w+$",
+            "(?:a|b)*",
+            r"\b",
+        ];
+        for _ in 0..120 {
+            let len = (byte() % 24) as usize;
+            let hay: Vec<u8> = (0..len)
+                .map(|_| alphabet[(byte() as usize) % alphabet.len()])
+                .collect();
+            for pat in pats {
+                let re = Regex::new(pat).unwrap();
+                for at in 0..=hay.len() {
+                    assert_eq!(
+                        re.find_at(&hay, at),
+                        vm_find(&re, &hay, at),
+                        "{pat:?} on {:?} from {at}",
+                        String::from_utf8_lossy(&hay)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dfa_respects_multiline_flags() {
+        let re = Regex::new_with(
+            r"^b\w+$",
+            Flags {
+                multi_line: true,
+                ..Flags::default()
+            },
+        )
+        .unwrap();
+        let hay = b"abc\nbcd\nx\n";
+        assert_eq!(re.find(hay).map(|m| (m.start, m.end)), Some((4, 7)));
+        assert_eq!(re.find_at(hay, 4), Some(Match { start: 4, end: 7 }));
+        // `^` only holds at a line start, so nothing can begin at 5.
+        assert_eq!(re.find_at(hay, 5), None);
+        for at in 0..=hay.len() {
+            assert_eq!(re.find_at(hay, at), vm_find(&re, hay, at), "from {at}");
+        }
+    }
+
+    #[test]
+    fn dfa_takes_the_leftmost_start_not_the_earliest_end() {
+        // `b` ends first in "abc", but `abc` starts first and leftmost-first prefers it.
+        assert_eq!(m("abc|b", "abc"), Some((0, 3)));
+        assert_eq!(m("bc|abc", "abc"), Some((0, 3)));
+        assert_eq!(m("a|ba", "ba"), Some((0, 2)));
+        assert_eq!(m("ab|b", "ab"), Some((0, 2)));
+        assert_eq!(m("c|abc", "xabc"), Some((1, 4)));
+    }
+
+    #[test]
+    fn dfa_path_is_used() {
+        let re = Regex::new("[0-9]+z").unwrap();
+        assert!(re.literal().is_none());
+        assert_eq!(re.find(b"ab12z"), Some(Match { start: 2, end: 5 }));
+        let built = with_dfa(&re, |c| c.fwd.built_count).unwrap();
+        assert!(built > 0, "the DFA built states for the scan");
+    }
+
+    #[test]
+    fn dfa_gives_up_cleanly() {
+        // Both ways the DFA can refuse: an abandoned cache, and the state cap.
+        let re = Regex::new("(ab|cd)+e").unwrap();
+        assert_eq!(re.find(b"xabcdabe"), Some(Match { start: 1, end: 8 }));
+        with_dfa(&re, |c| c.off = true).unwrap();
+        assert_eq!(re.find(b"xabcdabe"), Some(Match { start: 1, end: 8 }));
+        assert!(!re.is_match(b"xabcdab"));
+
+        let re = Regex::new("q[0-9]+z").unwrap();
+        with_dfa(&re, |c| c.fwd.built_count = MAX_DFA_STATES).unwrap();
+        assert_eq!(re.find(b"..q12z.."), Some(Match { start: 2, end: 6 }));
+        assert_eq!(re.find(b"..q12y.."), None);
     }
 
     #[test]
