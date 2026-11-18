@@ -105,32 +105,36 @@ threads-search,dusage search default,/workspace/dusage/target/release/dusage sea
 
 ## Summary
 
-Median wall time in milliseconds. The last column is dusage's time divided by
-the reference tool's, so anything above 1.0 means dusage is slower.
+Median wall time in milliseconds, five alternating runs each, sequential (nothing else running).
+Measured on a 2-vCPU box against the final 0.5.0 binary, so these are the numbers the shipped
+code produces; the earlier table in this document came from a 4-vCPU machine and a build with
+the sequential walker.
 
 | Case | dusage | reference | dusage vs it |
 | --- | --- | --- | --- |
-| scan `/usr`, 180k files | **187.0** | `du -sb` 665.5 | **3.6x faster** |
-| scan `/usr` | 187.0 | `find -printf \| awk` 769.8 | 4.1x faster |
-| scan `/usr`, 1 thread | 682.4 | `du -sb` 665.5 | 1.0x (parity) |
-| search, rare literal | 217.9 | `rg -F` 53.9 / `grep -rI` 157.1 | 4.0x / 1.4x slower |
-| search, frequent literal | 213.1 | `rg -F` 94.0 / `grep -rI` 143.8 | 2.3x / 1.5x slower |
-| search, regex | 1175.6 | `rg` 64.9 / `grep -rIE` 219.0 | 18.1x / 5.4x slower |
-| search, case-insensitive | 196.3 | `rg -i` 58.0 / `grep -rI` 216.0 | 3.4x / 0.9x (ahead of grep) |
-| search `-l` | 175.9 | `rg -l` 84.8 / `grep -rIl` 145.8 | 2.1x / 1.2x slower |
-| find `*.go` over `/usr` | 936.7 | `find -name` 386.5 | 2.4x slower |
+| scan `/usr`, 180k files | **379** | `du -sb` 663 | **1.7x faster** |
+| search, frequent literal `-c` | **151** | `rg` 164 / `grep -rI` 144 | **1.1x faster than rg**, 1.05x slower than grep |
+| search, rare literal `-c` | 127 | `rg` 94 | 1.35x slower |
+| search, case-insensitive `-c` | 129 | `rg -i` 98 | 1.3x slower |
+| search, regex `-c` | 348 | `rg` 99 | 3.5x slower |
+| search `-l` | **142** | `rg -l` 146 | parity |
+| find `*.go` over `/usr` | 384 | `find -name` 369 | parity (1.04x) |
 
-The only thing dusage wins outright is a multi-threaded scan. On content search
-it now beats `grep` for a frequent literal and for case-insensitive patterns,
-matches it within noise for `-l`, and still loses to `ripgrep` everywhere: 2.3x
-on the best literal case and 18.1x on the regex one.
+A frequent literal is now the fastest of the three tools, `-l` is a dead heat with ripgrep, and
+`find` is level with `find(1)` where it used to be 2.4x behind. The two places dusage still
+loses are a rare literal and a general regex, both twice or more over ripgrep's time:
 
-The scan win is parallelism, not a better algorithm. Run single-threaded,
-`dusage scan` takes 682.4 ms against `du -sb`'s 665.5 ms — a dead heat. `strace
--c` shows why: over `/usr`, `dusage scan` issues 267,507 `statx` calls and
-35,660 `getdents64` calls, while `du -sb` issues 267,497 `newfstatat` calls and
-the same 35,660 `getdents64`. Identical syscall work, one `stat` per entry
-either way. dusage spreads the walk over threads and `du` does not.
+- **Rare literals** pay a fixed per-block cost the frequent case hides: the block scanner finds
+  no match and still has to count the newlines it skipped.
+- **Regexes** run the line-at-a-time path. The lazy DFA makes per-line matching cheap, but the
+  line splitting itself is what a block scanner avoids, and the DFA's leftmost-start recovery
+  walks backwards from the end of the buffer it is handed — sound on a line, quadratic on a
+  block. Closing that gap means a reverse-suffix DFA; it is the open item in `docs/ROADMAP.md`.
+
+Where the wins came from, in order: a parallel walk (every thread reads directories), a
+lazy enumerator that reads types from the dirent and stats only when a mode needs size or mtime,
+the block-oriented literal scan, the SWAR literal matcher behind it, and a 64 KiB buffered
+stdout. Each is measured in the sections below.
 
 ## Thread defaults
 
