@@ -232,7 +232,6 @@ impl Regex {
         self.required
     }
 
-    /// The pattern as plain bytes when it is a case-sensitive literal.
     pub fn literal(&self) -> Option<&[u8]> {
         self.lit.as_deref()
     }

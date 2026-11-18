@@ -62,6 +62,7 @@ impl Pattern {
         };
         if let Some(lit) = plain {
             if !lit.is_empty() {
+                let required = rarest_byte(&lit);
                 return Ok(Pattern {
                     kind: PatternKind::Literal,
                     source: text.to_string(),
@@ -69,7 +70,7 @@ impl Pattern {
                     ci: ignore_case,
                     word,
                     re: None,
-                    required: None,
+                    required,
                 });
             }
         }
@@ -209,6 +210,24 @@ impl Pattern {
         }
         out
     }
+}
+
+/// The least frequent byte of a needle, by a plain frequency table of English-ish text. It is
+/// only a filter, so a wrong guess costs a false positive, never a missed match.
+fn rarest_byte(lit: &[u8]) -> Option<u8> {
+    // Rough probabilities: letters in the middle of a word are common, digits and symbols are
+    // not, whitespace sits in between.
+    fn weight(b: u8) -> u32 {
+        match b {
+            b'e' | b't' | b'a' | b'o' | b'i' | b'n' | b's' | b'r' => 100,
+            b' ' | b'h' | b'l' | b'd' | b'c' | b'u' | b'm' | b'f' | b'p' | b'g' | b'y' => 60,
+            b'w' | b'b' | b'v' | b'k' | b'x' | b'j' | b'q' | b'z' => 12,
+            b'0'..=b'9' => 20,
+            b'\n' | b'\t' | b'\r' => 5,
+            _ => 30,
+        }
+    }
+    lit.iter().copied().min_by_key(|b| weight(*b))
 }
 
 /// Lowercase `s` and return, for every byte of the folded form, the byte offset of the

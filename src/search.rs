@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Read size for content scanning. Large enough to matter, small enough to stay in cache.
@@ -184,119 +184,6 @@ pub struct Candidate {
     pub is_link: bool,
 }
 
-struct Walker<'a> {
-    o: &'a SearchOptions,
-    rules: IgnoreRules,
-    root_dev: u64,
-    out: Vec<Candidate>,
-    stats: Stats,
-    /// Emit directories as candidates too (path scope wants them).
-    want_dirs: bool,
-}
-
-impl Walker<'_> {
-    fn dir(&mut self, dir: &Path, rel: &str, depth: usize) {
-        let rel = rel.trim_end_matches('/');
-        let mark = if self.o.no_ignore {
-            self.rules.mark()
-        } else {
-            self.rules.push_dir(dir, rel)
-        };
-        let mut ents = Vec::new();
-        match enumerate::DirReader::new().read(dir, &mut ents, &mut self.stats.errors) {
-            Ok(()) => {}
-            Err(e) => {
-                if e.kind() != io::ErrorKind::NotFound {
-                    self.stats.errors.record(&e);
-                }
-                self.rules.pop_to(mark);
-                return;
-            }
-        }
-        self.stats.dirs_walked += 1;
-        for e in &ents {
-            let name = e.name.to_string_lossy();
-            let child_rel = join_rel(rel, &name);
-            let is_dir = e.is_dir() && !e.is_reparse();
-            // A walk never follows a link: a reparse point is listed as a link or not at all.
-            if e.is_reparse() {
-                self.stats.entries_ignored += 1;
-                continue;
-            }
-            // `--max-depth N` counts the path levels below the root that may be reported.
-            if self.o.max_depth.is_some_and(|m| depth + 1 > m) {
-                self.stats.entries_ignored += 1;
-                continue;
-            }
-            if !self.o.hidden && name.starts_with('.') {
-                // A positive glob re-includes a dotfile it names, as rg does; directories
-                // still need `--hidden` so the walk never wanders into `.git`.
-                let named = !is_dir && self.rules.glob_named(&child_rel);
-                if !named {
-                    self.stats.entries_ignored += 1;
-                    continue;
-                }
-            }
-            // A positive glob switches the ignore files off (`-g '*.log'` finds a file a
-            // `.gitignore` hides), exactly as ripgrep does; exclusions always apply.
-            let globs_win = self.rules.whitelisted() || self.o.no_ignore;
-            if !globs_win && self.rules.is_ignored(&child_rel, is_dir) {
-                self.stats.entries_ignored += 1;
-                continue;
-            }
-            if !self.rules.glob_allows(&child_rel, is_dir) {
-                self.stats.entries_ignored += 1;
-                continue;
-            }
-            if is_dir {
-                if self.o.one_filesystem {
-                    let child = dir.join(&e.name);
-                    match enumerate::dev_of(&child) {
-                        Ok(dev) if dev != self.root_dev => continue,
-                        _ => {}
-                    }
-                }
-                if self.want_dirs {
-                    self.out
-                        .push(self.candidate(dir, &e.name, &child_rel, true, e.size, None));
-                }
-                if self.o.max_depth.is_none_or(|m| depth + 1 < m) {
-                    self.dir(&dir.join(&e.name), &child_rel, depth + 1);
-                }
-            } else {
-                if let Some(limit) = self.o.max_file_size {
-                    if e.size > limit {
-                        continue;
-                    }
-                }
-                let modified = Some(e.modified());
-                self.out
-                    .push(self.candidate(dir, &e.name, &child_rel, false, e.size, modified));
-            }
-        }
-        self.rules.pop_to(mark);
-    }
-
-    fn candidate(
-        &self,
-        dir: &Path,
-        name: &std::ffi::OsStr,
-        rel: &str,
-        is_dir: bool,
-        size: u64,
-        modified: Option<SystemTime>,
-    ) -> Candidate {
-        Candidate {
-            path: dir.join(name),
-            rel: rel.to_string(),
-            size,
-            modified,
-            is_dir,
-            is_link: false,
-        }
-    }
-}
-
 fn join_rel(rel: &str, name: &str) -> String {
     if rel.is_empty() {
         name.to_string()
@@ -305,29 +192,139 @@ fn join_rel(rel: &str, name: &str) -> String {
     }
 }
 
-fn build_walker(o: &SearchOptions) -> io::Result<Walker<'_>> {
+/// One directory to read. The rules are this directory's ancestors; the directory's own
+/// ignore files are pushed when the job runs, so a snapshot can be shared across threads.
+struct WalkJob {
+    dir: PathBuf,
+    rel: String,
+    depth: usize,
+    rules: Arc<IgnoreRules>,
+    dev: u64,
+}
+
+/// What one job produced: the candidates it listed, its share of the statistics, and the
+/// subdirectories another thread should read.
+struct JobOut {
+    cands: Vec<Candidate>,
+    stats: Stats,
+    children: Vec<WalkJob>,
+}
+
+fn walk_rules(o: &SearchOptions) -> Arc<IgnoreRules> {
     let mut rules = IgnoreRules::new(!o.no_ignore);
     rules
         .add_globs(&o.globs)
         .and_then(|()| rules.add_filters(&o.type_globs))
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    Ok(Walker {
-        o,
-        rules,
-        root_dev: 0,
-        out: Vec::new(),
-        stats: Stats::default(),
-        want_dirs: o.scope == Scope::Paths,
-    })
+        .expect("glob dot-rule validation");
+    Arc::new(rules)
 }
 
-/// List every candidate under the roots, in a deterministic order.
+/// Read one directory: apply the hidden, ignore, glob, depth and filesystem filters, and
+/// return the entries that survive together with the subdirectories to visit next.
+fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
+    let mut out = JobOut {
+        cands: Vec::new(),
+        stats: Stats::default(),
+        children: Vec::new(),
+    };
+    let mut rules = (*job.rules).clone();
+    if !o.no_ignore {
+        rules.push_dir(&job.dir, &job.rel);
+    }
+    let mut ents = Vec::new();
+    if let Err(e) = enumerate::DirReader::new().read(&job.dir, &mut ents, &mut out.stats.errors) {
+        if e.kind() != io::ErrorKind::NotFound {
+            out.stats.errors.record(&e);
+        }
+        return out;
+    }
+    out.stats.dirs_walked += 1;
+    let rel = job.rel.as_str();
+    for e in &ents {
+        let name = e.name.to_string_lossy();
+        let child_rel = join_rel(rel, &name);
+        let is_dir = e.is_dir() && !e.is_reparse();
+        // A walk never follows a link: a reparse point is listed as a link or not at all.
+        if e.is_reparse() {
+            out.stats.entries_ignored += 1;
+            continue;
+        }
+        // `--max-depth N` counts the path levels below the root that may be reported.
+        if o.max_depth.is_some_and(|m| job.depth + 1 > m) {
+            out.stats.entries_ignored += 1;
+            continue;
+        }
+        if !o.hidden && name.starts_with('.') {
+            // A positive glob re-includes a dotfile it names, as rg does; directories still
+            // need `--hidden` so the walk never wanders into `.git`.
+            let named = !is_dir && rules.glob_named(&child_rel);
+            if !named {
+                out.stats.entries_ignored += 1;
+                continue;
+            }
+        }
+        // A positive glob switches the ignore files off (`-g '*.log'` finds a file a
+        // `.gitignore` hides), exactly as ripgrep does; exclusions always apply.
+        let globs_win = rules.whitelisted() || o.no_ignore;
+        if !globs_win && rules.is_ignored(&child_rel, is_dir) {
+            out.stats.entries_ignored += 1;
+            continue;
+        }
+        if !rules.glob_allows(&child_rel, is_dir) {
+            out.stats.entries_ignored += 1;
+            continue;
+        }
+        if is_dir {
+            let child = job.dir.join(&e.name);
+            if o.one_filesystem && enumerate::dev_of(&child).is_ok_and(|dev| dev != job.dev) {
+                continue;
+            }
+            if want_dirs {
+                out.cands.push(Candidate {
+                    path: child.clone(),
+                    rel: child_rel.clone(),
+                    size: e.size,
+                    modified: None,
+                    is_dir: true,
+                    is_link: false,
+                });
+            }
+            if o.max_depth.is_none_or(|m| job.depth + 1 < m) {
+                out.children.push(WalkJob {
+                    dir: child,
+                    rel: child_rel,
+                    depth: job.depth + 1,
+                    rules: Arc::new(rules.clone()),
+                    dev: job.dev,
+                });
+            }
+        } else {
+            if let Some(limit) = o.max_file_size {
+                if e.size > limit {
+                    continue;
+                }
+            }
+            out.cands.push(Candidate {
+                path: job.dir.join(&e.name),
+                rel: child_rel,
+                size: e.size,
+                modified: Some(e.modified()),
+                is_dir: false,
+                is_link: false,
+            });
+        }
+    }
+    out
+}
+
+/// List every candidate under the roots, in a deterministic order. Directories are read by
+/// every worker thread at once, so the walk costs a fraction of its sequential time on a
+/// tree with many directories.
 fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
     let mut all: Vec<Candidate> = Vec::new();
     let mut stats = Stats::default();
+    let mut jobs: Vec<WalkJob> = Vec::new();
     for root in &o.roots {
-        let mut w = build_walker(o).expect("glob dot-rule validation");
-        w.root_dev = root_dev;
         // Explicit files on the command line are taken as given, filters aside.
         match std::fs::metadata(root) {
             Ok(md) if md.is_file() => {
@@ -335,7 +332,7 @@ fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                w.out.push(Candidate {
+                all.push(Candidate {
                     path: root.clone(),
                     rel,
                     size: md.len(),
@@ -343,24 +340,54 @@ fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
                     is_dir: false,
                     is_link: false,
                 });
+                continue;
             }
             Ok(_) => {
-                let mark = if o.no_ignore {
-                    w.rules.mark()
+                let ancestors = if o.no_ignore {
+                    walk_rules(o)
                 } else {
-                    w.rules.push_ancestors(root)
+                    let mut r = (*walk_rules(o)).clone();
+                    r.push_ancestors(root);
+                    Arc::new(r)
                 };
-                w.dir(root, "", 0);
-                w.rules.pop_to(mark);
+                let dev = if o.one_filesystem {
+                    enumerate::dev_of(root).unwrap_or(root_dev)
+                } else {
+                    root_dev
+                };
+                jobs.push(WalkJob {
+                    dir: root.clone(),
+                    rel: String::new(),
+                    depth: 0,
+                    rules: ancestors,
+                    dev,
+                });
             }
             Err(e) => {
-                w.stats.errors.record(&e);
+                stats.errors.record(&e);
             }
         }
-        all.append(&mut w.out);
-        stats.dirs_walked += w.stats.dirs_walked;
-        stats.entries_ignored += w.stats.entries_ignored;
-        stats.errors.add(&w.stats.errors);
+    }
+    if !jobs.is_empty() {
+        let want_dirs = o.scope == Scope::Paths;
+        let threads = o.threads.max(1);
+        let shared = Mutex::new((Vec::<Candidate>::new(), Stats::default()));
+        par_for_each(jobs, threads, |job, spawn| {
+            let out = read_job(job, o, want_dirs);
+            for child in out.children {
+                spawn(child);
+            }
+            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            guard.0.extend(out.cands);
+            guard.1.dirs_walked += out.stats.dirs_walked;
+            guard.1.entries_ignored += out.stats.entries_ignored;
+            guard.1.errors.add(&out.stats.errors);
+        });
+        let (cands, walked) = shared.into_inner().unwrap_or_else(|e| e.into_inner());
+        all.extend(cands);
+        stats.dirs_walked += walked.dirs_walked;
+        stats.entries_ignored += walked.entries_ignored;
+        stats.errors.add(&walked.errors);
     }
     if o.scope == Scope::Content {
         all.retain(|c| !c.is_dir);
