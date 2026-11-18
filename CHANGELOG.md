@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.5.0] - 2026-11-18
+
+`dusage` is a search tool as well as a disk tool: `search` reads file contents, `find` lists
+paths, and `prune` gains presets. Both binaries come out of one codebase with nothing added
+from outside the standard library.
+
+### Added
+
+- **`dusage search`** (`grep`, `rg`): matching lines from `<pattern> [paths...]`, with
+  `-i -w -v -n -H -h -l -L -c -o -q -a -F -e -g -t -A -B -C -m -j --max-depth
+  --max-filesize --max-columns --encoding --hidden --no-ignore -x --json --color --stats`.
+  Patterns are regular expressions or, with `-F`, plain text; a pattern that is plain text
+  either way takes a byte-scan fast path instead of the engine.
+- **`dusage find`** (`ls`): paths by gitignore-style glob or, with `-F`, a substring, with
+  `-t --ext --size --older --newer --dirs --files --long --json` and the same walk filters.
+- **A regular expression engine of its own** (`regex.rs`): Thompson NFA run by a Pike VM, so
+  matching is linear in the input and `(a+)+$` costs time rather than exploding. Lookaround,
+  backreferences and `\p{...}` are refused with an error naming the offset. Inline
+  `(?i) (?s) (?m)` are supported; case-insensitive matching folds ASCII letters.
+- **Ignore rules that feel like ripgrep's.** The built-in cache list (`.git`, `.hg`, `.svn`,
+  `node_modules`, `target`, `__pycache__`, venvs, `.tox`, `.mypy_cache`, `.pytest_cache`,
+  `.ruff_cache`, `.gradle`), then `.gitignore` and `.ignore` read per directory as the walk
+  descends, deeper files winning and `!` re-including. A **positive `-g` overrides the ignore
+  rules**, so `-g '*.log'` searches a file `.gitignore` hides; `-g '!pattern'` only excludes.
+  `--no-ignore` switches the rules off, `--hidden` includes dot entries, `-x` stays on the
+  starting filesystem.
+- **Encodings.** UTF-16LE and UTF-16BE are detected from a byte order mark or the NUL-byte
+  pattern, and transcoded for matching and line numbering; `--encoding latin1` reads Latin-1,
+  which is never inferred. A file with a NUL byte is reported as `Binary file ... matches`
+  unless `-a`.
+- **`prune --preset NAME` and `--print-presets`.** `cargo` (`target`, `cargo-target`, 1 week),
+  `node` (`node_modules`, `.next`, `dist`, `build`, 2 weeks) and `agent-temp` (`tmp-`,
+  `scratch-`, `session-markers`, `agent-`, 2 hours) ship built in; a `presets.conf` in
+  `$DUSAGE_CONFIG`, `$XDG_CONFIG_HOME/dusage` or `%APPDATA%\dusage` adds or replaces them by
+  name. Command-line `--age`/`--limit` override the preset, `--prefix` values are appended.
+- **One binary.** `dusage scan|big|search|find|prune`, each with its own `--help`. The
+  original `dusage <root> [min_big] [threads] [top_n]` form still means `scan`, and `fastdel`
+  stays a separate binary whose command is `prune`.
+
+### Changed
+
+- `dusage --help` now prints the subcommand map plus the `scan` options; every other command
+  has its own help text.
+- `-h` inside `search` and `find` is `--no-filename`, as in grep, not help.
+
+### Fixed
+
+- A directory with no ignore file of its own dropped every rule above it: a `.gitignore` at
+  the search root stopped applying to the directories the walk visited after it. The rule
+  stack is now restored to the depth it had on entry.
+- `-w` treated only ASCII as word characters, so `-w caf` matched inside `café`. Every byte of
+  a multi-byte character is now a word byte, matching `rg` and a UTF-8 `grep`.
+
 ## [0.4.0] - 2026-11-18
 
 `dusage` and `fastdel` now run on Linux as well as Windows. Everything the Windows build

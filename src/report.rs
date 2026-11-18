@@ -332,6 +332,7 @@ pub fn render_search(
     // The CLI decides from the roots (several paths, or a directory walk); a bare
     // `dusage search needle file.txt` prints lines without a file name.
     let many = o.with_filename.unwrap_or(r.files.len() > 1);
+    let mut printed = false;
     for f in &r.files {
         if o.files_with_matches || o.files_without_matches {
             if o.null {
@@ -354,13 +355,16 @@ pub fn render_search(
             writeln!(out, "Binary file {} matches", f.path)?;
             continue;
         }
+        // grep and ripgrep print a `--` only between context groups; a plain match list has
+        // no separator at all.
+        let grouped = o.before > 0 || o.after > 0;
         let mut last: Option<u64> = None;
         for h in &f.hits {
-            if let Some(l) = last {
-                if h.number > l + 1 {
-                    writeln!(out, "--")?;
-                }
+            let consecutive = last.is_some_and(|l| h.number == l + 1);
+            if grouped && printed && (last.is_none() || !consecutive) {
+                writeln!(out, "--")?;
             }
+            printed = true;
             last = Some(h.number);
             let colon = if h.matched { ':' } else { '-' };
             if many {
@@ -933,8 +937,16 @@ mod tests {
         let text = String::from_utf8(v).unwrap();
         assert!(text.contains("a.txt:2:a needle"), "{text}");
         assert!(
-            text.contains("--\n"),
-            "non-contiguous groups are separated: {text}"
+            !text.contains("--\n"),
+            "a plain match list has no separator: {text}"
+        );
+        o.after = 1;
+        let mut v = Vec::new();
+        render_search(&r, &o, false, &mut v).unwrap();
+        let grouped = String::from_utf8(v).unwrap();
+        assert!(
+            grouped.contains("--\n"),
+            "context groups are separated: {grouped}"
         );
         let mut v = Vec::new();
         render_search_json(&r, &o, &mut v).unwrap();

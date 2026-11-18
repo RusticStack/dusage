@@ -8,7 +8,7 @@ use std::time::Duration;
 pub struct Args {
     positionals: Vec<String>,
     bools: Vec<String>,
-    values: HashMap<String, String>,
+    values: HashMap<String, Vec<String>>,
 }
 
 /// A plain decimal number: optional leading `-`, digits, at most one `.`; no exponent/inf/nan.
@@ -49,6 +49,15 @@ impl Args {
             }
             let (name, inline) = match tok.split_once('=') {
                 Some((n, v)) if n.starts_with("--") => (n.to_string(), Some(v.to_string())),
+                // An attached short value: `-C2`, `-m5`, `-g*.rs`, `-tjs`.
+                _ if !tok.starts_with("--") && tok.len() > 2 => {
+                    let head = &tok[..2];
+                    if value_flags.contains(&head) {
+                        (head.to_string(), Some(tok[2..].to_string()))
+                    } else {
+                        (tok.clone(), None)
+                    }
+                }
                 _ => (tok.clone(), None),
             };
             if value_flags.contains(&name.as_str()) {
@@ -58,7 +67,7 @@ impl Args {
                         .next()
                         .ok_or_else(|| format!("option {name} needs a value"))?,
                 };
-                a.values.insert(name, v);
+                a.values.entry(name).or_default().push(v);
             } else if bool_flags.contains(&name.as_str()) {
                 if inline.is_some() {
                     return Err(format!("option {name} does not take a value"));
@@ -87,8 +96,18 @@ impl Args {
     }
 
     /// The value of a value flag (`--age 7d` or `--age=7d`); the last occurrence wins.
+    /// The last value given for `name` (repeatable options keep their history for
+    /// [`Args::values`]).
     pub fn value(&self, name: &str) -> Option<&str> {
-        self.values.get(name).map(String::as_str)
+        self.values
+            .get(name)
+            .and_then(|v| v.last())
+            .map(String::as_str)
+    }
+
+    /// Every value given for `name`, in order: `-g a -g b` yields both, as rg does.
+    pub fn values(&self, name: &str) -> &[String] {
+        self.values.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -183,11 +202,12 @@ pub fn parse_threads(s: &str) -> Result<usize, String> {
     }
 }
 
-/// 4x available parallelism (the scan is syscall-bound), 32 if unknown.
+/// One worker per core, never fewer than four: the scan is syscall-bound, so a few extra
+/// threads help hide latency while heavy oversubscription (4x cores) measurably hurts.
 pub fn default_threads() -> usize {
     std::thread::available_parallelism()
-        .map(|n| n.get() * 4)
-        .unwrap_or(32)
+        .map(|n| n.get().clamp(4, 16))
+        .unwrap_or(8)
 }
 
 /// Decimal units, e.g. `1.23 GB`.

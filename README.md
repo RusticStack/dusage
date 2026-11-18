@@ -5,7 +5,7 @@
 <h1 align="center">dusage</h1>
 
 <p align="center"><b>See where your disk space went, then get it back.</b><br>
-A fast disk-usage scanner and a safe parallel pruner for Windows and Linux. Two small binaries, zero dependencies.</p>
+A fast disk-usage scanner, a content and path search, and a safe parallel pruner for Windows and Linux. One binary with subcommands, zero dependencies.</p>
 
 <p align="center">
   <a href="https://github.com/RusticStack/dusage/releases/latest"><img src="https://img.shields.io/badge/Download_for_Windows-dusage-CC420C?style=for-the-badge&logo=windows11&logoColor=white" height="44" alt="Download dusage for Windows"></a>
@@ -43,13 +43,17 @@ A fast disk-usage scanner and a safe parallel pruner for Windows and Linux. Two 
   speed (see [Benchmarks](#benchmarks)).
 - **`fastdel` gets it back.** It deletes the children of a folder that match a name prefix
   and are older than an age (`7d`, `2h`), in parallel, including inside one huge subtree.
+- **It searches too.** `dusage search` is a `grep`/`rg` replacement for file contents and
+  `dusage find` lists paths, with the same ignore rules in both: your `node_modules`,
+  `target` and `.gitignore` files are skipped by default, and one positive `-g` overrides
+  them. Files in UTF-16 and Latin-1 are read, not reported as binary. See [Search](#search).
 - **Safe by design.** Volume roots, Windows, Program Files, ProgramData and your profile are
   refused in every spelling, and on Linux the filesystem root, the system directories, `/home`
   and `$HOME`. Junctions, symlinks and other reparse points are never followed, and a delete
   never walks into another filesystem. `--dry` shows the plan first, and `--log` records every
   deletion as it happens.
-- **Scriptable.** `--json` output, plain exit codes, and the old positional commands still
-  work.
+- **Scriptable.** `--json` output on both the scan and the search side, plain exit codes, and
+  the old positional commands still work.
 
 ## Getting started
 
@@ -85,6 +89,8 @@ With Rust installed you can also build and install both tools with
 
 ```text
 dusage <root> [OPTIONS]
+dusage scan <root> [OPTIONS]                              (same thing, named)
+dusage big <root> [OPTIONS]                               largest files only
 dusage <root> [min_big] [threads] [top_n]      (positional form, still supported)
 ```
 
@@ -92,7 +98,7 @@ dusage <root> [min_big] [threads] [top_n]      (positional form, still supported
 |---|---|
 | `--min-big SIZE` | list files of at least SIZE (default `1G`; sizes like `300M`, `1.5G`, `512KiB`) |
 | `--top N` | rows per section (default 60) |
-| `--threads N` | worker threads (default 4x cores) |
+| `--threads N` | worker threads (default: one per core, 4 to 16) |
 | `--on-disk` | show size on disk next to file size |
 | `--by-ext` | add a breakdown by file extension |
 | `--dedup-hardlinks` | count a file with several hardlinks once |
@@ -143,6 +149,8 @@ you want for `dusage /`. Windows mount points are reparse points and are always 
 
 ```text
 fastdel <root> --age AGE [--prefix a,b] [OPTIONS]
+fastdel <root> --preset NAME [OPTIONS]
+dusage prune <root> --age AGE [OPTIONS]                  (same command, one binary)
 fastdel <root> <min_age> [prefixes] [threads] [--dry]   (positional form, still supported)
 ```
 
@@ -153,7 +161,9 @@ fastdel <root> <min_age> [prefixes] [threads] [--dry]   (positional form, still 
 | `--dry` | print the plan and delete nothing |
 | `--log FILE` | append a line per candidate (`DELETED`, `FAILED`, `DRY`) and a summary, written as it happens |
 | `--limit N` | rows listed by `--dry` (default 50) |
-| `--threads N` | worker threads (default 4x cores) |
+| `--preset NAME` | prefixes, age and list limit from a saved preset (below) |
+| `--print-presets` | list the presets and exit |
+| `--threads N` | worker threads (default: one per core, 4 to 16) |
 
 ```powershell
 # cargo target folders anywhere under D:\work, any age; preview first
@@ -165,6 +175,28 @@ fastdel C:\scratch --age 2h --prefix tmp- --log prune.log
 Deletion is **permanent**: nothing goes to the Recycle Bin, and there is no confirmation
 prompt, so run with `--dry` first. Exit codes: `0` success, `1` some entries could not be
 deleted (the summary lists them by cause), `2` bad arguments or a refused root.
+
+### Presets
+
+`--preset NAME` replaces the filter options with a saved bundle: the same `fastdel` in one
+word. Three ship built in, and `--print-presets` lists them with the config file's own:
+
+| Preset | Prefixes | Age |
+|---|---|---|
+| `cargo` | `target`, `cargo-target` | 1 week |
+| `node` | `node_modules`, `.next`, `dist`, `build` | 2 weeks |
+| `agent-temp` | `tmp-`, `scratch-`, `session-markers`, `agent-` | 2 hours |
+
+```powershell
+fastdel D:\work --preset cargo --dry                        # what a cargo preset would delete
+fastdel D:\work --preset cargo --age 30d --prefix staging-  # its prefixes, overridden age
+```
+
+An option on the command line overrides the preset field it names, age and `--limit` included;
+prefixes are the exception and are appended, so the example above filters `target|staging-`.
+Your own presets live in `$DUSAGE_CONFIG`, else `<config dir>/dusage/presets.conf`, as
+`[name]` sections of `prefixes = a, b`, `age = 7d` and `list_limit = 50`; a section replaces
+the built-in preset of the same name.
 
 ### What fastdel will not touch
 
@@ -180,6 +212,73 @@ deleted (the summary lists them by cause), `2` bad arguments or a refused root.
 - **Another filesystem.** A directory on a different device inside a candidate is left in
   place and reported, the way a junction is on Windows.
 - Files that are locked or vanish mid-run are skipped and counted, never fatal.
+
+## Search
+
+`dusage search` reads file contents, the way `grep` and `rg` do, and `dusage find` lists
+paths, the way `find` does. Both walk a tree once, skip the same directories, and behave the
+same on Windows and Linux. `grep` and `rg` are aliases for `search`, `ls` for `find`,
+`fastdel` and `del` for `prune`.
+
+```text
+dusage search [OPTIONS] <pattern> [paths...]
+dusage find   [OPTIONS] <glob|substring> [paths...]
+```
+
+| Command | What it does |
+|---|---|
+| `dusage search -n 'impl ' src/preset.rs` | matching lines with line numbers |
+| `dusage search -i -t rust 'println' src/` | case-insensitive, Rust files only |
+| `dusage search -w -n 'unsafe' src/` | whole words only |
+| `dusage search -C 2 -n 'render_search' src/report.rs` | two lines of context around each match |
+| `dusage search -c -F 'fn ' src/cli.rs` | count per file, pattern taken literally |
+| `dusage search -l 'fn main' src/` | names of the files that match |
+| `dusage search -g '*.md' -n 'zero dependencies' .` | only paths matching a glob |
+| `dusage search --encoding latin1 'café' old/` | force an encoding instead of detecting it |
+| `dusage search --json -n 'mod ' src/lib.rs` | JSON for scripts, with a stats block |
+| `dusage find '*.lock'` | paths matching a glob |
+| `dusage find --files --ext rs --long --size +4K '*' src` | size and modification time per file |
+| `dusage find --dirs 's*' .` | directories only |
+| `dusage prune /work --preset cargo --dry` | a saved prefix/age bundle, previewed ([Presets](#presets)) |
+
+**What gets searched.** Hidden entries (a leading `.`) are skipped unless `--hidden` is given.
+Three ignore layers apply in order: the built-in cache list (`.git`, `.hg`, `.svn`,
+`node_modules`, `target`, `__pycache__`, `.venv`, `venv`, `.tox`, `.mypy_cache`,
+`.pytest_cache`, `.ruff_cache`, `.gradle`), then `.gitignore` and `.ignore` read from each
+directory as the walk reaches it (a deeper file wins, `!pattern` re-includes), then your own
+`-g` filters. `--no-ignore` turns the first two off. A **positive** `-g` wins over the ignore
+rules, exactly as in ripgrep, so `-g '*.log'` searches a file `.gitignore` hides while
+`-g '!*.min.js'` excludes. `-t` and `find`'s `--ext` compile to the same globs, so they switch
+the ignore rules off as well.
+
+**Patterns.** A pattern that is plain text takes a byte-scan fast path; the rest is a
+backtracking-free regular expression engine supporting `. * + ? {n,m}`, byte classes,
+groups, `|`, `^ $ \A \z \b \B`, `\d \w \s` and inline `(?i) (?s) (?m)`. Lookaround,
+backreferences and `\p{...}` classes are refused with an error that names the offset, and
+matching is line by line, so no pattern can span a newline. Under `-i` a literal needle folds
+case per Unicode character (`-i café` matches `CAFÉ`), while a regular expression folds ASCII
+letters only. `-w` treats every byte of a non-ASCII character as a word byte, so `-w caf`
+does not match inside `café`.
+
+**Encodings.** Files are read as UTF-8 by default, and UTF-16LE/BE is detected from a byte
+order mark or the NUL-byte pattern such files have. `--encoding utf-16le|utf-16be|latin1`
+forces one when detection has nothing to go on, which is what Latin-1 text needs. A file with
+a NUL in its first 8 KiB is reported as `Binary file X matches` unless `-a` is given.
+
+**Exit codes.** `0` something matched, `1` nothing did, `2` bad arguments or an unreadable
+path. The same three values `dusage` and `fastdel` already use.
+
+**vs ripgrep, grep and find.** Not a drop-in replacement, and not trying to be one. There is
+no PCRE2 `-P`, so no lookaround and no backreferences; no multi-line matching (`-U`); no
+`--follow`, no mmap, no compressed-file search, no stdin; and `-e` sets the pattern once,
+where a second `-e` replaces the first instead of adding an alternative. Short flags do not
+combine (`-i -n`, not `-in`). `-x` here means `--one-filesystem`, not grep's whole-line
+match. Ignore files are read from the roots down, so a `.gitignore` above the root,
+`.git/info/exclude` and a global `core.excludesFile` are not consulted. The defaults are
+also more aggressive than ripgrep's: the cache list applies everywhere (outside a
+git repository too) and `.gitignore` is honoured outside a repository as well. What you get
+back for that: one binary that also scans and prunes, the same behaviour on Windows and Linux,
+UTF-16 and Latin-1 reading, `--json`, and a regex engine with no dependencies at all.
 
 ## Benchmarks
 
@@ -243,8 +342,9 @@ about 1 s while skipping the 7 pseudo and nested mounts (`/proc`, `/sys`, `/dev`
 [`skills/dusage/SKILL.md`](skills/dusage/SKILL.md) is an
 [Agent Skill](https://agentskills.io) that teaches a coding agent to find what fills a
 Windows drive, report it, and clean up only what you approve: scan, drill down, ask, run a
-`fastdel --dry`, then delete with a log. It downloads and verifies the tools if they are
-missing. Copy the `skills/dusage` folder to your agent's skills directory, for example:
+`fastdel --dry`, then delete with a log. It also covers `search` and `find`, with the exit
+codes and the `-g`-overrides-ignore rule spelled out. It downloads and verifies the tools if
+they are missing. Copy the `skills/dusage` folder to your agent's skills directory, for example:
 
 | Agent | Folder |
 |---|---|
@@ -300,18 +400,27 @@ against `find`. Pushing a `v*` tag builds, tests and publishes Windows and Linux
 
 ```text
 src/
-  queue.rs      parallel work queue shared by both tools
-  scan.rs       scanner engine and watch mode          (dusage)
-  prune.rs      planning and parallel deletion          (fastdel)
+  queue.rs      parallel work queue shared by every engine
+  scan.rs       scanner engine and watch mode          (dusage scan, big)
+  search.rs     tree walk + content scanner            (dusage search, find)
+  pattern.rs    literal / regex dispatch, case and word rules
+  regex.rs      Pike VM over a Thompson NFA, no backtracking
+  glob.rs       gitignore-style glob matcher
+  ignore.rs     ignore layers and -g filters
+  bytes.rs      byte primitives: memmem, case folding, word boundaries
+  encodings.rs  UTF-8 / UTF-16 / Latin-1 detection and transcoding
+  preset.rs     fastdel presets (built in plus the config file)
+  prune.rs      planning and parallel deletion          (fastdel, prune)
   guard.rs      protected-root checks, per platform
   cli.rs        argument parsing, sizes and ages
-  report.rs     text and JSON output
+  report.rs     text and JSON output for all of the above
   model.rs      shared result types
+  cmd/          the subcommand front ends, one per tool
   win/          Windows layer: batched enumeration, handle-based delete,
                 USN journal, raw MFT reader, change feed, shared FFI
   unix/         Linux layer: readdir + statx enumeration, unlink/rmdir delete,
                 inotify change feed, errno table
-  bin/          the two thin command-line front ends
+  bin/          the two thin binaries (`dusage` dispatches, `fastdel` prunes)
 ```
 
 More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (module contracts),

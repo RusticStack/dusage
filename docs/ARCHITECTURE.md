@@ -11,9 +11,21 @@ src/model.rs          shared data types: Totals, TopEntry, BigFile, ErrorKind/Er
 src/queue.rs          par_for_each work queue
 src/cli.rs            arg parser + human units
 src/guard.rs          protected-root guard
-src/report.rs         text / JSON rendering of ScanResult
+src/report.rs         text / JSON rendering of ScanResult, SearchReport and path listings
 src/scan.rs           scanner engine: readdir/batched/mft backends, watch
 src/prune.rs          pruning engine: plan + execute
+src/search.rs         search engine: tree walk, candidate filters, content scanner
+src/pattern.rs        what a pattern is: literal or regex, case and word rules
+src/regex.rs          Pike VM over a Thompson NFA
+src/glob.rs           gitignore-style glob matcher
+src/ignore.rs         ignore layers (builtin caches, .gitignore, .ignore) and -g filters
+src/bytes.rs          byte primitives: memmem, ASCII/Unicode folding, word boundaries
+src/encodings.rs      UTF-8/UTF-16/Latin-1 detection and transcoding
+src/preset.rs         prune presets: built in plus the config file
+src/cmd/mod.rs        subcommand dispatch and the Fail(exit code, message) type
+src/cmd/scan.rs       scan / big
+src/cmd/search.rs     search / find, their help text
+src/cmd/prune.rs      prune / fastdel, its help text
 src/win/sys.rs        shared FFI decls + open()/wide_verbatim()/check()
 src/win/enumerate.rs  batched enumeration, readdir fallback, reparse/file_id/stream helpers
 src/win/delete.rs     handle-based delete, never follows reparse points
@@ -24,9 +36,9 @@ src/unix/sys.rs       errno table + inotify/poll declarations
 src/unix/enumerate.rs readdir + statx enumeration, symlink and mount helpers
 src/unix/delete.rs    unlink/rmdir delete, never follows symlinks
 src/unix/watch.rs     change feed for --watch (inotify)
-src/bin/dusage.rs     thin CLI over scan + report
-src/bin/fastdel.rs    thin CLI over prune
-tests/                dusage_cli.rs, fastdel_cli.rs (run the built binaries)
+src/bin/dusage.rs     thin CLI: cmd::dispatch + cmd::finish
+src/bin/fastdel.rs    thin CLI over cmd::prune
+tests/                dusage_cli.rs, fastdel_cli.rs, search_cli.rs (run the built binaries)
 ```
 
 ## Rules for every lane
@@ -334,6 +346,8 @@ returning false stops it.
   (protected or reparse root, empty `--prefix`), 1 = some candidates failed to delete, 0 = success or `--dry`.
 - `fastdel` keeps the positional form `<root> <min_age> [prefixes] [threads]`; a positional `""`
   prefix means all entries (as before), while an empty `--prefix` value exits 2.
+- **Search exit codes.** `search` and `find`: 0 = something matched, 1 = nothing did, 2 = bad
+  arguments or a path that does not exist. `-q` prints nothing and still reports 0/1.
 
 #### Behaviour notes (wave 3)
 
@@ -354,3 +368,94 @@ returning false stops it.
   written whole as it happens, then a `SUMMARY`, so a crash mid-run keeps the log.
 - **fastdel throughput.** Files in a directory are deleted in `FILE_CHUNK` slices that are
   separate work items, so one huge flat directory spreads over all workers.
+
+### search, find and their primitives (0.5.0)
+
+`dusage search` (contents) and `dusage find` (paths) share one engine; `Scope` picks which
+half runs. Contracts as built:
+
+```rust
+// search.rs
+pub enum Scope { Content, Paths }
+pub struct Candidate { pub path: PathBuf, pub rel: String, pub size: u64,
+                       pub modified: Option<SystemTime>, pub is_dir: bool, pub is_link: bool }
+pub struct SearchOptions { /* roots, scope, pattern, invert, line_numbers, with_filename,
+                              before, after, max_count, only_matching, files_with_matches,
+                              files_without_matches, count, quiet, hidden, no_ignore, globs,
+                              max_depth, max_file_size, threads, one_filesystem, text,
+                              max_columns, encoding */ }
+pub struct SearchReport { pub files: Vec<FileHits>, pub paths: Vec<Candidate>,
+                          pub stats: Stats, pub any_match: bool }
+pub fn search(o: &SearchOptions) -> std::io::Result<SearchReport>;
+
+// pattern.rs
+pub enum PatternKind { Literal, Regex }
+pub struct Pattern;
+impl Pattern {
+    pub fn new(text: &str, fixed: bool, ignore_case: bool, word: bool) -> Result<Pattern, String>;
+    pub fn find_at(&self, hay: &[u8], from: usize) -> Option<Match>;
+    pub fn is_match(&self, hay: &[u8]) -> bool;
+    pub fn find_all(&self, hay: &[u8], limit: usize) -> Vec<Match>;
+}
+
+// regex.rs — Pike VM. Flags { case_insensitive, multi_line, dot_matches_newline }
+pub struct Regex;
+impl Regex {
+    pub fn new_with(pattern: &str, flags: Flags) -> Result<Regex, String>;  // error names an offset
+    pub fn find_at(&self, hay: &[u8], at: usize) -> Option<Match>;
+    pub fn required_byte(&self) -> Option<u8>;   // prefilter for the line scanner
+    pub fn literal(&self) -> Option<&[u8]>;      // the whole pattern is plain text
+}
+
+// glob.rs — one gitignore-style pattern, matched against paths relative to the walk root
+pub struct Glob { pub negated: bool, pub dir_only: bool }
+impl Glob {
+    pub fn new(pattern: &str) -> Result<Glob, String>;
+    pub fn new_with(pattern: &str, ignore_case: bool) -> Result<Glob, String>;
+    pub fn matches(&self, rel: &str, is_dir: bool) -> bool;
+}
+
+// ignore.rs — layers 1 and 2, plus the -g filter
+pub struct IgnoreRules;
+impl IgnoreRules {
+    pub fn new(builtin: bool) -> Self;
+    pub fn add_globs(&mut self, globs: &[String]) -> Result<(), String>;
+    pub fn push_dir(&mut self, dir: &Path, rel: &str) -> usize;   // marker for pop_to
+    pub fn pop_to(&mut self, mark: usize);
+    pub fn is_ignored(&self, rel: &str, is_dir: bool) -> bool;
+    pub fn whitelisted(&self) -> bool;   // a positive -g switches the layers off
+    pub fn glob_allows(&self, rel: &str, is_dir: bool) -> bool;
+}
+
+// encodings.rs
+pub enum Encoding { Utf8, Utf16Le, Utf16Be, Latin1 }
+pub fn detect(sample: &[u8]) -> Encoding;             // BOM, else a NUL-byte pattern
+pub fn needs_transcode(e: Encoding) -> bool;
+pub fn to_utf8(bytes: &[u8], e: Encoding) -> Vec<u8>;
+
+// preset.rs
+pub struct Preset { pub name: String, pub prefixes: Vec<String>,
+                    pub age: Option<Duration>, pub list_limit: Option<usize> }
+pub fn builtin() -> Vec<Preset>;                     // cargo, node, agent-temp
+pub fn effective() -> Result<Vec<Preset>, String>;   // config file over builtin, by name
+```
+
+**Threading.** The walk is single-threaded and deterministic: one `DirReader` at a time, the
+ignore layers pushed as the recursion enters a directory and popped on the way out, and the
+candidates sorted by relative path before anything is printed. Only the expensive half goes
+wide — the candidate list becomes the input of `queue::par_for_each`, and each worker opens,
+reads (64 KiB blocks) and matches one file. Results land back in a slot vector by candidate
+index, so `-j` changes the clock, never the output order or the content. `-q` short-circuits:
+it scans serially and returns at the first match without starting any worker. `find` never
+reads file contents, so it has no parallel phase at all.
+
+**Content scanning.** A file whose bytes need transcoding (UTF-16) is read whole, because a
+code unit straddles any block boundary; everything else streams. A partial last line and the
+`-B` history carry across blocks. `--max-count` stops reading the file, `--max-columns`
+truncates a printed line, and `-o` caps matches per line so a pathological pattern cannot
+grow the output without bound.
+
+**Encodings.** `detect` reads a byte order mark, else infers UTF-16LE/BE from the NUL-byte
+pattern those files have; Latin-1 is never inferred, only forced with `--encoding latin1`.
+Line numbers are counted after transcoding, and match spans are mapped back to the original
+byte offsets.

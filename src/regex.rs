@@ -14,6 +14,7 @@
 //! [abc]  [^abc]  [a-z]  [\d_]  [\]]            byte classes
 //! ^  $  \A  \z  \b  \B  anchors and word boundaries
 //! \d \D \w \W \s \S    ASCII digit / word / space classes and their negations
+//! [[:alpha:]] [^[:space:]]  POSIX bracket expressions inside a class
 //! \n \r \t \f \v \0 \xHH   escapes; \. matches a literal dot
 //! (?i) (?s) (?m) (?-i) (?ism)   inline flags, at the pattern start or a group start
 //! ```
@@ -972,6 +973,69 @@ impl Parser<'_> {
         }
     }
 
+    /// `[:name:]` inside a class: the POSIX bracket expressions grep users write.
+    fn posix_class(&mut self) -> Result<ByteSet, String> {
+        let open = self.at;
+        let rest = &self.src[self.at..];
+        let end = rest.windows(2).position(|w| w == b":]");
+        let Some(end) = end else {
+            return Err(self.err_at("unterminated POSIX class", open));
+        };
+        let name = std::str::from_utf8(&rest[2..end]).unwrap_or("");
+        self.at += end + 2;
+        let mut set = ByteSet::empty();
+        match name {
+            "alnum" => {
+                set.add_range(b'0', b'9');
+                set.add_range(b'A', b'Z');
+                set.add_range(b'a', b'z');
+            }
+            "alpha" => {
+                set.add_range(b'A', b'Z');
+                set.add_range(b'a', b'z');
+            }
+            "ascii" => set.add_range(0, 0x7f),
+            "blank" => {
+                set.add(b' ');
+                set.add(b'\t');
+            }
+            "cntrl" => {
+                set.add_range(0, 0x1f);
+                set.add(0x7f);
+            }
+            "digit" => set.add_range(b'0', b'9'),
+            "graph" => set.add_range(0x21, 0x7e),
+            "lower" => set.add_range(b'a', b'z'),
+            "print" => set.add_range(0x20, 0x7e),
+            "punct" => {
+                set.add_range(0x21, 0x2f);
+                set.add_range(0x3a, 0x40);
+                set.add_range(0x5b, 0x60);
+                set.add_range(0x7b, 0x7e);
+            }
+            "space" => {
+                set.add(b' ');
+                set.add_range(0x09, 0x0d);
+            }
+            "upper" => set.add_range(b'A', b'Z'),
+            "word" => {
+                set.add_range(b'0', b'9');
+                set.add_range(b'A', b'Z');
+                set.add_range(b'a', b'z');
+                set.add(b'_');
+            }
+            "xdigit" => {
+                set.add_range(b'0', b'9');
+                set.add_range(b'A', b'F');
+                set.add_range(b'a', b'f');
+            }
+            _ => {
+                return Err(self.err_at(&format!("unknown POSIX class {name:?}"), open));
+            }
+        }
+        Ok(set)
+    }
+
     fn parse_class(&mut self) -> Result<Node, String> {
         let open = self.at;
         self.at += 1;
@@ -994,6 +1058,11 @@ impl Parser<'_> {
                 break;
             }
             first = false;
+            if c == b'[' && self.src.get(self.at + 1) == Some(&b':') {
+                let inner = self.posix_class()?;
+                or_set(&mut set, &inner);
+                continue;
+            }
             if c == b'\\' {
                 let (item, end) = self.class_escape()?;
                 self.at = end;
@@ -1409,6 +1478,25 @@ mod tests {
         assert!(!re.is_match(&hay));
         let took = t.elapsed();
         assert!(took.as_secs_f64() < 2.0, "took {took:?}");
+    }
+
+    #[test]
+    fn posix_bracket_expressions() {
+        let alpha = Regex::new("[[:alpha:]]+").unwrap();
+        assert_eq!(alpha.find(b"abc123"), Some(Match { start: 0, end: 3 }));
+        let digit = Regex::new("[[:digit:]]+").unwrap();
+        assert_eq!(digit.find(b"abc123"), Some(Match { start: 3, end: 6 }));
+        let mixed = Regex::new("[[:alpha:][:digit:]]+").unwrap();
+        assert_eq!(mixed.find(b"abc123"), Some(Match { start: 0, end: 6 }));
+        let negated = Regex::new("[^[:space:]]+").unwrap();
+        assert_eq!(negated.find(b"  ab\tc"), Some(Match { start: 2, end: 4 }));
+        let word = Regex::new("[[:word:]]+").unwrap();
+        assert_eq!(word.find(b" x_1 "), Some(Match { start: 1, end: 4 }));
+        assert!(Regex::new("[[:bogus:]]").is_err());
+        assert!(
+            Regex::new("[[:alpha:]").is_err(),
+            "an unterminated class fails"
+        );
     }
 
     #[test]

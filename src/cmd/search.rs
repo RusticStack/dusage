@@ -43,7 +43,7 @@ OPTIONS:
     -B, --before-context N print N lines before each match
     -C, --context N        print N lines of context around each match (same as -A N -B N)
     -a, --text             search binary files instead of reporting them
-    -j, --threads N        worker threads (default 4x CPU cores)
+    -j, --threads N        worker threads (default: one per core, 4 to 16)
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
     -t, --type NAME        include files of a type: rust, python, js, ts, c, cpp, go, java,
                            ruby, md, json, toml, yaml, sh, html, css, xml, txt, log, lock
@@ -110,13 +110,12 @@ fn take_color_flag(raw: &mut Vec<String>) -> Option<String> {
     mode
 }
 
+/// Colour only for an explicit yes, or for `auto` (and no flag) on a terminal.
 fn color_enabled(mode: Option<&str>) -> bool {
-    match mode.unwrap_or("auto") {
-        "always" | "yes" | "true" => true,
-        "never" | "no" | "false" | "auto" => {
-            mode == Some("auto") || mode.is_none() && std::io::stdout().is_terminal()
-        }
-        _ => false,
+    match mode {
+        Some("always" | "yes" | "true") => true,
+        Some("never" | "no" | "false") => false,
+        _ => std::io::stdout().is_terminal(),
     }
 }
 
@@ -289,19 +288,19 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         }
     }
 
-    // `-g` and `-t` both feed the glob filter.
+    // `-g` is an override filter (ripgrep semantics: it also switches ignore rules off);
+    // `-t` and `--ext` only narrow the results.
     let mut globs: Vec<String> = Vec::new();
     for g in ["-g", "--glob"] {
-        if let Some(v) = a.value(g) {
-            globs.push(v.to_string());
-        }
+        globs.extend(a.values(g).iter().cloned());
     }
-    if let Some(t) = a.value("-t").or(a.value("--type")) {
-        globs.extend(ext_globs(t)?);
+    let mut type_globs: Vec<String> = Vec::new();
+    for t in a.values("-t").iter().chain(a.values("--type").iter()) {
+        type_globs.extend(ext_globs(t)?);
     }
-    if let Some(exts) = a.value("--ext") {
+    for exts in a.values("--ext") {
         for e in exts.split(',').filter(|e| !e.is_empty()) {
-            globs.push(format!("*.{e}"));
+            type_globs.push(format!("*.{e}"));
         }
     }
 
@@ -329,6 +328,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     );
     o.scope = scope;
     o.globs = globs.clone();
+    o.type_globs = type_globs.clone();
     o.hidden = a.flag("--hidden");
     o.no_ignore = a.flag("--no-ignore");
     o.one_filesystem = a.flag("-x") || a.flag("--one-filesystem");
@@ -411,7 +411,8 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             let newer = a.value("--newer").map(parse_age).transpose()?.flatten();
             let now = SystemTime::now();
             let dirs_only = a.flag("--dirs");
-            let files_only = a.flag("--files");
+            // A type filter asks for files: `find -t js` never lists directories.
+            let files_only = a.flag("--files") || (!dirs_only && !type_globs.is_empty());
             r.paths.retain(|c| {
                 if let Some(g) = &glob {
                     if !g.matches(&c.rel, c.is_dir) {
