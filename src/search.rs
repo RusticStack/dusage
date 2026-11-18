@@ -602,15 +602,23 @@ impl<'a> Scanner<'a> {
         }
         let mut start = 0;
         while let Some(pos) = bytes::find_byte(chunk, b'\n', start) {
-            self.line.clear();
-            if !self.carry.is_empty() {
-                self.line.extend_from_slice(&self.carry);
-                self.carry.clear();
-            }
-            self.line.extend_from_slice(&chunk[start..pos]);
-            start = pos + 1;
             self.line_no += 1;
-            if self.emit() {
+            // A line that sits entirely inside this block is matched in place; only a line
+            // continued from the previous block needs the buffer.
+            let stop = if self.carry.is_empty() {
+                self.emit(&chunk[start..pos])
+            } else {
+                let mut buf = std::mem::take(&mut self.line);
+                buf.clear();
+                buf.extend_from_slice(&self.carry);
+                buf.extend_from_slice(&chunk[start..pos]);
+                self.carry.clear();
+                let stop = self.emit(&buf);
+                self.line = buf;
+                stop
+            };
+            start = pos + 1;
+            if stop {
                 self.stopped = true;
                 return;
             }
@@ -632,13 +640,15 @@ impl<'a> Scanner<'a> {
         std::mem::swap(&mut self.line, &mut self.carry);
         self.carry.clear();
         self.line_no += 1;
-        self.emit();
+        let buf = std::mem::take(&mut self.line);
+        self.emit(&buf);
+        self.line = buf;
     }
 
-    /// Run the matcher over the buffered line; true means the file is finished (`-m`).
-    fn emit(&mut self) -> bool {
+    /// Run the matcher over one line; true means the file is finished (`-m`).
+    fn emit(&mut self, line: &[u8]) -> bool {
         handle_line(
-            &self.line,
+            line,
             self.line_no,
             self.o,
             &mut self.history,
