@@ -152,6 +152,22 @@ pub struct SearchReport {
     pub any_match: bool,
 }
 
+impl SearchReport {
+    /// Record one matched file, honouring the modes that do not keep line text.
+    fn files_matched_added(&mut self, got: &FileHits, o: &SearchOptions) {
+        self.stats.files_matched += 1;
+        self.any_match = true;
+        if o.count || o.files_with_matches {
+            self.files.push(FileHits {
+                hits: Vec::new(),
+                ..got.clone()
+            });
+        } else {
+            self.files.push(got.clone());
+        }
+    }
+}
+
 /// One file or directory the walker produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
@@ -350,6 +366,37 @@ fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
 
 /// Search `o.roots`. Files that match are returned with their lines; errors on individual
 /// files are counted, never returned.
+/// Search one in-memory buffer, for `-` on the command line (stdin, a pipe). The buffer is
+/// treated as a single file named `name`: no walk, no ignore rules, no encoding detection.
+pub fn search_buffer(o: &SearchOptions, name: &str, data: &[u8]) -> io::Result<SearchReport> {
+    let t0 = Instant::now();
+    let mut stats = Stats {
+        files_scanned: 1,
+        bytes_scanned: data.len() as u64,
+        ..Default::default()
+    };
+    if bytes::is_binary(data, BINARY_SCAN.min(data.len())) {
+        stats.files_binary += 1;
+    }
+    let mut sc = Scanner::new(o);
+    sc.feed(data);
+    let hit = finished(Path::new(name), o, &mut stats, sc, false)?;
+    let mut report = SearchReport {
+        files: Vec::new(),
+        paths: Vec::new(),
+        stats,
+        any_match: false,
+    };
+    if let Some(f) = hit {
+        report.files_matched_added(&f, o);
+    }
+    if o.files_without_matches {
+        report.any_match = !report.files.is_empty();
+    }
+    report.stats.elapsed = t0.elapsed();
+    Ok(report)
+}
+
 pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
     let t0 = Instant::now();
     let root_dev = if o.one_filesystem {

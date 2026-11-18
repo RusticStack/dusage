@@ -450,3 +450,43 @@ fn a_positive_glob_re_includes_a_dotfile() {
         stdout(&o)
     );
 }
+
+#[test]
+fn standard_input_is_searched_when_piped() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dusage"))
+        .args(["search", "-n", "needle"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"alpha needle\nbeta\n")
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(code(&o), 0);
+    assert!(stdout(&o).contains("1:alpha needle"), "{}", stdout(&o));
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dusage"))
+        .args(["search", "-H", "needle", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"needle here\n")
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert!(
+        stdout(&o).contains("(standard input):needle here"),
+        "{}",
+        stdout(&o)
+    );
+}
