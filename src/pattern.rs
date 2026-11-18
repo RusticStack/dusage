@@ -354,6 +354,21 @@ mod tests {
         let ci = Pattern::new("Needle", false, true, false).unwrap();
         assert!(ci.is_match(b"a NEEDLE b"));
         assert_eq!(ci.fast_literal(), None, "case folding needs the slow path");
+        assert_eq!(
+            ci.kind(),
+            PatternKind::Literal,
+            "a folded literal still scans bytes, not the regex VM"
+        );
+        assert!(
+            ci.finder.is_some(),
+            "the plan is built with the pattern, not per line"
+        );
+        assert_eq!(
+            Pattern::new("nEeDlE", false, true, false)
+                .unwrap()
+                .find_at(b"a NeEdLe b", 0),
+            Some(Match { start: 2, end: 8 })
+        );
         let w = Pattern::new("cat", false, false, true).unwrap();
         assert!(w.is_match(b"a cat."));
         assert!(!w.is_match(b"concatenate"));
