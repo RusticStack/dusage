@@ -116,7 +116,7 @@ the sequential walker.
 | search, frequent literal `-c` | **151** | `rg` 164 / `grep -rI` 144 | **1.1x faster than rg**, 1.05x slower than grep |
 | search, rare literal `-c` | 127 | `rg` 94 | 1.35x slower |
 | search, case-insensitive `-c` | 129 | `rg -i` 98 | 1.3x slower |
-| search, regex `-c` | 348 | `rg` 99 | 3.5x slower |
+| search, regex `-c` | 220 | `rg` 90 / `grep -rIE` 200 | 2.4x slower than rg, level with grep |
 | search `-l` | **142** | `rg -l` 146 | parity |
 | find `*.go` over `/usr` | 384 | `find -name` 369 | parity (1.04x) |
 
@@ -126,10 +126,14 @@ loses are a rare literal and a general regex, both twice or more over ripgrep's 
 
 - **Rare literals** pay a fixed per-block cost the frequent case hides: the block scanner finds
   no match and still has to count the newlines it skipped.
-- **Regexes** run the line-at-a-time path. The lazy DFA makes per-line matching cheap, but the
-  line splitting itself is what a block scanner avoids, and the DFA's leftmost-start recovery
-  walks backwards from the end of the buffer it is handed — sound on a line, quadratic on a
-  block. Closing that gap means a reverse-suffix DFA; it is the open item in `docs/ROADMAP.md`.
+- **Regexes** run the line-at-a-time path. The engine now pulls the longest run of bytes that
+  every match must contain out of the pattern (`[A-Z][a-zA-Z0-9_]*\.go` gives `.go`) and scans
+  for that run before it touches the automaton, which took the counting case from 348 ms to
+  220 ms and the printing case from 480 ms to 330 ms. What is left is the per-line walk itself:
+  the DFA's leftmost-start recovery reads backwards from the end of the buffer it is handed, so
+  a block-scanned regex costs a block per match, and the block scanner can only be turned on
+  for a regex once that walk is bounded by the line rather than the buffer. A reverse-suffix
+  DFA is the open item in `docs/ROADMAP.md`.
 
 Where the wins came from, in order: a parallel walk (every thread reads directories), a
 lazy enumerator that reads types from the dirent and stats only when a mode needs size or mtime,
