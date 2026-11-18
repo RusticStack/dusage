@@ -490,3 +490,32 @@ fn standard_input_is_searched_when_piped() {
         stdout(&o)
     );
 }
+
+#[test]
+fn repeated_patterns_and_match_counts() {
+    let f = Fixture::new("patterns");
+    let o = run(&["search", "-n", "-e", "needle", "-e", "Title"], &f.root);
+    let out = stdout(&o);
+    assert!(out.contains("main.rs:2"), "{out}");
+    assert!(out.contains("README.md:1"), "{out}");
+    let o = run(&["search", "-F", "-e", "a.c", "-e", "zzz"], &f.root);
+    assert_eq!(code(&o), 1, "a literal '.' must not match a wildcard");
+    let o = run(&["search", "-e", "a.c", "-e", "helper"], &f.root);
+    assert_eq!(code(&o), 0, "an unescaped '.' is a wildcard");
+    let o = run(
+        &["search", "--count-matches", "needle", "--no-ignore"],
+        &f.root,
+    );
+    let out = stdout(&o);
+    let total: u64 = out
+        .lines()
+        .map(|l| {
+            l.rsplit(':')
+                .next()
+                .unwrap_or("0")
+                .parse::<u64>()
+                .unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(total, 5, "five needle occurrences: {out}");
+}

@@ -342,12 +342,13 @@ pub fn render_search(
             }
             continue;
         }
-        if o.count {
+        if o.count || o.count_matches {
+            let n = if o.count_matches { f.total } else { f.matches };
             if many {
                 let sep = if o.null { '\0' } else { ':' };
-                writeln!(out, "{}{sep}{}", f.path, f.matches)?;
+                writeln!(out, "{}{sep}{}", f.path, n)?;
             } else {
-                writeln!(out, "{}", f.matches)?;
+                writeln!(out, "{}", n)?;
             }
             continue;
         }
@@ -913,6 +914,7 @@ mod tests {
                     },
                 ],
                 matches: 2,
+                total: 2,
                 binary: false,
             }],
             stats: Stats {
