@@ -536,3 +536,28 @@ fn files_mode_lists_what_a_search_would_read() {
     assert!(out.contains("main.rs"), "{out}");
     assert!(!out.contains("README.md"), "a type filter narrows: {out}");
 }
+
+#[test]
+fn lookaround_backreferences_and_unicode_classes() {
+    let f = Fixture::new("engine");
+    fs::write(
+        f.root.join("eng.txt"),
+        "foo bar\nfoo baz\nabc abc\ncafé ١٢٣ Ωμέγα\n",
+    )
+    .unwrap();
+
+    let o = run(&["search", "-n", "foo(?= bar)"], &f.root);
+    assert!(stdout(&o).contains("eng.txt:1:foo bar"), "{}", stdout(&o));
+    let o = run(&["search", "-n", r"(\w+) \1"], &f.root);
+    assert!(stdout(&o).contains("eng.txt:3:abc abc"), "{}", stdout(&o));
+    let o = run(&["search", "-n", "-P", "foo(?= baz)"], &f.root);
+    assert!(stdout(&o).contains("eng.txt:2:foo baz"), "{}", stdout(&o));
+
+    let o = run(&["search", "-o", r"\p{L}+"], &f.root);
+    let out = stdout(&o);
+    assert!(out.contains("café"), "Unicode letters: {out}");
+    assert!(out.contains("Ωμέγα"), "{out}");
+    let o = run(&["search", "-i", "CAF[É]"], &f.root);
+    assert_eq!(code(&o), 0, "regex -i folds non-ASCII");
+    assert!(stdout(&o).contains("café"), "{}", stdout(&o));
+}
