@@ -51,6 +51,7 @@ OPTIONS:
     --max-filesize SIZE    skip files larger than SIZE (e.g. 10M)
     --max-columns N        truncate printed lines at N bytes
     --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
+    -Z, --null             NUL instead of ':' after each file name (for xargs -0)
     --hidden               also search hidden files and directories
     --no-ignore            do not skip .gitignore/.ignore rules or cache directories
     -x, --one-filesystem   stay on the starting filesystem
@@ -206,6 +207,8 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--one-filesystem",
     "--json",
     "--color",
+    "-Z",
+    "--null",
     "--stats",
     "--help",
     "-V",
@@ -241,6 +244,8 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--one-filesystem",
                 "--json",
                 "--color",
+                "-Z",
+                "--null",
                 "--help",
                 "-V",
                 "--version",
@@ -327,6 +332,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.hidden = a.flag("--hidden");
     o.no_ignore = a.flag("--no-ignore");
     o.one_filesystem = a.flag("-x") || a.flag("--one-filesystem");
+    o.null = a.flag("-Z") || a.flag("--null");
     let json = a.flag("--json");
     let color = color_enabled(color_mode.as_deref());
     if let Some(v) = a.value("-j").or(a.value("--threads")) {
@@ -446,12 +452,16 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             let res = if json {
                 report::render_paths_json(&r, &mut out)
             } else {
-                report::render_paths(&r, long, color, &mut out)
+                report::render_paths(&r, long, color, a.flag("-Z") || a.flag("--null"), &mut out)
             };
             res.and_then(|()| out.flush())
                 .map_err(|e| Fail(1, e.to_string()))?;
+            let errs = r.stats.errors.total();
+            if errs > 0 {
+                eprintln!("dusage: {errs} path(s) could not be read");
+            }
             return if r.paths.is_empty() {
-                Err(Fail(1, String::new()))
+                Err(Fail(if errs > 0 { 2 } else { 1 }, String::new()))
             } else {
                 Ok(())
             };
@@ -462,6 +472,10 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     // a second root guarantees; `-h` and `-H` have already had their say above.
     if o.with_filename.is_none() && (o.roots.iter().any(|p| p.is_dir()) || o.roots.len() > 1) {
         o.with_filename = Some(true);
+    }
+    let errs = report.stats.errors.total();
+    if errs > 0 && !a.flag("-q") && !a.flag("--quiet") {
+        eprintln!("dusage: {errs} path(s) could not be read");
     }
     let stats = a.flag("--stats");
     {
@@ -480,7 +494,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     if report.any_match {
         Ok(())
     } else {
-        Err(Fail(1, String::new()))
+        Err(Fail(if errs > 0 { 2 } else { 1 }, String::new()))
     }
 }
 

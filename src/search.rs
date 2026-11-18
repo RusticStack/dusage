@@ -66,6 +66,8 @@ pub struct SearchOptions {
     pub max_columns: usize,
     /// Force a text encoding, or `None` to detect one per file.
     pub encoding: Option<Encoding>,
+    /// Separate the file name from the rest with a NUL byte (`-Z`/`--null`).
+    pub null: bool,
 }
 
 impl SearchOptions {
@@ -95,6 +97,7 @@ impl SearchOptions {
             text: false,
             max_columns: 0,
             encoding: None,
+            null: false,
         }
     }
 }

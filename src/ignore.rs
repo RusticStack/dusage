@@ -182,14 +182,11 @@ impl IgnoreRules {
         let mark = self.layers.len();
         let mut rules = Vec::new();
         for name in RULE_FILES {
-            let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
-                continue;
-            };
-            for line in text.lines() {
-                if let Some(g) = parse_rule(line) {
-                    rules.push(g);
-                }
-            }
+            read_rules(&dir.join(name), &mut rules);
+        }
+        // A git checkout's own exclude file ranks with its `.gitignore`s.
+        if dir.join(".git").is_dir() {
+            read_rules(&dir.join(".git/info/exclude"), &mut rules);
         }
         if !rules.is_empty() {
             self.layers.push(Layer {
@@ -207,6 +204,18 @@ impl IgnoreRules {
     /// Apply the explicit `--glob` filters. `rel` is relative to the walk root.
     pub fn glob_allows(&self, rel: &str, is_dir: bool) -> bool {
         self.globs.walk_allows(rel, is_dir)
+    }
+}
+
+/// Append every rule of one ignore file; a missing or unreadable file adds nothing.
+fn read_rules(path: &Path, rules: &mut Vec<Glob>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in text.lines() {
+        if let Some(g) = parse_rule(line) {
+            rules.push(g);
+        }
     }
 }
 

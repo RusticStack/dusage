@@ -334,12 +334,17 @@ pub fn render_search(
     let many = o.with_filename.unwrap_or(r.files.len() > 1);
     for f in &r.files {
         if o.files_with_matches || o.files_without_matches {
-            writeln!(out, "{}", f.path)?;
+            if o.null {
+                write!(out, "{}\0", f.path)?;
+            } else {
+                writeln!(out, "{}", f.path)?;
+            }
             continue;
         }
         if o.count {
             if many {
-                writeln!(out, "{}:{}", f.path, f.matches)?;
+                let sep = if o.null { '\0' } else { ':' };
+                writeln!(out, "{}{sep}{}", f.path, f.matches)?;
             } else {
                 writeln!(out, "{}", f.matches)?;
             }
@@ -364,7 +369,11 @@ pub fn render_search(
                 } else {
                     write!(out, "{}", f.path)?;
                 }
-                write!(out, "{colon}")?;
+                if o.null {
+                    write!(out, "\0")?;
+                } else {
+                    write!(out, "{colon}")?;
+                }
             }
             if o.line_numbers {
                 if color {
@@ -452,6 +461,7 @@ pub fn render_paths(
     r: &SearchReport,
     long: bool,
     color: bool,
+    null: bool,
     out: &mut dyn Write,
 ) -> io::Result<()> {
     for c in &r.paths {
@@ -464,6 +474,8 @@ pub fn render_paths(
                 c.rel,
                 if c.is_dir { "/" } else { "" }
             )?;
+        } else if null {
+            write!(out, "{}\0", c.rel)?;
         } else if color {
             writeln!(out, "{}{}{}", color::PATH, c.rel, color::RESET)?;
         } else {
@@ -970,10 +982,10 @@ mod tests {
             ..Default::default()
         };
         let mut v = Vec::new();
-        render_paths(&r, false, false, &mut v).unwrap();
+        render_paths(&r, false, false, false, &mut v).unwrap();
         assert_eq!(String::from_utf8(v).unwrap(), "x.rs\n");
         let mut v = Vec::new();
-        render_paths(&r, true, false, &mut v).unwrap();
+        render_paths(&r, true, false, false, &mut v).unwrap();
         assert_eq!(
             String::from_utf8(v).unwrap(),
             "     1.54 KB  1970-01-01 00:00:00  x.rs\n"

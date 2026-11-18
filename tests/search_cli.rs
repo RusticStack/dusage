@@ -110,7 +110,13 @@ fn flags_case_word_invert_count_list() {
     assert_eq!(code(&o), 0);
     let out = stdout(&o);
     assert_eq!(out.lines().count(), 2, "two files match: {out}");
-    assert!(out.lines().all(|l| !l.contains(':')));
+    // `-l` prints bare paths: no line numbers or match text after a separator (a Windows
+    // path keeps its drive colon, so the check is on the name, not on colons).
+    assert!(
+        out.lines()
+            .all(|l| l.ends_with("main.rs") || l.ends_with("it.rs")),
+        "{out}"
+    );
     let o = run(&["search", "-v", "-c", "needle"], &f.root);
     assert_eq!(code(&o), 0, "inverted search finds non-matching lines");
 }
