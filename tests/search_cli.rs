@@ -638,3 +638,28 @@ fn pattern_file_on_stdin_cannot_also_be_the_haystack() {
     );
     assert!(String::from_utf8_lossy(&o.stdout).contains("needle"));
 }
+
+#[test]
+fn a_closed_pipe_is_not_a_failure() {
+    let f = Fixture::new("epipe");
+    let mut big = String::new();
+    for i in 0..50_000 {
+        big.push_str("needle line ");
+        big.push_str(&i.to_string());
+        big.push('\n');
+    }
+    fs::write(f.root.join("big.txt"), big).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dusage"))
+        .args(["search", "needle", "--no-ignore"])
+        .arg(&f.root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Closing the read end is what `| head` does when it has seen enough.
+    drop(child.stdout.take());
+    let o = child.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(0), "stderr: {err}");
+    assert!(err.is_empty(), "no noise on a closed pipe: {err}");
+}

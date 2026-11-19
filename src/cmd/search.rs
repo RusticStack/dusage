@@ -583,8 +583,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             } else {
                 report::render_paths(&r, long, color, a.flag("-Z") || a.flag("--null"), &mut out)
             };
-            res.and_then(|()| out.flush())
-                .map_err(|e| Fail(1, e.to_string()))?;
+            res.and_then(|()| out.flush()).map_err(Fail::output)?;
             let errs = r.stats.errors.total();
             if errs > 0 {
                 eprintln!("dusage: {errs} path(s) could not be read");
@@ -614,8 +613,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         } else {
             report::render_search(&report, &o, color, &mut out)
         };
-        res.and_then(|()| out.flush())
-            .map_err(|e| Fail(1, e.to_string()))?;
+        res.and_then(|()| out.flush()).map_err(Fail::output)?;
     }
     if stats {
         eprintln!("dusage: {}", report::stats_line(&report));

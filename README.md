@@ -266,7 +266,9 @@ forces one when detection has nothing to go on, which is what Latin-1 text needs
 a NUL in its first 8 KiB is reported as `Binary file X matches` unless `-a` is given.
 
 **Exit codes.** `0` something matched, `1` nothing did, `2` bad arguments or an unreadable
-path. The same three values `dusage` and `fastdel` already use.
+path. The same three values `dusage` and `fastdel` already use. A reader that stops early
+(`dusage search foo | head`) ends the run with `0` and no message, which is what `rg` does and
+what `grep` makes look like a crash.
 
 **vs ripgrep, grep and find.** Not a drop-in replacement, and not trying to be one. There is
 no PCRE2 `-P`, so no lookaround and no backreferences; no multi-line matching (`-U`); no

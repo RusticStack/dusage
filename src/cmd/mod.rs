@@ -21,6 +21,17 @@ impl From<String> for Fail {
     }
 }
 
+impl Fail {
+    /// A write that fails because the reader went away is not a failure: it is the pipeline
+    /// saying it has seen enough. Exit 0 with nothing on stderr, the way ripgrep does.
+    pub fn output(e: std::io::Error) -> Fail {
+        match e.kind() {
+            std::io::ErrorKind::BrokenPipe => Fail(0, String::new()),
+            _ => Fail(1, e.to_string()),
+        }
+    }
+}
+
 const TOP_HELP: &str = "dusage - disk usage, search and cleanup in one binary
 
 USAGE:
