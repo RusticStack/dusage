@@ -1155,15 +1155,51 @@ fn ctx_tables(fold: &[u8; CTX_VALUES]) -> ([u8; 257], [u8; 257]) {
     (before, cur)
 }
 
+/// Group the 256 bytes into the classes no instruction of `prog` can tell apart, and pick one
+/// byte to stand for each: a class moves where any of its bytes moves.
+fn byte_classes(prog: &[Inst<ByteSet>]) -> (Box<[u8; 256]>, Vec<u8>) {
+    let mut classes: Vec<Vec<u8>> = vec![(0..=255u8).collect()];
+    for inst in prog {
+        let Inst::Set(set) = inst else { continue };
+        let mut split = Vec::with_capacity(classes.len() + 1);
+        for class in &classes {
+            let (inside, outside): (Vec<u8>, Vec<u8>) =
+                class.iter().partition(|b| set.contains(**b));
+            if !inside.is_empty() {
+                split.push(inside);
+            }
+            if !outside.is_empty() {
+                split.push(outside);
+            }
+        }
+        classes = split;
+    }
+    let mut class_of = Box::new([0u8; 256]);
+    let mut reps = Vec::with_capacity(classes.len());
+    for (i, class) in classes.iter().enumerate() {
+        reps.push(class[0]);
+        for &b in class {
+            class_of[b as usize] = i as u8;
+        }
+    }
+    (class_of, reps)
+}
+
 /// A lazily built DFA over a byte program, with its transition tables packed flat.
 struct Dfa {
     /// The pc sets the states are keyed on. Entry 0 is the empty set: because the start pc
     /// is re-entered at every position, the empty set *is* the start state.
     sets: Vec<Box<[u32]>>,
     index: HashMap<Vec<u32>, u32>,
-    /// `trans[slot * 256 + byte]` is where the byte leads, already scaled by the context
-    /// count so that a scan adds the next context instead of multiplying.
+    /// `trans[slot * nclass + class[byte]]` is where the byte leads, already scaled by the
+    /// context count so that a scan adds the next context instead of multiplying. Bytes that no
+    /// instruction in the program can tell apart share a class, so the table stays small enough
+    /// to sit in cache and a state is built once per class rather than once per byte.
     trans: Vec<u32>,
+    /// The class of each byte, and one byte standing for each class.
+    class: Box<[u8; 256]>,
+    reps: Vec<u8>,
+    nclass: usize,
     /// Two flags per state: a match ends in it, and nothing at all is alive in it.
     stop: Vec<u8>,
     built: Vec<bool>,
@@ -1180,13 +1216,18 @@ const STOP_ACCEPT: u8 = 1;
 const STOP_SINK: u8 = 2;
 
 impl Dfa {
-    fn new(nctx: usize, raw: Vec<u8>) -> Dfa {
+    fn new(nctx: usize, raw: Vec<u8>, prog: &[Inst<ByteSet>]) -> Dfa {
         let mut index = HashMap::new();
         index.insert(Vec::new(), 0u32);
+        let (class, reps) = byte_classes(prog);
+        let nclass = reps.len();
         Dfa {
             sets: vec![Box::new([])],
             index,
-            trans: vec![0; nctx * 256],
+            trans: vec![0; nctx * nclass],
+            class,
+            reps,
+            nclass,
             stop: vec![0; nctx],
             built: vec![false; nctx],
             built_count: 0,
@@ -1203,7 +1244,8 @@ impl Dfa {
         let id = self.sets.len() as u32;
         self.sets.push(set.to_vec().into_boxed_slice());
         self.index.insert(set.to_vec(), id);
-        self.trans.resize(self.trans.len() + self.nctx * 256, 0);
+        self.trans
+            .resize(self.trans.len() + self.nctx * self.nclass, 0);
         self.stop.resize(self.stop.len() + self.nctx, 0);
         self.built.resize(self.built.len() + self.nctx, false);
         id
@@ -1223,20 +1265,22 @@ impl Dfa {
         self.stop[slot] =
             (if accept { STOP_ACCEPT } else { 0 }) | (if sink { STOP_SINK } else { 0 });
         let mut into = Vec::with_capacity(pcs.len());
-        for b in 0..=255u8 {
+        let reps = std::mem::take(&mut self.reps);
+        for (c, &rep) in reps.iter().enumerate() {
             into.clear();
             for &pc in &pcs {
                 if let Inst::Set(set) = &prog[pc as usize] {
-                    if set.contains(b) {
+                    if set.contains(rep) {
                         into.push(pc + 1);
                     }
                 }
             }
             // `pcs` ascends, so the target set is already sorted and unique.
             if !into.is_empty() {
-                self.trans[slot * 256 + b as usize] = self.intern(&into) * self.nctx as u32;
+                self.trans[slot * self.nclass + c] = self.intern(&into) * self.nctx as u32;
             }
         }
+        self.reps = reps;
         self.built[slot] = true;
         self.built_count += 1;
         true
@@ -1251,8 +1295,9 @@ impl Dfa {
             if !self.prepare(prog, slot) || self.stop[slot] & STOP_ACCEPT != 0 {
                 return Vec::new();
             }
-            for (b, &next) in self.trans[slot * 256..(slot + 1) * 256].iter().enumerate() {
-                escape[b] |= next != 0;
+            let base = slot * self.nclass;
+            for (b, e) in escape.iter_mut().enumerate() {
+                *e |= self.trans[base + self.class[b] as usize] != 0;
             }
         }
         if escape[0x7f..].iter().any(|&e| e) {
@@ -1365,24 +1410,34 @@ struct DfaCache {
 }
 
 thread_local! {
-    static DFAS: RefCell<Vec<DfaCache>> = const { RefCell::new(Vec::new()) };
+    static DFAS: RefCell<(Vec<DfaCache>, u64, usize)> =
+        const { RefCell::new((Vec::new(), 0, 0)) };
 }
 
 /// Run `f` on this thread's DFA for `re`, building it on first use.
 fn with_dfa<T>(re: &Regex, f: impl FnOnce(&mut DfaCache) -> T) -> Option<T> {
     DFAS.with(|cell| {
-        let mut caches = cell.borrow_mut();
-        let i = match caches.iter().position(|c| c.id == re.id) {
-            Some(i) => i,
-            None => {
-                if caches.len() == MAX_CACHED_DFAS {
-                    caches.remove(0);
+        let mut state = cell.borrow_mut();
+        // One pattern is looked up thousands of times in a search, so the last answer is kept:
+        // matching the id alone is enough to reuse it.
+        let i = if state.1 == re.id && state.2 < state.0.len() {
+            state.2
+        } else {
+            let i = match state.0.iter().position(|c| c.id == re.id) {
+                Some(i) => i,
+                None => {
+                    if state.0.len() == MAX_CACHED_DFAS {
+                        state.0.remove(0);
+                    }
+                    state.0.push(DfaCache::new(re));
+                    state.0.len() - 1
                 }
-                caches.push(DfaCache::new(re));
-                caches.len() - 1
-            }
+            };
+            state.1 = re.id;
+            state.2 = i;
+            i
         };
-        Some(f(&mut caches[i]))
+        Some(f(&mut state.0[i]))
     })
 }
 
@@ -1392,8 +1447,8 @@ impl DfaCache {
         let (before_bits, cur_bits) = ctx_tables(&fold);
         DfaCache {
             id: re.id,
-            fwd: Dfa::new(nctx, raw.clone()),
-            rev: Dfa::new(nctx, raw),
+            fwd: Dfa::new(nctx, raw.clone(), &re.prog),
+            rev: Dfa::new(nctx, raw, &re.rprog),
             before_bits,
             cur_bits,
             skip: None,
@@ -1523,7 +1578,8 @@ impl DfaCache {
                     }
                 }
             }
-            let next = self.fwd.trans[slot * 256 + byte as usize];
+            let next =
+                self.fwd.trans[slot * self.fwd.nclass + self.fwd.class[byte as usize] as usize];
             at += 1;
             slot = self.slot(next, Some(byte), hay.get(at).copied());
         }
@@ -1551,7 +1607,8 @@ impl DfaCache {
                 return Some(leftmost);
             }
             let byte = hay[at - 1];
-            let next = self.rev.trans[slot * 256 + byte as usize];
+            let next =
+                self.rev.trans[slot * self.rev.nclass + self.rev.class[byte as usize] as usize];
             at -= 1;
             slot = self.slot(next, at.checked_sub(1).map(|i| hay[i]), Some(byte));
         }
@@ -2518,6 +2575,33 @@ mod tests {
         assert!(Regex::new("a{").unwrap().is_match(b"a{"));
         assert!(Regex::new("|").unwrap().is_match(b""));
         assert!(Regex::new("a{,3}").unwrap().is_match(b"a{,3}"));
+    }
+
+    #[test]
+    fn byte_classes_only_merge_bytes_no_instruction_tells_apart() {
+        let re = Regex::new("[a-f0-9]+x").unwrap();
+        let (class, reps) = byte_classes(&re.prog);
+        assert_ne!(
+            class[b'a' as usize], class[b'g' as usize],
+            "in the class vs not"
+        );
+        assert_eq!(
+            class[b'z' as usize], class[b'y' as usize],
+            "neither is named"
+        );
+        assert!(reps.len() < 256, "the table is smaller than one per byte");
+        // Every byte moves where its class's representative moves, for every set.
+        for inst in &re.prog {
+            let Inst::Set(set) = inst else { continue };
+            for b in 0..=255u8 {
+                let rep = reps[class[b as usize] as usize];
+                assert_eq!(
+                    set.contains(b),
+                    set.contains(rep),
+                    "byte {b} in class {rep}"
+                );
+            }
+        }
     }
 
     #[test]

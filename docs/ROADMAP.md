@@ -268,11 +268,15 @@ those docs were written.
   class of its case variants, which costs program size but no complexity.
 - No multi-line matching (`rg -U`). Matching is per line by construction; `(?s)` only widens
   `.`, it does not let a pattern cross a newline.
-- Regexes still cost about 2.4x ripgrep's time on a general pattern, because they keep the
-  line-at-a-time path: the DFA's leftmost-start recovery reads backwards from the end of the
-  buffer it is handed, which is sound on a line and quadratic on a block, so the block scanner
-  cannot be used for them yet. Bounding that walk by the line an accept lands on needs the
-  reverse automaton to be run in suffix mode; that is the next engine change worth measuring.
+- Regexes still cost about 2x ripgrep's time on a general pattern, and the line-at-a-time path
+  is not the reason any more: the DFA's transition table is keyed by byte classes and the
+  automaton now walks only the lines that hold the mandatory literal run. What is left is the
+  per-line cost of entering the automaton at all — about 60 ns a line against ripgrep's 30 —
+  and the block-scanned alternative was measured three times and lost every time: 0.7-1.5 s
+  against 0.18 s for `[A-Z][a-zA-Z0-9_]*\.go` over `/usr/local/go`, because a bounded reverse
+  walk still ends up re-entering the DFA once per candidate line. A reverse automaton that
+  answers "where does the match start" in one suffix pass over the block is the change that
+  would fix it; that is a new machine, not a tweak.
 - No `--follow`. The walker never follows a symlink, by the same invariant the scanner and
   the pruner keep, and a followed tree needs cycle detection before it can be offered.
 - `dusage find` still collects every path before printing, because its output is the sorted
