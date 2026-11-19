@@ -724,8 +724,9 @@ fn types_unrestricted_and_iglob() {
     );
     assert!(stdout(&o).contains("drop.py"), "{}", stdout(&o));
 
+    // `--type-list` prints the table as globs, which is what `-t` turns into filters.
     let o = run(&["search", "--type-list"], &f.root);
-    assert!(stdout(&o).contains("rust: rs"), "{}", stdout(&o));
+    assert!(stdout(&o).contains("rust: *.rs"), "{}", stdout(&o));
 
     // `-u` drops the ignore rules, `-uu` also takes hidden paths.
     let o = run(&["search", "-l", "needle"], &f.root);
@@ -1149,4 +1150,92 @@ fn find_matching_controls() {
     assert!(stdout(&run(&["find", "-F", "deep"], &dir)).contains("deep.txt"));
     let named = run(&["find", "-F", "-i", "upper"], &dir);
     assert!(stdout(&named).contains("A_upper.TXT"), "{}", stdout(&named));
+}
+
+#[test]
+fn types_can_be_added_and_cleared() {
+    let f = Fixture::new("typetable");
+    let dir = f.root.join("ty");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("x.foo"), "needle\n").unwrap();
+    fs::write(dir.join("y.rs"), "needle\n").unwrap();
+    fs::write(dir.join("z.md"), "needle\n").unwrap();
+
+    // A new type is a set of globs, and `-t` then selects them.
+    let added = stdout(&run(
+        &[
+            "search",
+            "-l",
+            "--type-add",
+            "foo:*.foo",
+            "-t",
+            "foo",
+            "needle",
+        ],
+        &dir,
+    ));
+    assert!(
+        added.contains("x.foo") && !added.contains("y.rs"),
+        "{added}"
+    );
+
+    // `--type-list` prints the table as it stands after the edits.
+    let list = stdout(&run(
+        &["search", "--type-add", "foo:*.foo", "--type-list"],
+        &dir,
+    ));
+    assert!(list.contains("foo: *.foo"), "{list}");
+    assert!(list.contains("rust: *.rs"), "{list}");
+
+    // Naming an existing type adds to it, and `--type-clear` is how one is redefined.
+    let extended = stdout(&run(
+        &[
+            "search",
+            "-l",
+            "--type-add",
+            "rust:*.foo",
+            "-t",
+            "rust",
+            "needle",
+        ],
+        &dir,
+    ));
+    assert!(
+        extended.contains("x.foo") && extended.contains("y.rs"),
+        "{extended}"
+    );
+    let redefined = stdout(&run(
+        &[
+            "search",
+            "-l",
+            "--type-clear",
+            "rust",
+            "--type-add",
+            "rust:*.foo",
+            "-t",
+            "rust",
+            "needle",
+        ],
+        &dir,
+    ));
+    assert!(
+        redefined.contains("x.foo") && !redefined.contains("y.rs"),
+        "{redefined}"
+    );
+
+    // An unknown type is still refused, and `--type-list` accepts a type that is not there.
+    let unknown = run(&["search", "-l", "-t", "nope", "needle"], &dir);
+    assert_eq!(code(&unknown), 2);
+    assert!(
+        stderr(&unknown).contains("unknown type"),
+        "{}",
+        stderr(&unknown)
+    );
+    assert_eq!(
+        code(&run(
+            &["search", "--type-clear", "nope", "-t", "rust", "needle"],
+            &dir
+        )),
+        0
+    );
 }

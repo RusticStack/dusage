@@ -404,6 +404,9 @@ content_case multiline_lines eq rg plain . 'alpha needle\nsecond' '-U -n' '-U -n
 content_case multiline_match_only eq rg plain . 'alpha needle\nsecond' '-U -o' '-U -o' ''
 content_case multiline_no_flag eq rg plain . 'alpha needle\nsecond' '-n' '-n' ''
 content_case multiline_count eq rg plain . 'needle\n' '-U -c' '-U -c' ''
+content_case type_add eq rg plain . needle '--type-add web:*.md -t web -l' '--type-add web:*.md -t web -l' ''
+content_case type_extend known:type-plus rg plain . needle '--type-add rust:+*.md -t rust -l' '--type-add rust:+*.md -t rust -l' ''
+content_case type_clear eq rg plain . needle '--type-clear rust -t rust -l' '--type-clear rust -t rust -l' ''
 content_case quit_matched eq 3 plain . needle -q -q -rqE
 content_case quit_absent eq 3 plain . zzzz-absent -q -q -rqE
 content_case ctx_after eq 3 plain sub needle '-A 1' -A1 '-rE -A 1'

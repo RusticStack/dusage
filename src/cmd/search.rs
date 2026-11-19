@@ -259,35 +259,63 @@ const TYPE_TABLE: &[(&str, &[&str])] = &[
     ("lock", &["lock"]),
 ];
 
-fn ext_globs(t: &str) -> Result<Vec<String>, String> {
-    let exts: &[&str] = match t {
-        "rust" | "rs" => &["rs"],
-        "python" | "py" => &["py", "pyi"],
-        "js" | "javascript" => &["js", "jsx", "mjs", "cjs"],
-        "ts" | "typescript" => &["ts", "tsx"],
-        "c" => &["c", "h"],
-        "cpp" | "cxx" | "c++" => &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
-        "go" => &["go"],
-        "java" => &["java"],
-        "rb" | "ruby" => &["rb"],
-        "md" | "markdown" => &["md", "markdown"],
-        "json" => &["json"],
-        "toml" => &["toml"],
-        "yaml" | "yml" => &["yaml", "yml"],
-        "sh" | "shell" | "bash" => &["sh", "bash", "zsh"],
-        "html" => &["html", "htm"],
-        "css" => &["css"],
-        "xml" => &["xml"],
-        "txt" | "text" => &["txt"],
-        "log" => &["log"],
-        "lock" => &["lock"],
-        other => {
-            return Err(format!(
-                "unknown type {other:?} (see 'dusage search --help' for the list)"
-            ))
+/// The type names the flags accept: the built-in table, then whatever `--type-add` taught
+/// it, minus whatever `--type-clear` removed. A name stands for the globs its extensions
+/// spell, so `-t rust` is `-g '*.rs'` without the side effect of an explicit glob.
+struct Types {
+    table: Vec<(String, Vec<String>)>,
+}
+
+impl Types {
+    fn new() -> Types {
+        Types {
+            table: TYPE_TABLE
+                .iter()
+                .map(|(name, exts)| {
+                    let globs = exts.iter().map(|e| format!("*.{e}")).collect();
+                    (name.to_string(), globs)
+                })
+                .collect(),
         }
-    };
-    Ok(exts.iter().map(|e| format!("*.{e}")).collect())
+    }
+
+    /// `--type-add NAME:GLOB[,GLOB]`, or `NAME:+GLOB` to extend a name that exists.
+    fn add(&mut self, spec: &str) -> Result<(), Fail> {
+        let (name, rest) = spec
+            .split_once(':')
+            .ok_or_else(|| Fail(2, format!("--type-add wants NAME:GLOB, not {spec:?}")))?;
+        let globs = rest
+            .trim_start_matches('+')
+            .split(',')
+            .filter(|g| !g.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if name.is_empty() || globs.is_empty() {
+            return Err(Fail(2, format!("--type-add wants NAME:GLOB, not {spec:?}")));
+        }
+        // Naming a type that already exists adds the globs to it, with or without the `+`,
+        // which is what ripgrep does; `--type-clear` first is how a type gets redefined.
+        match self.table.iter_mut().find(|(n, _)| n == name) {
+            Some((_, have)) => have.extend(globs),
+            None => self.table.push((name.to_string(), globs)),
+        }
+        Ok(())
+    }
+
+    /// `--type-clear NAME`: drop a name, so it can be redefined without `+`. A name that is
+    /// not there is not an error, which is how ripgrep treats it.
+    fn clear(&mut self, name: &str) {
+        self.table.retain(|(n, _)| n != name);
+    }
+
+    fn globs(&self, name: &str) -> Result<Vec<String>, String> {
+        match self.table.iter().find(|(n, _)| n == name) {
+            Some((_, globs)) => Ok(globs.clone()),
+            None => Err(format!(
+                "unknown type {name:?} (see 'dusage search --help' for the list)"
+            )),
+        }
+    }
 }
 
 const SEARCH_VALUE_FLAGS: &[&str] = &[
@@ -299,6 +327,8 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--replace",
     "-T",
     "--type-not",
+    "--type-add",
+    "--type-clear",
     "--iglob",
     "-A",
     "--after-context",
@@ -623,6 +653,23 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         )
     };
     let a = Args::parse(raw, value_flags, bool_flags)?;
+    let mut types = Types::new();
+    for name in a.values("--type-clear").iter() {
+        types.clear(name);
+    }
+    for spec in a.values("--type-add").iter() {
+        types.add(spec)?;
+    }
+    if a.flag("--type-list") {
+        let mut text = String::new();
+        for (name, globs) in &types.table {
+            text.push_str(name);
+            text.push_str(": ");
+            text.push_str(&globs.join(", "));
+            text.push('\n');
+        }
+        return write_out(&text);
+    }
     if a.flag("--help") {
         let text = if scope == Scope::Content {
             SEARCH_HELP
@@ -633,16 +680,6 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     }
     if a.flag("-V") || a.flag("--version") {
         return write_out(&format!("dusage {}\n", env!("CARGO_PKG_VERSION")));
-    }
-    if a.flag("--type-list") {
-        let mut text = String::new();
-        for (name, exts) in TYPE_TABLE {
-            text.push_str(name);
-            text.push_str(": ");
-            text.push_str(&exts.join(", "));
-            text.push('\n');
-        }
-        return write_out(&text);
     }
     let mut multi_pattern = false;
     let mut given: Vec<String> = a.values("-e").to_vec();
@@ -732,11 +769,11 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     }
     let mut type_globs: Vec<String> = Vec::new();
     for t in a.values("-t").iter().chain(a.values("--type").iter()) {
-        type_globs.extend(ext_globs(t)?);
+        type_globs.extend(types.globs(t)?);
     }
-    // `-T` excludes a type: every extension of it becomes an exclusion glob.
+    // `-T` excludes a type: every glob of it becomes an exclusion glob.
     for t in a.values("-T").iter().chain(a.values("--type-not").iter()) {
-        for glob in ext_globs(t)? {
+        for glob in types.globs(t)? {
             type_globs.push(format!("!{glob}"));
         }
     }
