@@ -113,11 +113,12 @@ the sequential walker.
 | Case | dusage | reference | dusage vs it |
 | --- | --- | --- | --- |
 | scan `/usr`, 180k files | **312** | `du -sb` 602 | **1.9x faster** |
-| search, frequent literal (print) | **148** | `rg` 170 / `grep -rI` 135 | **1.15x faster than rg**, 1.1x slower than grep |
-| search, rare literal (print) | **107** | `rg` 100 | parity (1.07x) |
-| search, case-insensitive (print) | **104** | `rg -i` 100 | parity (1.04x) |
-| search, regex (print) | 232 | `rg` 97 / `grep -rIE` 210 | 2.4x slower than rg, level with grep |
-| search `-l` | **110** | `rg -l` 149 | **1.35x faster** |
+| search, frequent literal (print) | **139** | `rg` 153 / `grep -rI` 134 | **1.1x faster than rg**, level with grep |
+| search, rare literal (print) | **95** | `rg` 88 | parity (1.08x) |
+| search, case-insensitive (print) | **108** | `rg -i` 104 | parity (1.04x) |
+| search, regex (print) | 241 | `rg` 89 / `grep -rIE` 224 | 2.7x slower than rg, level with grep |
+| search, regex that never matches | **80** | `rg` 90 | **1.1x faster** |
+| search `-l` | **109** | `rg -l` 149 | **1.37x faster** |
 | find `*.go` over `/usr` | 351 | `find -name` 323 | parity (1.08x) |
 
 Every literal case is now at parity or ahead. The engine scans bytes with the vector unit
