@@ -110,6 +110,10 @@ Prefix with ! to exclude instead. Use --fixed for a plain substring match on the
 
 OPTIONS:
     -F, --fixed            match the pattern as a substring of the path
+    -i, --ignore-case      match the glob without case
+    --name                 match the glob against the file name only
+    --full-path            match the glob against the whole relative path
+    --mindepth N           skip anything fewer than N levels below a root
     -t, --type NAME        restrict to a type (see `dusage search --help` for the list)
     --ext rs,md            restrict to these extensions
     --size +10M            at least 10M; -10M at most; 10M within 5%; repeatable
@@ -581,12 +585,17 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--older",
                 "--newer",
                 "--max-depth",
+                "--mindepth",
                 "--sort",
                 "--sortr",
             ],
             &[
                 "-F",
                 "--fixed",
+                "-i",
+                "--ignore-case",
+                "--name",
+                "--full-path",
                 "--dirs",
                 "--files",
                 "--long",
@@ -897,11 +906,15 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             // The walk takes every path the filters allow; the positional glob decides
             // which of them are results (`--fixed` matches a substring instead).
             let fixed = a.flag("-F") || a.flag("--fixed");
+            let fold = a.flag("-i") || a.flag("--ignore-case");
             let glob = if fixed {
                 None
             } else {
-                Some(Glob::new(&pattern_text)?)
+                Some(Glob::new_with(&pattern_text, fold)?)
             };
+            let name_only = a.flag("--name");
+            let full_path = a.flag("--full-path");
+            let mindepth = unsigned("--mindepth")?.unwrap_or(0);
             o.pattern = Pattern::new(&pattern_text, true, false, false)?;
             o.details = json
                 || a.flag("--long")
@@ -920,13 +933,33 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             // A type filter asks for files: `find -t js` never lists directories.
             let files_only = a.flag("--files") || (!dirs_only && !type_globs.is_empty());
             r.paths.retain(|c| {
+                // `--mindepth` counts levels below the root, so a file in the root is 1.
+                if mindepth > 0 && c.rel.split('/').count() < mindepth {
+                    return false;
+                }
+                let subject = match (name_only, full_path) {
+                    (true, _) => c.rel.rsplit('/').next().unwrap_or(&c.rel),
+                    (false, true) => c.rel.as_str(),
+                    // Without a hint a pattern with no `/` is a name and one with a `/` is a
+                    // path, which is the rule `Glob` already applies.
+                    (false, false) => c.rel.as_str(),
+                };
                 if let Some(g) = &glob {
-                    if !g.matches(&c.rel, c.is_dir) {
+                    if !g.matches(subject, c.is_dir) {
                         return false;
                     }
                 }
-                if fixed && !c.rel.contains(&pattern_text) {
-                    return false;
+                if fixed {
+                    let hit = if fold {
+                        subject
+                            .to_lowercase()
+                            .contains(&pattern_text.to_lowercase())
+                    } else {
+                        subject.contains(&pattern_text)
+                    };
+                    if !hit {
+                        return false;
+                    }
                 }
                 if dirs_only && !c.is_dir || files_only && c.is_dir {
                     return false;

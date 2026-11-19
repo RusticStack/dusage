@@ -1116,3 +1116,37 @@ fn search_zip_expands_gzip() {
         stderr(&broken)
     );
 }
+
+#[test]
+fn find_matching_controls() {
+    let f = Fixture::new("findctl");
+    let dir = f.root.join("fd");
+    fs::create_dir_all(dir.join("a/b")).unwrap();
+    fs::write(dir.join("top.txt"), "x").unwrap();
+    fs::write(dir.join("a/mid.txt"), "x").unwrap();
+    fs::write(dir.join("a/b/deep.txt"), "x").unwrap();
+    fs::write(dir.join("A_upper.TXT"), "x").unwrap();
+
+    // Without a hint a pattern with no `/` is matched against the name.
+    let plain = stdout(&run(&["find", "*.txt"], &dir));
+    assert!(!plain.contains("A_upper.TXT"), "{plain}");
+    assert!(plain.contains("a/b/deep.txt"), "{plain}");
+
+    // `-i` folds the glob, and `--name` says the subject is the file name alone.
+    let folded = stdout(&run(&["find", "-i", "--name", "*.txt"], &dir));
+    assert!(folded.contains("A_upper.TXT"), "{folded}");
+    assert!(folded.contains("a/b/deep.txt"), "{folded}");
+
+    // `--full-path` anchors against the whole relative path.
+    let path = stdout(&run(&["find", "--full-path", "a/*.txt"], &dir));
+    assert_eq!(path.trim(), "a/mid.txt");
+
+    // `--mindepth` counts levels below the root, so a file in the root is 1.
+    let deep = stdout(&run(&["find", "--mindepth", "3", "*"], &dir));
+    assert_eq!(deep.trim(), "a/b/deep.txt");
+
+    // `--fixed` matches a substring, folded with `-i` too.
+    assert!(stdout(&run(&["find", "-F", "deep"], &dir)).contains("deep.txt"));
+    let named = run(&["find", "-F", "-i", "upper"], &dir);
+    assert!(stdout(&named).contains("A_upper.TXT"), "{}", stdout(&named));
+}

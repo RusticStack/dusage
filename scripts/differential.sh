@@ -453,6 +453,8 @@ find_case find_path_glob eq plain . 'sub/*.txt' 'sub -maxdepth 1 -name *.txt'
 find_case find_substring eq plain . '-F deep' '. -path *deep*'
 find_case find_dirs eq plain . '--dirs *' '. -mindepth 1 -type d'
 find_case find_no_match eq plain . '*.nope' '. -name *.nope'
+find_case find_mindepth eq plain . '--mindepth 2 *' '. -mindepth 2'
+find_case find_name_only eq plain . '--name *.md' '. -name *.md'
 
 say ""
 say "== known differences"

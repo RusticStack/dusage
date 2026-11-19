@@ -105,6 +105,9 @@ flag lists in `src/cmd/search.rs`).
 | `--long` | `find -ls`, `find -printf '%s %TY… %p\n'` | Prints size, modification time in UTC, and the relative path, with a trailing `/` for directories (`src/report.rs:463-482`). Directory rows always show size `0 B` and a `-` timestamp, because the enumerator reports 0 for directories (`src/unix/enumerate.rs:61`) and the walk passes `None` for a directory's mtime (`src/search.rs:223-224`). |
 | `--max-depth N` | `find -maxdepth` | Same N+1 offset as `search`. |
 | `-g PATTERN`, `--glob` | `find -path`, `find -prune` | Same include/`!`-exclude filter as `search`, and the same override rule: a positive glob switches ignore rules off. |
+| `-i`, `--ignore-case` | `find -iname` | Folds the glob, or the `--fixed` substring, without changing what it is matched against. |
+| `--name`, `--full-path` | `find -name` / `find -path` | `--name` matches the file name alone, `--full-path` the whole path below the root. Without either, the pattern decides: no `/` means name, a `/` means path — which is `find -name` and `find -path` in one flag. |
+| `--mindepth N` | `find -mindepth N` | Counts levels below each root, so a file in the root is 1. |
 | `--hidden` | no find equivalent | GNU find lists dotfiles like any other name; we skip them unless this flag is given. |
 | `--no-ignore` | no find equivalent | Without it, the built-in cache list and the ignore files apply to `find` too. |
 | `-x`, `--one-filesystem` | `find -xdev` | Device comparison per directory (`src/search.rs:216-222`). |
