@@ -112,13 +112,24 @@ the sequential walker.
 
 | Case | dusage | reference | dusage vs it |
 | --- | --- | --- | --- |
-| scan `/usr`, 180k files | **379** | `du -sb` 663 | **1.7x faster** |
-| search, frequent literal `-c` | **151** | `rg` 164 / `grep -rI` 144 | **1.1x faster than rg**, 1.05x slower than grep |
-| search, rare literal `-c` | 127 | `rg` 94 | 1.35x slower |
-| search, case-insensitive `-c` | 129 | `rg -i` 98 | 1.3x slower |
-| search, regex `-c` | 220 | `rg` 90 / `grep -rIE` 200 | 2.4x slower than rg, level with grep |
-| search `-l` | **142** | `rg -l` 146 | parity |
-| find `*.go` over `/usr` | 384 | `find -name` 369 | parity (1.04x) |
+| scan `/usr`, 180k files | **330** | `du -sb` 620 | **1.9x faster** |
+| search, frequent literal `-c` | **125** | `rg` 175 / `grep -rI` 150 | **1.4x faster than rg** |
+| search, rare literal `-c` | 120 | `rg` 100 | 1.2x slower |
+| search, case-insensitive `-c` | 130 | `rg -i` 95 | 1.35x slower |
+| search, regex `-c` | 205 | `rg` 115 / `grep -rIE` 200 | 1.8x slower than rg, level with grep |
+| search `-l` | **136** | `rg -l` 141 | **1.04x faster** |
+| find `*.go` over `/usr` | 359 | `find -name` 345 | parity (1.04x) |
+
+The last three rows moved with the vector scan: `bytes::find_byte`, the anchor search behind
+every literal pattern and the newline counter now go through `simd::memchr` and `simd::count`
+(AVX2 or SSE2, detected once at startup) on haystacks of 128 bytes or more, and a worker reuses
+one 64 KiB read buffer instead of zeroing a fresh one per file. A frequent literal is now
+faster than ripgrep rather than level with it, and regex counting went from 2.4x to 1.8x behind.
+
+Measurements on the I/O-bound cases are noisy on this box: `/usr` is 7.9 GB and the machine has
+8 GB of RAM, so a search over it cannot stay in page cache. Two runs of the same binary there
+differ by more than 2x. The numbers above are the cached-tree cases, where the spread is a few
+percent.
 
 A frequent literal is now the fastest of the three tools, `-l` is a dead heat with ripgrep, and
 `find` is level with `find(1)` where it used to be 2.4x behind. The two places dusage still

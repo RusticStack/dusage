@@ -275,8 +275,10 @@ those docs were written.
   reverse automaton to be run in suffix mode; that is the next engine change worth measuring.
 - No `--follow`. The walker never follows a symlink, by the same invariant the scanner and
   the pruner keep, and a followed tree needs cycle detection before it can be offered.
-- No mmap. Files are read in 64 KiB blocks; whether mmap wins on warm-cache large files is a
-  benchmark, not a certainty, and it would not change any result.
+- No mmap. Files are read in 64 KiB blocks into a buffer each worker reuses, and mapping large
+  files instead was measured and rejected: on `/usr` the mapping's page faults cost more than
+  `read`'s copy (6.4-7.5 s against 3.7-4.8 s for the same search), and on a page-cached tree
+  the two are within noise.
 - No `.git/info/exclude` and no global `core.excludesFile`, and ignore files are read from
   each root down, so a `.gitignore` above the root does not apply even though ripgrep honours
   it inside a repository.

@@ -115,6 +115,9 @@ fn load8(hay: &[u8], at: usize) -> u64 {
 
 /// Case rule for byte comparisons: `Exact` or `Ci`.
 trait Case {
+    /// True for the exact case, whose anchor byte one vector compare can look for; the folded
+    /// case needs two compares per position and keeps the SWAR loop.
+    const SENSITIVE: bool;
     /// Broadcast of the needle byte as the scan sees it: one target, because the haystack word
     /// is folded first.
     fn target(b: u8) -> u64;
@@ -149,6 +152,8 @@ trait Case {
 struct Exact;
 
 impl Case for Exact {
+    const SENSITIVE: bool = true;
+
     #[inline]
     fn target(b: u8) -> u64 {
         broadcast(b)
@@ -189,6 +194,8 @@ struct Ci;
 const OR20: u64 = 0x2020_2020_2020_2020;
 
 impl Case for Ci {
+    const SENSITIVE: bool = false;
+
     #[inline]
     fn target(b: u8) -> u64 {
         broadcast(b | 0x20)
@@ -367,7 +374,18 @@ fn search_anchor<C: Case>(hay: &[u8], needle: &[u8], from: usize, k: usize) -> O
     let last = hay.len() - n + k;
     let mut at = from + k;
     while at <= last {
-        let p = find_candidate::<C>(hay, needle[k], at, last)?;
+        // The case-sensitive anchor byte is what a vector scan can find; a folded one is two
+        // bytes per position, which only the SWAR loop handles in one pass.
+        let p = match C::SENSITIVE && hay.len() - at >= VECTOR_MIN {
+            true => {
+                let hit = crate::simd::memchr(hay, needle[k], at)?;
+                if hit > last {
+                    return None;
+                }
+                hit
+            }
+            false => find_candidate::<C>(hay, needle[k], at, last)?,
+        };
         let start = p - k;
         if verify::<C>(hay, needle, start) {
             return Some(start);
@@ -645,8 +663,17 @@ pub fn find_byte(hay: &[u8], b: u8, from: usize) -> Option<usize> {
     if from >= hay.len() {
         return None;
     }
+    // A block is worth a vector load per 32 bytes; a line is a few words and the SWAR loop
+    // has less setup to pay.
+    if hay.len() - from >= VECTOR_MIN {
+        return crate::simd::memchr(hay, b, from);
+    }
     find_candidate::<Exact>(hay, b, from, hay.len() - 1)
 }
+
+/// The haystack length from which a vector scan beats the SWAR loop, measured on the two
+/// shapes that call this: 64 KiB blocks and 40-byte lines.
+const VECTOR_MIN: usize = 128;
 
 /// First byte at or after `from` inside one of `ranges`, or None. Every range must lie
 /// below 0x7f: the word test compares the low seven bits of each byte, which is exact only
@@ -722,6 +749,9 @@ pub fn rfind_byte(hay: &[u8], b: u8, before: usize) -> Option<usize> {
 
 /// Number of `b` bytes in hay.
 pub fn count_byte(hay: &[u8], b: u8) -> usize {
+    if hay.len() >= VECTOR_MIN {
+        return crate::simd::count(hay, b);
+    }
     let target = broadcast(b);
     let mut n = 0;
     let mut i = 0;

@@ -51,7 +51,10 @@ delete::delete_entry
 watch::{resolve_root, ChangeSource::open(root), ChangeSource::poll(interval) -> Vec<PathBuf>}
 ```
 
-All `unsafe` and FFI lives under `src/win/` or `src/unix/`; code outside them is safe Rust.
+All `unsafe` and FFI lives under `src/win/`, `src/unix/` or `src/simd.rs`; code
+outside those is safe Rust. `src/simd.rs` is the only non-platform module with
+intrinsics: x86 vector loads for one-byte search and counting, reached only
+after a runtime feature check and always falling back to a portable loop.
 `par_for_each(initial, threads, f)` runs `f(&item, push)` per item; children are
 enqueued via `push`. It stops when the queue is empty and nothing is active.
 
@@ -90,7 +93,7 @@ enqueued via `push`. It stops when the queue is empty and nothing is active.
    `""` prefix keeps its original meaning (all entries) for back-compat.
 5. Deletion/scan callbacks must handle per-entry errors by skipping — a
    locked or vanished file must not abort the run.
-6. **`unsafe` stays under `src/win/` and `src/unix/`**, each block with a
+6. **`unsafe` stays under `src/win/`, `src/unix/` and `src/simd.rs`**, each block with a
    `// SAFETY:` comment and FFI structs checked by size/offset tests.
 
 7. **One platform surface.** `scan.rs`, `prune.rs` and `report.rs` must stay free
