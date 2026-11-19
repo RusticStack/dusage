@@ -11,22 +11,30 @@
 //!
 //! # Sizes
 //!
-//! A size is the file's own byte count (`st_size`), in 1 KiB blocks rounded up per
-//! file: 1000 bytes is one block, 5000 is five. `-b`/`--apparent-size` switch to exact
-//! bytes, `-m` to MiB blocks, `-h`/`--si` to scaled units. GNU du's default is allocated
-//! blocks (`st_blocks`), which counts what a sparse or compressed file really occupies;
-//! this one reports the data itself, so totals do not move with the filesystem, and
-//! `du --apparent-size` is the closest GNU comparison. `-m` keeps du's own rule and
-//! converts a subtree's byte total once, because one megabyte per small file would
-//! report a directory of a thousand 1 KiB files as a gigabyte. A directory inode contributes
-//! nothing to its own size, as with `du --apparent-size`: a directory's `st_size` is
-//! filesystem bookkeeping, not data.
+//! The default is allocation, which is what GNU du reports: the bytes a file really occupies
+//! (`st_blocks * 512` on Linux, the allocation size the Windows enumerator returns), so a
+//! sparse, reflinked or compressed file counts what the disk holds and not the length it
+//! claims. A directory's own allocated blocks are counted too, as du counts them.
+//! `-b`/`--bytes` and `--apparent-size` switch to the apparent size (`st_size`), where a
+//! directory contributes nothing, which is GNU's rule there. Either base is then divided by
+//! the unit exactly once per printed line, so each line converts its own subtree total and a
+//! file's line and the directory above it round independently, as du's do: `-k` is 1 KiB and
+//! the default, `-m` is 1 MiB, `--block-size=SIZE` is any size from one byte up (where `K`
+//! and `KiB` are 1024 and `MB` 1000000), and `-h`/`--si` scale the base instead of dividing
+//! it.
+//!
+//! An entry whose allocated size the enumerator cannot report is charged its apparent size
+//! instead. That is decided by the backend and not by a zero: the Windows `readdir` fallback
+//! has no allocation size (`std`'s metadata stops at EndOfFile) while the batched query
+//! always carries one, and on Linux both backends read `st_blocks`, so there a file that
+//! really occupies nothing — a hole, an empty file — is charged nothing, exactly as du
+//! charges it.
 //!
 //! # Links, hardlinks and errors
 //!
-//! A symlink is counted as the entry it is (its own `st_size`, the length of the
-//! target) and never followed; on Windows every reparse point is treated the same way,
-//! whether or not it points at a directory. Hardlinked files are counted once per run
+//! A symlink is counted as the entry it is — its own blocks by default, its own `st_size`
+//! (the length of the target) under `-b` — and never followed; on Windows every reparse
+//! point is treated the same way, whether or not it points at a directory. Hardlinked files are counted once per run
 //! through a sharded set of `dev << 64 | ino` identities, and the names that lost are
 //! dropped from both the totals and the `-a` listing, exactly as GNU du does.
 //!
@@ -36,8 +44,8 @@
 //!
 //! # Memory
 //!
-//! One node per directory (a parent index, a name, four counters, the entry order) plus,
-//! with `-a`, one record per printed file. The hardlink set holds one 16-byte key per
+//! One node per directory (a parent index, a name, two sets of three counters, the entry
+//! order) plus, with `-a`, one record per printed file. The hardlink set holds one 16-byte key per
 //! distinct inode and is capped at [`MAX_SEEN`] keys, about 100 MB worst case; past the
 //! cap the set stops taking keys, links are counted per name again, and `--stats` says
 //! so.
@@ -64,20 +72,23 @@ USAGE:
     dusage du [PATH...] [OPTIONS]
 
 Each start point is walked in parallel and then printed deepest first, one directory
-per line, with the start point's own line last. Sizes are the apparent size of the
-files, in 1 KiB blocks rounded up per file; -b, -h, --si and -m change the unit.
+per line, with the start point's own line last. Sizes are the allocated size of each
+entry (the blocks it occupies, as du reports), in 1 KiB blocks rounded up per line;
+-b, -h, --si, --block-size and -m change the base or the unit.
 
 OPTIONS:
     -a, --all             print every file as well as every directory
     -s, --summarize       print only the start points (the same as -d 0)
     -c, --total           add a final line labelled `total`
     -d, --max-depth N     print entries at depth <= N; totals still cover the subtree
-    -b, --bytes           sizes in bytes, not blocks
-        --apparent-size   the same as -b
-    -k                    sizes in 1 KiB blocks (the default)
-    -m                    sizes in 1 MiB blocks, the subtree total converted once
-    -h, --human-readable  powers of 1024, one decimal below 10 (4.0K, 13K); sizes in bytes
-        --si              powers of 1000 (4.1k, 13k); sizes in bytes
+    -b, --bytes           apparent sizes (st_size) in bytes, not allocated blocks
+        --apparent-size   apparent sizes, in the default 1 KiB blocks
+    -k                    blocks of 1 KiB of the base in force (the default)
+    -m                    blocks of 1 MiB of the base in force
+        --block-size SIZE divide the base by SIZE before printing: 1, 4096, K (1024),
+                          KiB (1024), MB (1000000), M (1048576), ...
+    -h, --human-readable  powers of 1024 of the base, one decimal below 10 (4.0K, 13K)
+        --si              powers of 1000 (4.1k, 13k)
         --inodes          count entries instead of bytes
     -S, --separate-dirs   a directory's own size excludes its subdirectories
     -t, --threshold SIZE  print only entries >= SIZE, or <= SIZE with a leading `-`
@@ -99,13 +110,19 @@ OPTIONS:
     -V, --version         print the version
 
 SIZES:
-    Apparent size (st_size), rounded up per file into the unit: 1000 bytes is one 1 KiB
-    block and 5000 is five, so a file's own line and the directory above it agree. GNU du
-    defaults to allocated blocks (st_blocks), which is what a sparse or compressed file
-    really occupies, and converts its subtree total once; `du --apparent-size` is the
-    closest GNU mode to this one. Directory inodes contribute nothing to their own size,
-    as with `du --apparent-size`. -m keeps du's total-conversion rule because a per-file
-    megabyte would count every small file as a whole one.
+    The default is the allocated size, as du's is: st_blocks * 512 on Linux and the
+    allocation size on Windows, so a sparse, reflinked or compressed file counts what the
+    disk holds and a directory counts its own blocks. -b/--bytes and --apparent-size count
+    st_size instead, where a directory contributes nothing. The base is divided by the unit
+    once per printed line, so every line converts its own subtree total: 1 KiB by default and
+    with -k, 1 MiB with -m, whatever --block-size asks for, and -h/--si scale the base to
+    powers of 1024 or 1000. -t compares the same figure the line prints.
+
+DIFFERENCES FROM GNU du:
+    -L/--dereference is refused: the walk never follows links. A start point's own blocks
+    are counted on Linux; on Windows std's metadata carries no allocation size for the path
+    itself, so a start point's own blocks count 0 while the directories inside it are
+    counted.
 
 ORDER:
     Lines come out post-order: a directory's entries in listing order, each subdirectory
@@ -199,9 +216,26 @@ impl Seen {
 /// One printed file, kept only under `-a`.
 struct FileRec {
     name: String,
-    bytes: u64,
-    units: u64,
+    apparent: u64,
+    alloc: u64,
     mtime: SystemTime,
+}
+
+/// One directory's worth of bytes and entries, in both bases: the apparent size the files
+/// claim, the size they occupy, and how many entries there are (`--inodes`).
+#[derive(Clone, Copy, Default)]
+struct Counters {
+    apparent: u64,
+    alloc: u64,
+    count: u64,
+}
+
+impl Counters {
+    fn add(&mut self, o: &Counters) {
+        self.apparent += o.apparent;
+        self.alloc += o.alloc;
+        self.count += o.count;
+    }
 }
 
 /// One directory: its own files, its subdirectories, and its totals.
@@ -211,15 +245,14 @@ struct Node {
     depth: usize,
     /// Entries of this directory in listing order, for the deterministic print pass.
     kids: Vec<Kid>,
-    /// Bytes and units of this directory's own files (and, with `--inodes`, itself).
-    own_bytes: u64,
-    own_units: u64,
+    /// This directory's own files plus the directory's own inode (which is why `alloc` is
+    /// seeded from the entry above and `count` from 1).
+    own: Counters,
     /// Totals of the subdirectories that have already finished.
-    sub_bytes: u64,
-    sub_units: u64,
-    /// Subdirectories created and not yet rolled up into `sub_*`.
+    sub: Counters,
+    /// Subdirectories created and not yet rolled up into `sub`.
     pending: usize,
-    /// The listing is finished, so `own_*` are final.
+    /// The listing is finished, so `own` is final.
     listed: bool,
     /// Already rolled up into the parent.
     done: bool,
@@ -236,6 +269,8 @@ enum Pending {
     Dir {
         name: String,
         path: PathBuf,
+        /// The directory's own allocated bytes, from this listing's `statx`.
+        alloc: u64,
         mtime: SystemTime,
     },
     File(FileRec),
@@ -279,12 +314,21 @@ struct Tree {
     dupe_bytes: u64,
 }
 
+/// Which figure of an entry the sizes come from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Base {
+    /// What the entry occupies: `st_blocks * 512` on Linux, the allocation size on Windows.
+    Alloc,
+    /// The bytes the entry claims (`st_size`); `-b`/`--bytes`, `--apparent-size`.
+    Apparent,
+}
+
 /// How sizes are printed.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scale {
-    /// Blocks of `block` bytes, rounded up per file.
+    /// The base divided into `block`-byte units, rounded up per printed line.
     Blocks,
-    /// Bytes, scaled to powers of `base` with `K`/`M`/... suffixes.
+    /// The base scaled to powers of `base` with `K`/`M`/... suffixes.
     Human(u64),
     /// Entry counts, `--inodes`.
     Inodes,
@@ -304,9 +348,10 @@ struct Options {
     total: bool,
     separate: bool,
     scale: Scale,
+    base: Base,
     block: u64,
-    /// Round each file up into its block; false only for `-m` (subtree totals).
-    per_file: bool,
+    /// Unit label a bare `--block-size=KiB` prints, as `du -B KiB` does.
+    block_label: Option<&'static str>,
     threshold: Option<i64>,
     one_filesystem: bool,
     excludes: Vec<Glob>,
@@ -315,15 +360,14 @@ struct Options {
 }
 
 impl Options {
-    /// Output units for one file of `bytes`: one block at least, rounded up. Only at
-    /// 1 KiB and below, where du's own block counts come out the same way; `-m` converts
-    /// a subtree's byte total once, because a per-file megabyte would count every small
-    /// file as a whole one.
-    fn units(&self, bytes: u64) -> u64 {
+    /// The counted figure of one entry: the base the caller asked for, or an entry count.
+    fn figure(&self, c: Counters) -> u64 {
         match self.scale {
-            Scale::Inodes => 1,
-            _ if self.per_file => bytes.div_ceil(self.block),
-            _ => 0,
+            Scale::Inodes => c.count,
+            _ => match self.base {
+                Base::Alloc => c.alloc,
+                Base::Apparent => c.apparent,
+            },
         }
     }
 
@@ -341,12 +385,15 @@ impl Options {
         self.excludes.iter().any(|g| g.matches(rel, is_dir))
     }
 
-    /// The printed form of one entry's total.
-    fn size_text(&self, bytes: u64, units: u64) -> String {
+    /// The printed form of one entry's figure.
+    fn size_text(&self, value: u64) -> String {
         match self.scale {
-            Scale::Human(base) => human(bytes, base),
-            Scale::Blocks if !self.per_file => bytes.div_ceil(self.block).to_string(),
-            _ => units.to_string(),
+            Scale::Human(base) => human(value, base),
+            Scale::Inodes => value.to_string(),
+            Scale::Blocks => match self.block_label {
+                Some(unit) => format!("{}{unit}", value.div_ceil(self.block)),
+                None => value.div_ceil(self.block).to_string(),
+            },
         }
     }
 }
@@ -359,18 +406,21 @@ struct Pass<'a> {
 }
 
 impl Pass<'_> {
-    fn total(&self) -> (u64, u64) {
+    fn total(&self) -> Counters {
         let n = &self.nodes[0];
-        (n.own_bytes + n.sub_bytes, n.own_units + n.sub_units)
+        let mut c = n.own;
+        c.add(&n.sub);
+        c
     }
 
     /// The printed size of a directory: its own size only under `-S`.
-    fn dir_value(&self, n: &Node) -> (u64, u64) {
+    fn dir_value(&self, n: &Node) -> Counters {
         if self.o.separate {
-            (n.own_bytes, n.own_units)
-        } else {
-            (n.own_bytes + n.sub_bytes, n.own_units + n.sub_units)
+            return n.own;
         }
+        let mut c = n.own;
+        c.add(&n.sub);
+        c
     }
 
     fn emit(&self, out: &mut impl Write) -> io::Result<()> {
@@ -392,16 +442,22 @@ impl Pass<'_> {
                     self.emit_dir(*c, depth + 1, &p, out)?;
                 }
                 Kid::File(f) => {
-                    if depth < self.o.max_depth && self.o.wanted(f.bytes) {
+                    let c = Counters {
+                        apparent: f.apparent,
+                        alloc: f.alloc,
+                        count: 1,
+                    };
+                    let v = self.o.figure(c);
+                    if depth < self.o.max_depth && self.o.wanted(v) {
                         let p = join(path, &f.name);
-                        line(self.o, out, f.bytes, f.units, &p, f.mtime)?;
+                        line(self.o, out, v, &p, f.mtime)?;
                     }
                 }
             }
         }
-        let (bytes, units) = self.dir_value(n);
-        if depth <= self.o.max_depth && self.o.wanted(bytes) {
-            line(self.o, out, bytes, units, path, n.mtime)?;
+        let v = self.o.figure(self.dir_value(n));
+        if depth <= self.o.max_depth && self.o.wanted(v) {
+            line(self.o, out, v, path, n.mtime)?;
         }
         Ok(())
     }
@@ -411,12 +467,11 @@ impl Pass<'_> {
 fn line(
     o: &Options,
     out: &mut impl Write,
-    bytes: u64,
-    units: u64,
+    value: u64,
     path: &str,
     mtime: SystemTime,
 ) -> io::Result<()> {
-    let size = o.size_text(bytes, units);
+    let size = o.size_text(value);
     match &o.time {
         None => writeln!(out, "{size}\t{path}"),
         Some(style) => writeln!(out, "{size}\t{}\t{path}", stamp(mtime, style)),
@@ -450,21 +505,46 @@ fn display(name: &OsStr) -> String {
 /// still waiting for a sibling.
 fn roll(st: &mut State, mut idx: usize) {
     loop {
-        let (own_bytes, own_units, sub_bytes, sub_units, parent) = {
+        let (own, sub, parent) = {
             let n = &mut st.nodes[idx];
             if !n.listed || n.pending != 0 || n.done {
                 return;
             }
             n.done = true;
-            (n.own_bytes, n.own_units, n.sub_bytes, n.sub_units, n.parent)
+            (n.own, n.sub, n.parent)
         };
         let Some(p) = parent else { return };
+        let mut sum = own;
+        sum.add(&sub);
         let pn = &mut st.nodes[p];
-        pn.sub_bytes += own_bytes + sub_bytes;
-        pn.sub_units += own_units + sub_units;
+        pn.sub.add(&sum);
         pn.pending -= 1;
         idx = p;
     }
+}
+
+/// Allocated bytes charged for one entry: what the backend reported, or the apparent size
+/// when it reported nothing. A backend without allocations hands back 0 for every entry,
+/// which is "unknown" and not "empty" — a hole only counts as nothing where the filesystem
+/// reports blocks, and it does on Linux on both backends.
+fn charge(apparent: u64, alloc: u64, known: bool) -> u64 {
+    if known {
+        alloc
+    } else {
+        apparent
+    }
+}
+
+/// The charged size of one entry of a listed directory.
+fn alloc_of(e: &Entry, known: bool) -> u64 {
+    charge(e.size, e.alloc, known)
+}
+
+/// Whether a directory's entries carry allocated sizes. The batched enumerator always does;
+/// the `readdir` fallback does on Linux (`lstat` gives `st_blocks`) but not on Windows,
+/// where `std`'s metadata stops at EndOfFile.
+fn allocations_known(plain: bool) -> bool {
+    !plain || !cfg!(windows)
 }
 
 fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
@@ -476,14 +556,15 @@ fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
         errs.record(&e);
         errors.push(format!("cannot read directory '{}': {e}", w.path.display()));
     }
-    let inode = o.scale == Scale::Inodes;
+    let alloc_known = allocations_known(c.plain.load(Ordering::Relaxed));
     let mut pending: Vec<Pending> = Vec::with_capacity(ents.len());
     let mut files = 0u64;
     let mut dirs = 0u64;
     let mut dupes = 0u64;
     let mut dupe_bytes = 0u64;
-    let mut bytes = u64::from(inode);
-    let mut units = u64::from(inode);
+    // This directory's own files. The directory's own entry — its `count` and its blocks —
+    // is seeded when its node is created, so it is counted once.
+    let mut own = Counters::default();
     for e in &ents {
         let reparse = e.is_reparse();
         let is_dir = e.is_dir() && !reparse;
@@ -500,6 +581,7 @@ fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
             pending.push(Pending::Dir {
                 name: display(&e.name),
                 path: w.path.join(&e.name),
+                alloc: if alloc_known { e.alloc } else { 0 },
                 mtime: e.modified(),
             });
             continue;
@@ -510,13 +592,14 @@ fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
             continue;
         }
         files += 1;
-        bytes += e.size;
-        units += o.units(e.size);
+        own.apparent += e.size;
+        own.alloc += alloc_of(e, alloc_known);
+        own.count += 1;
         if o.all {
             pending.push(Pending::File(FileRec {
                 name: display(&e.name),
-                bytes: e.size,
-                units: o.units(e.size),
+                apparent: e.size,
+                alloc: alloc_of(e, alloc_known),
                 mtime: e.modified(),
             }));
         }
@@ -526,7 +609,12 @@ fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
     let mut st = c.state.lock().unwrap_or_else(|e| e.into_inner());
     for p in pending {
         match p {
-            Pending::Dir { name, path, mtime } => {
+            Pending::Dir {
+                name,
+                path,
+                alloc,
+                mtime,
+            } => {
                 let rel = if w.rel.is_empty() {
                     name.clone()
                 } else {
@@ -539,10 +627,12 @@ fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
                     name,
                     depth,
                     kids: Vec::new(),
-                    own_bytes: 0,
-                    own_units: 0,
-                    sub_bytes: 0,
-                    sub_units: 0,
+                    own: Counters {
+                        apparent: 0,
+                        alloc,
+                        count: 1,
+                    },
+                    sub: Counters::default(),
                     pending: 0,
                     listed: false,
                     done: false,
@@ -561,8 +651,7 @@ fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
     }
     {
         let n = &mut st.nodes[w.node];
-        n.own_bytes += bytes;
-        n.own_units += units;
+        n.own.add(&own);
         n.listed = true;
     }
     st.files += files;
@@ -578,8 +667,9 @@ fn walk(c: &Ctx, w: &Work, push: &dyn Fn(Work)) {
     }
 }
 
-/// Walk one start point and return the finished tree.
-fn walk_root(o: &Options, spec: &str, mtime: SystemTime, seen: &Seen) -> Tree {
+/// Walk one start point and return the finished tree. `root_alloc` is the start point's own
+/// allocated size, which no listing above it can supply.
+fn walk_root(o: &Options, spec: &str, mtime: SystemTime, root_alloc: u64, seen: &Seen) -> Tree {
     let path = PathBuf::from(spec);
     let root_dev = o
         .one_filesystem
@@ -590,10 +680,12 @@ fn walk_root(o: &Options, spec: &str, mtime: SystemTime, seen: &Seen) -> Tree {
         name: spec.to_string(),
         depth: 0,
         kids: Vec::new(),
-        own_bytes: 0,
-        own_units: 0,
-        sub_bytes: 0,
-        sub_units: 0,
+        own: Counters {
+            apparent: 0,
+            alloc: root_alloc,
+            count: 1,
+        },
+        sub: Counters::default(),
         pending: 0,
         listed: false,
         done: false,
@@ -779,6 +871,65 @@ fn excludes_of(a: &Args) -> Result<Vec<Glob>, Fail> {
     Ok(out)
 }
 
+/// Allocated bytes of one path, from metadata that is already in hand: `st_blocks * 512` on
+/// Linux. Windows' `std` metadata carries the EndOfFile size and not AllocationSize (only the
+/// batched directory query has that), so a start point's own blocks are `None` there.
+#[cfg(target_os = "linux")]
+fn path_alloc(md: &fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(md.blocks() * 512)
+}
+
+#[cfg(windows)]
+fn path_alloc(_md: &fs::Metadata) -> Option<u64> {
+    None
+}
+
+/// `--block-size=SIZE`, GNU's meaning: a number and an optional unit, where `K` and `KiB`
+/// are 1024 and `KB` 1000. A SIZE that is a bare unit also labels every number it prints, as
+/// `du --block-size=KiB` prints `23KiB`; one with a number in it prints a plain number.
+fn block_size(s: &str) -> Result<(u64, Option<&'static str>), String> {
+    let t = s.trim();
+    let split = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(t.len());
+    let (num, unit) = t.split_at(split);
+    let (mult, label): (u64, Option<&'static str>) = match unit {
+        "" => (1, None),
+        "k" | "K" | "Ki" => (1 << 10, Some("K")),
+        "KiB" => (1 << 10, Some("KiB")),
+        "kB" | "KB" => (1_000, Some("kB")),
+        "M" | "Mi" => (1 << 20, Some("M")),
+        "MiB" => (1 << 20, Some("MiB")),
+        "MB" => (1_000_000, Some("MB")),
+        "G" | "Gi" => (1 << 30, Some("G")),
+        "GiB" => (1 << 30, Some("GiB")),
+        "GB" => (1_000_000_000, Some("GB")),
+        "T" | "Ti" => (1 << 40, Some("T")),
+        "TiB" => (1 << 40, Some("TiB")),
+        "TB" => (1_000_000_000_000, Some("TB")),
+        _ => {
+            return Err(format!(
+                "invalid --block-size unit in {s:?} (use e.g. 1, 4096, K, KiB, M, MB)"
+            ))
+        }
+    };
+    let base = if num.is_empty() {
+        1
+    } else {
+        parse_size(num).map_err(|_| format!("invalid --block-size {s:?}"))?
+    };
+    let block = base
+        .checked_mul(mult)
+        .ok_or_else(|| format!("--block-size too large: {s:?}"))?;
+    if block == 0 {
+        return Err(format!(
+            "invalid --block-size {s:?}: a block is at least one byte"
+        ));
+    }
+    Ok((block, if num.is_empty() { label } else { None }))
+}
+
 fn options(a: &Args) -> Result<Options, Fail> {
     if a.flag("-L") || a.flag("--dereference") {
         return Err(Fail(
@@ -796,18 +947,28 @@ fn options(a: &Args) -> Result<Options, Fail> {
             "cannot both summarize (-s) and show all entries (-a)".to_string(),
         ));
     }
-    let (scale, block) = if a.flag("--inodes") {
-        (Scale::Inodes, 1)
+    let scale = if a.flag("--inodes") {
+        Scale::Inodes
     } else if a.flag("-h") || a.flag("--human-readable") {
-        (Scale::Human(1024), 1)
+        Scale::Human(1024)
     } else if a.flag("--si") {
-        (Scale::Human(1000), 1)
-    } else if a.flag("-b") || a.flag("--bytes") || a.flag("--apparent-size") {
-        (Scale::Blocks, 1)
-    } else if a.flag("-m") {
-        (Scale::Blocks, 1 << 20)
+        Scale::Human(1000)
     } else {
-        (Scale::Blocks, 1 << 10)
+        Scale::Blocks
+    };
+    let bytes = a.flag("-b") || a.flag("--bytes");
+    let base = if bytes || a.flag("--apparent-size") {
+        Base::Apparent
+    } else {
+        Base::Alloc
+    };
+    let (block, block_label) = match a.value("--block-size") {
+        Some(v) => block_size(v).map_err(Fail::from)?,
+        // `-b` is `--apparent-size --block-size=1`; `--apparent-size` alone keeps 1 KiB.
+        None if bytes => (1, None),
+        None if a.flag("-k") => (1 << 10, None),
+        None if a.flag("-m") => (1 << 20, None),
+        None => (1 << 10, None),
     };
     let threshold = match a.value("--threshold").or(a.value("-t")) {
         Some(v) => Some(parse_threshold(v)?),
@@ -824,7 +985,6 @@ fn options(a: &Args) -> Result<Options, Fail> {
         None => None,
     };
     Ok(Options {
-        per_file: block <= 1 << 10,
         threads: match a.value("--threads") {
             Some(v) => parse_threads(v)?,
             None => crate::cli::default_threads(),
@@ -834,7 +994,9 @@ fn options(a: &Args) -> Result<Options, Fail> {
         total: a.flag("-c") || a.flag("--total"),
         separate: a.flag("-S") || a.flag("--separate-dirs"),
         scale,
+        base,
         block,
+        block_label,
         threshold,
         one_filesystem: a.flag("-x") || a.flag("--one-file-system"),
         excludes: excludes_of(a)?,
@@ -846,8 +1008,7 @@ fn options(a: &Args) -> Result<Options, Fail> {
 struct Run {
     o: Options,
     seen: Seen,
-    bytes: u64,
-    units: u64,
+    totals: Counters,
     files: u64,
     dirs: u64,
     dupes: u64,
@@ -861,8 +1022,7 @@ impl Run {
         Run {
             o,
             seen: Seen::new(),
-            bytes: 0,
-            units: 0,
+            totals: Counters::default(),
             files: 0,
             dirs: 0,
             dupes: 0,
@@ -893,15 +1053,21 @@ impl Run {
         let mtime = md.modified().unwrap_or(UNIX_EPOCH);
         if !md.is_dir() {
             let size = md.len();
+            let c = Counters {
+                apparent: size,
+                alloc: path_alloc(&md).unwrap_or(size),
+                count: 1,
+            };
             self.files += 1;
-            self.bytes += size;
-            self.units += self.o.units(size);
-            if self.o.wanted(size) {
-                line(&self.o, out, size, self.o.units(size), spec, mtime)?;
+            self.totals.add(&c);
+            let v = self.o.figure(c);
+            if self.o.wanted(v) {
+                line(&self.o, out, v, spec, mtime)?;
             }
             return Ok(());
         }
-        let tree = walk_root(&self.o, spec, mtime, &self.seen);
+        let root_alloc = path_alloc(&md).unwrap_or(0);
+        let tree = walk_root(&self.o, spec, mtime, root_alloc, &self.seen);
         self.dirs += 1;
         for m in &tree.errors {
             self.error(m.clone());
@@ -917,9 +1083,7 @@ impl Run {
             nodes: &tree.nodes,
         };
         pass.emit(out)?;
-        let (bytes, units) = pass.total();
-        self.bytes += bytes;
-        self.units += units;
+        self.totals.add(&pass.total());
         Ok(())
     }
 }
@@ -947,8 +1111,9 @@ pub fn run(raw: Vec<String>) -> Result<(), Fail> {
     for spec in &roots {
         run.one(spec, &mut out).map_err(Fail::output)?;
     }
-    if run.o.total && run.o.wanted(run.bytes) {
-        line(&run.o, &mut out, run.bytes, run.units, "total", UNIX_EPOCH).map_err(Fail::output)?;
+    let total = run.totals;
+    if run.o.total && run.o.wanted(run.o.figure(total)) {
+        line(&run.o, &mut out, run.o.figure(total), "total", UNIX_EPOCH).map_err(Fail::output)?;
     }
     out.flush().map_err(Fail::output)?;
     let elapsed = started.elapsed();
@@ -985,6 +1150,7 @@ const VALUE_FLAGS: &[&str] = &[
     "-d",
     "--threshold",
     "-t",
+    "--block-size",
     "--exclude",
     "--exclude-from",
     "--time-style",
@@ -1025,4 +1191,72 @@ const BOOL_FLAGS: &[&str] = &[
 /// The du help text, for `dusage --help`.
 pub fn help() -> &'static str {
     DU_HELP
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An entry whose allocated size the backend cannot report is charged its apparent size;
+    /// a reported 0 — a hole, on a filesystem that does count blocks — stays 0.
+    #[test]
+    fn an_unknown_allocation_is_charged_its_apparent_size() {
+        assert_eq!(charge(1 << 20, 0, false), 1 << 20);
+        assert_eq!(charge(1 << 20, 4096, false), 1 << 20);
+        assert_eq!(charge(1 << 20, 0, true), 0);
+        assert_eq!(charge(1 << 20, 4096, true), 4096);
+        // Only Windows' readdir backend loses allocations; Linux reads st_blocks both ways.
+        assert_eq!(allocations_known(true), cfg!(not(windows)));
+        assert!(allocations_known(false));
+    }
+
+    #[test]
+    fn block_size_reads_gnu_units() {
+        assert_eq!(block_size("1"), Ok((1, None)));
+        assert_eq!(block_size("4096"), Ok((4096, None)));
+        assert_eq!(block_size("1K"), Ok((1024, None)));
+        assert_eq!(block_size("K"), Ok((1024, Some("K"))));
+        assert_eq!(block_size("k"), Ok((1024, Some("K"))));
+        assert_eq!(block_size("KiB"), Ok((1024, Some("KiB"))));
+        assert_eq!(block_size("KB"), Ok((1000, Some("kB"))));
+        assert_eq!(block_size("M"), Ok((1 << 20, Some("M"))));
+        assert_eq!(block_size("MB"), Ok((1_000_000, Some("MB"))));
+        assert_eq!(block_size("2K"), Ok((2048, None)));
+        assert!(block_size("0").is_err());
+        assert!(block_size("nonsense").is_err());
+    }
+
+    /// Every line converts its own total once, in whichever base and unit it prints.
+    #[test]
+    fn a_line_costs_one_conversion() {
+        let opts = |scale, base, block, block_label| Options {
+            threads: 1,
+            all: false,
+            max_depth: usize::MAX,
+            total: false,
+            separate: false,
+            scale,
+            base,
+            block,
+            block_label,
+            threshold: None,
+            one_filesystem: false,
+            excludes: Vec::new(),
+            time: None,
+            stats: false,
+        };
+        let sparse = Counters {
+            apparent: 1 << 20,
+            alloc: 8192,
+            count: 1,
+        };
+        let alloc = opts(Scale::Blocks, Base::Alloc, 1024, None);
+        assert_eq!(alloc.size_text(alloc.figure(sparse)), "8");
+        let apparent = opts(Scale::Blocks, Base::Apparent, 1024, None);
+        assert_eq!(apparent.size_text(apparent.figure(sparse)), "1024");
+        let label = opts(Scale::Blocks, Base::Alloc, 1 << 10, Some("KiB"));
+        assert_eq!(label.size_text(label.figure(sparse)), "8KiB");
+        let human = opts(Scale::Human(1024), Base::Alloc, 1, None);
+        assert_eq!(human.size_text(human.figure(sparse)), "8.0K");
+    }
 }
