@@ -36,17 +36,24 @@ A fast disk-usage scanner, a content and path search, and a safe parallel pruner
   tiny files are counted the way Explorer's *Size on disk* counts them. Hardlinked files
   (pnpm stores, `.git` objects) can be counted once (`--dedup-hardlinks`).
 - **Fast.** On Windows, directory entries arrive in large batches with size on disk and file
-  ids included, so there is no per-file call: up to millions of files per second on a warm
-  cache, and a whole 8.4-million-file system drive in about 70 seconds. In an elevated shell
-  `--mft` reads the NTFS master file table instead and does the same drive in about 11 seconds.
-  On Linux one `statx` per entry is enough for the same numbers, at roughly twice `du`'s
-  speed (see [Benchmarks](#benchmarks)).
+  ids included, so there is no per-file call: the figures below come from one development PC
+  (a 13th-gen i7 with an NVMe drive), not from CI, and no Windows benchmark is reproduced by
+  this repository's tests. On Linux one `statx` per entry is enough for the same numbers, and
+  `docs/BENCHMARKS.md` measures search and `du` against `rg`, `grep`, `find` and GNU `du`
+  (see [Benchmarks](#benchmarks)).
 - **`fastdel` gets it back.** It deletes the children of a folder that match a name prefix
   and are older than an age (`7d`, `2h`), in parallel, including inside one huge subtree.
 - **It searches too.** `dusage search` is a `grep`/`rg` replacement for file contents and
-  `dusage find` lists paths, with the same ignore rules in both: your `node_modules`,
+  `dusage find` lists paths (or runs a GNU find expression), with the same ignore rules in
+  both: your `node_modules`,
   `target` and `.gitignore` files are skipped by default, and one positive `-g` overrides
-  them. Files in UTF-16 and Latin-1 are read, not reported as binary. See [Search](#search).
+  them. PCRE-style lookaround and backreferences (`-P`), multi-line matches (`-U`), six
+  compressed formats (`-z`), symlink following (`--follow`) and a reader/writer pair for
+  external tools (`--pre`) are all there. UTF-16 files are detected and read, not reported
+  as binary. See [Search](#search).
+- **`dusage du` speaks du.** The same per-directory report GNU `du` prints, allocated
+  blocks by default, with the totals byte-identical on the trees measured (see
+  [Benchmarks](#benchmarks)).
 - **Safe by design.** Volume roots, Windows, Program Files, ProgramData and your profile are
   refused in every spelling, and on Linux the filesystem root, the system directories, `/home`
   and `$HOME`. Junctions, symlinks and other reparse points are never followed, and a delete
@@ -91,6 +98,7 @@ With Rust installed you can also build and install both tools with
 dusage <root> [OPTIONS]
 dusage scan <root> [OPTIONS]                              (same thing, named)
 dusage big <root> [OPTIONS]                               largest files only
+dusage du [PATH...] [OPTIONS]                             du totals per directory
 dusage <root> [min_big] [threads] [top_n]      (positional form, still supported)
 ```
 
@@ -137,7 +145,7 @@ you want for `dusage /`. Windows mount points are reparse points and are always 
 |---|---|---|
 | `batched` / `auto` backend | `GetFileInformationByHandleEx` batches | `read_dir` + one `statx` per entry |
 | Size on disk (`--on-disk`) | `AllocationSize` | `st_blocks * 512` |
-| Hardlink dedup (`--dedup-hardlinks`) | 128-bit file id | `dev << 64 | ino` |
+| Hardlink dedup (`--dedup-hardlinks`) | 128-bit file id | `dev << 64 \| ino` |
 | `--watch` change feed | NTFS USN journal (elevated) | inotify (no privileges) |
 | `--mft` | raw NTFS `$MFT` | not applicable, refused with a reason |
 | `--streams` | named NTFS streams | no named streams, reports 0 |
@@ -244,27 +252,32 @@ dusage find   [OPTIONS] <glob|substring> [paths...]
 | `dusage find '*.lock'` | paths matching a glob |
 | `dusage find --files --ext rs --long --size +4K '*' src` | size and modification time per file |
 | `dusage find --dirs 's*' .` | directories only |
-| `dusage prune /work --preset cargo --dry` | a saved prefix/age bundle, previewed ([Presets](#presets)) |
+| `dusage find . -name '*.rs' -printf '%p %s\n'` | a find expression, find's own syntax |
+| `dusage search -P '(?<=fn )\w+' src/` | lookbehind, through the backtracking engine |
+| `dusage du -h --max-depth 1 /` | a du report, human units, one level |
 
 **What gets searched.** Hidden entries (a leading `.`) are skipped unless `--hidden` is given.
-Three ignore layers apply in order: the built-in cache list (`.git`, `.hg`, `.svn`,
-`node_modules`, `target`, `__pycache__`, `.venv`, `venv`, `.tox`, `.mypy_cache`,
-`.pytest_cache`, `.ruff_cache`, `.gradle`), then `.gitignore` and `.ignore` read from each
-directory as the walk reaches it (a deeper file wins, `!pattern` re-includes), then your own
-`-g` filters. `--no-ignore` turns the first two off. A **positive** `-g` wins over the ignore
-rules, exactly as in ripgrep, so `-g '*.log'` searches a file `.gitignore` hides while
-`-g '!*.min.js'` excludes. `-t` and `find`'s `--ext` compile to the same globs, so they switch
-the ignore rules off as well.
+The ignore rules stack: the built-in cache list (`.git`, `.hg`, `.svn`, `node_modules`,
+`target`, `__pycache__`, `.venv`, `venv`, `.tox`, `.mypy_cache`, `.pytest_cache`,
+`.ruff_cache`, `.gradle`), `.gitignore` and `.ignore` read from each directory as the walk
+reaches it (a deeper file wins, `!pattern` re-includes), `.git/info/exclude` at a repository
+root, the rule files of a root's ancestors, and git's global excludes file
+(`core.excludesFile`, else `$XDG_CONFIG_HOME/git/ignore`) as the lowest-priority layer. Your
+own `--ignore-file` adds one more. `--no-ignore` turns the file layers off. A **positive** `-g`
+wins over every ignore layer, exactly as in ripgrep, so `-g '*.log'` searches a file
+`.gitignore` hides while `-g '!*.min.js'` excludes. `-t` and `find`'s `--ext` only narrow;
+they never switch the ignore rules off.
 
-**Patterns.** A pattern that is plain text takes a byte-scan fast path; the rest is a
-backtracking-free regular expression engine supporting `. * + ? {n,m}`, byte classes,
-groups and capture references in `-r`, `|`, `^ $ \A \z \b \B`, `\d \w \s` and inline
-`(?i) (?s) (?m)`. Lookaround and backreferences fall back to a bounded backtracking engine
-(`-P` forces it); `\p{...}` classes are refused with an error that names the offset.
-Matching is line by line unless `-U` asks for whole-file matching, where a pattern may span
-newlines. Under `-i` a literal needle folds case per Unicode character (`-i café` matches
-`CAFÉ`), while a regular expression folds ASCII letters only. `-w` treats every byte of a
-non-ASCII character as a word byte, so `-w caf` does not match inside `café`.
+**Patterns.** A pattern that is plain text takes a byte-scan fast path. The rest runs a
+regular expression engine built for this tool: no backtracking, so no pattern can blow up.
+It supports `. * + ? {n,m}`, classes, groups, `|`, `^ $ \A \z \b \B`, `\d \w \s`,
+`\p{L}`-style Unicode categories, POSIX `[[:alpha:]]` classes, and inline `(?i) (?s) (?m)`.
+On a line holding non-ASCII text it switches to a character view, so `\w+` matches `café`
+and `-i 'CAF[É]'` matches `café`. Lookaround and backreferences use a bounded backtracking
+engine instead (`-P` forces it, and the fallback is automatic), with a step budget that turns
+a pathological pattern into a non-match rather than a hang. Matching is line by line unless
+`-U` asks for whole-file matching, where a pattern may span newlines. `-w` treats every byte
+of a non-ASCII character as a word byte, so `-w caf` does not match inside `café`.
 
 **Encodings.** Files are read as UTF-8 by default, and UTF-16LE/BE is detected from a byte
 order mark or the NUL-byte pattern such files have. `--encoding utf-16le|utf-16be|latin1`
@@ -276,27 +289,33 @@ path. The same three values `dusage` and `fastdel` already use. A reader that st
 (`dusage search foo | head`) ends the run with `0` and no message, which is what `rg` does and
 what `grep` makes look like a crash.
 
-**vs ripgrep, grep and find.** The whole everyday surface is here: `-i/-s/-S` case modes,
-`-w`, `-v`, `-F`, `-P`, `-o`, `-r` with capture groups, `-c`, `--count-matches`, `-l`, `-L`,
-`-q`, `-m`, `-A/-B/-C`, `-n`, `--column`, `--byte-offset`, `--heading`, `-H/-h`, `-Z`,
+**vs ripgrep, grep and find.** Almost the whole everyday surface is here: `-i/-s/-S` case
+modes, `-w`, `-v`, `-F`, `-P`, `-o`, `-r` with capture groups, `-c`, `--count-matches`, `-l`,
+`-L`, `-q`, `-m`, `-A/-B/-C`, `-n`, `--column`, `--byte-offset`, `--heading`, `-H/-h`, `-Z`,
 `--json`, `--color`, `-e`, `-f`, `-g`/`--iglob`, `-t`/`-T`/`--type-list`/`--type-add`,
-`-u/-uu/-uuu`, `--hidden`, the `--no-ignore-*` family, `--max-depth`, `--max-filesize`,
-`--max-columns`, `--encoding`, `--sort`/`--sortr`, `--passthru`, `--follow`, `-U` with
-`--multiline-dotall`, and `-z` for gzip. Bundled short flags work (`-in`, `-ilw`, `-inm5`).
+`-u/-uu/-uuu`, `--hidden`, the `--no-ignore-*` family and `--ignore-file`,
+`--max-depth`, `--max-filesize`, `--max-columns`, `--encoding`, `--sort`/`--sortr`,
+`--passthru`, `--follow`, `-U` with `--multiline-dotall`, `-z` over gzip, bzip2, lz4, xz,
+zstd and brotli, and `--pre` with `--pre-glob`. Write flags out one at a time: a bundle such
+as `-in` applies `-i` only.
 
-What is still missing: `--pre` and `--pre-glob`, and the other compressed formats (`-z`
-handles gzip only). Three letters mean something different here, and the difference is
-deliberate: `-L` is `--files-without-match` (grep's meaning) rather than ripgrep's
-`--follow`, which has no short form; `-s` is `--case-sensitive` (ripgrep's meaning) rather
-than grep's `--no-messages`, which is `--no-messages` here; and `-x` is `--one-filesystem`
-rather than grep's whole-line match, which is `--line-regexp`.
+What is still missing from ripgrep: `--no-unicode`, `--glob-case-insensitive`, its long list
+of `--encoding` labels, terminal hyperlinks and the `--debug`/`--trace` diagnostics. Three
+letters mean something different here, and the difference is deliberate: `-L` is
+`--files-without-match` (grep's meaning) rather than ripgrep's `--follow`, which is spelled
+out in full; `-E` is `--extended-regexp` (grep's meaning) rather than ripgrep's `--encoding`;
+and `-x` is `--one-filesystem` rather than grep's whole-line match, which is `--line-regexp`.
+`find` also runs GNU find's own expressions — `dusage find . -name "*.rs" -o -type d`,
+`-printf`, `-ls`, `-size`, `-mtime`, `-perm`, `-prune`, `-maxdepth` and parentheses — with
+one difference in what they print (sorted per directory, not readdir order), and with
+`-exec`/`-execdir` behind an explicit `--allow-exec` because they run commands. `-delete` is
+refused in every spelling.
 
-Ignore files are read from the roots down, so a `.gitignore` above the root,
-`.git/info/exclude` and a global `core.excludesFile` are not consulted. The defaults are
-also more aggressive than ripgrep's: the cache list applies everywhere (outside a
+The defaults are more aggressive than ripgrep's: the cache list applies everywhere (outside a
 git repository too) and `.gitignore` is honoured outside a repository as well. What you get
-back for that: one binary that also scans and prunes, the same behaviour on Windows and Linux,
-UTF-16 and Latin-1 reading, `--json`, and a regex engine with no dependencies at all.
+back for that: one binary that also scans, prunes and prints du totals, the same behaviour on
+Windows and Linux, UTF-16 and Latin-1 reading, `--json`, and a regex engine with no
+dependencies at all.
 
 ## Benchmarks
 
@@ -355,6 +374,24 @@ noise of `du`. Deleting 50,301 entries (300 folders × 100 files): **0.36 s** ag
 `rm -rf` on the same tree. A scan of `/` with `-x` covers this container's 251,816 files in
 about 1 s while skipping the 7 pseudo and nested mounts (`/proc`, `/sys`, `/dev`, `/run`, ...).
 
+**Search and `du`** (from [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), same box, medians, warm
+cache):
+
+| Workload | dusage | reference |
+|---|---|---|
+| search, frequent literal (`-F 'func '`, print) | **139 ms** | `rg` 153, `grep -rI` 134 |
+| search, rare literal | **95 ms** | `rg` 88 |
+| search, case-insensitive | **108 ms** | `rg -i` 104 |
+| search, general regex | 241 ms | `rg` 89, `grep -rIE` 224 |
+| search `-l` | **109 ms** | `rg -l` 149 |
+| find `*.go` over `/usr` | 351 ms | `find -name` 323 |
+| `dusage du -s /usr` | **0.19-0.22 s** | GNU `du` 0.32-0.33 s, same 8,172,786 KiB |
+
+Literals are at parity or ahead, a general regex is still about 2.7× ripgrep, and `-o` is
+about 2.8× ripgrep's clock on the same tree. Peak memory: 15 MB for `search -l` over `/usr`
+against `rg`'s 13 MB, 68 MB for `find '*'` against `find(1)`'s 4.8 MB. Every number, the
+cold-cache pass and the reproducer are in that document.
+
 ## Use it from an AI agent
 
 [`skills/dusage/SKILL.md`](skills/dusage/SKILL.md) is an
@@ -399,8 +436,10 @@ Windows-only).
 ## For developers
 
 dusage is written in Rust with the standard library only: no crates. All platform FFI and
-`unsafe` code lives in `src/win/` and `src/unix/`; everything above them is safe Rust, and
-every Windows struct layout is asserted in tests against the Microsoft documentation.
+`unsafe` code lives in `src/win/` and `src/unix/`, plus the vector intrinsics in
+`src/simd.rs`, each behind a runtime feature check with a portable fallback; everything above
+them is safe Rust, and every Windows struct layout is asserted in tests against the Microsoft
+documentation.
 
 ```bash
 cargo build --release                      # target/release/dusage and fastdel
@@ -422,7 +461,10 @@ src/
   scan.rs       scanner engine and watch mode          (dusage scan, big)
   search.rs     tree walk + content scanner            (dusage search, find)
   pattern.rs    literal / regex dispatch, case and word rules
-  regex.rs      Pike VM over a Thompson NFA, no backtracking
+  regex.rs      Thompson NFA: lazy DFA, Pike VM, byte and character programs
+  pcre.rs       bounded backtracking engine behind -P (lookaround, backrefs)
+  findexpr.rs   GNU find expression language (find's expression form)
+  archive*.rs   std-only gzip, bzip2, lz4, xz, zstd and brotli decoders
   glob.rs       gitignore-style glob matcher
   ignore.rs     ignore layers and -g filters
   bytes.rs      byte primitives: memmem, case folding, word boundaries
