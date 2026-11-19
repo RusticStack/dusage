@@ -1,0 +1,473 @@
+//! End-to-end tests of `dusage du` against a fixture tree with known sizes.
+//!
+//! Every assertion works on the last tab-separated field of a line, with separators
+//! normalised to `/`, so the same expectations hold on Windows and Linux.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// A directory under the system temp dir, removed on drop.
+struct Dir(PathBuf);
+
+impl Dir {
+    fn new(tag: &str) -> Self {
+        let p = std::env::temp_dir().join(format!("dusage_du_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        Dir(p)
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `root/f1000`, `root/f1`, `root/top1024`, `root/sub/{f1024,f5000,deep/f2048}`, `root/empty`.
+///
+/// Bytes: sub 8072, deep 2048, empty 0, root 10097.
+/// 1 KiB blocks rounded up per file: sub 8, deep 2, empty 0, root 11.
+/// Entries for `--inodes`: root 9, sub 5, deep 2, empty 1.
+fn tree(tag: &str) -> (Dir, PathBuf) {
+    let base = Dir::new(tag);
+    let root = base.0.join("root");
+    fs::create_dir_all(root.join("sub/deep")).unwrap();
+    fs::create_dir_all(root.join("empty")).unwrap();
+    fs::write(root.join("f1000"), vec![b'x'; 1000]).unwrap();
+    fs::write(root.join("f1"), b"x").unwrap();
+    fs::write(root.join("top1024"), vec![b'x'; 1024]).unwrap();
+    fs::write(root.join("sub/f1024"), vec![b'x'; 1024]).unwrap();
+    fs::write(root.join("sub/f5000"), vec![b'x'; 5000]).unwrap();
+    fs::write(root.join("sub/deep/f2048"), vec![b'x'; 2048]).unwrap();
+    (base, root)
+}
+
+/// A tree with two sizes that exercise the human formatting: 4 KiB and 10 KiB.
+fn human_tree(tag: &str) -> (Dir, PathBuf) {
+    let base = Dir::new(tag);
+    let root = base.0.join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("f4096"), vec![b'x'; 4096]).unwrap();
+    fs::write(root.join("f10240"), vec![b'x'; 10240]).unwrap();
+    (base, root)
+}
+
+fn du(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_dusage"))
+        .arg("du")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// stdout, whatever the exit code: the error tests need the lines of a failed run.
+#[cfg(unix)]
+fn stdout(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+fn ok(o: &Output) -> String {
+    assert!(
+        o.status.success(),
+        "exit {:?}, stderr: {}",
+        o.status.code(),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    String::from_utf8(o.stdout.clone()).unwrap()
+}
+
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// `(size, path)` for every line, separator normalised, so Windows and Linux agree.
+fn rows(o: &Output) -> Vec<(String, String)> {
+    parse(&ok(o))
+}
+
+/// The same, for a run that is expected to exit non-zero.
+#[cfg(unix)]
+fn rows_any(o: &Output) -> Vec<(String, String)> {
+    parse(&stdout(o))
+}
+
+fn parse(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let mut parts = l.split('\t');
+            let size = parts.next().unwrap_or("").to_string();
+            let path = parts.next_back().unwrap_or("").replace('\\', "/");
+            (size, path)
+        })
+        .collect()
+}
+
+/// The size printed for the entry whose path ends with `rel` (a `/`-separated suffix).
+fn size(rows: &[(String, String)], rel: &str) -> String {
+    let want = format!("/{rel}");
+    rows.iter()
+        .find(|(_, p)| p == rel || p.ends_with(&want))
+        .unwrap_or_else(|| panic!("no line for {rel} in {rows:?}"))
+        .0
+        .clone()
+}
+
+/// The position of the entry whose path ends with `rel`.
+fn at(rows: &[(String, String)], rel: &str) -> usize {
+    let want = format!("/{rel}");
+    rows.iter()
+        .position(|(_, p)| p == rel || p.ends_with(&want))
+        .unwrap_or_else(|| panic!("no line for {rel} in {rows:?}"))
+}
+
+#[test]
+fn blocks_are_rounded_up_per_file_and_printed_deepest_first() {
+    let (_d, root) = tree("blocks");
+    let r = rows(&du(&[root.to_str().unwrap()]));
+    assert_eq!(r.len(), 4, "{r:?}");
+    assert_eq!(size(&r, "deep"), "2");
+    assert_eq!(size(&r, "sub"), "8");
+    assert_eq!(size(&r, "empty"), "0");
+    // Files are not listed without -a, and the start point is the last line.
+    assert!(!r.iter().any(|(_, p)| p.ends_with("f1024")), "{r:?}");
+    assert_eq!(at(&r, "root"), r.len() - 1, "{r:?}");
+    assert_eq!(size(&r, "root"), "11");
+    // A subdirectory is always printed before the directory that contains it.
+    assert!(at(&r, "deep") < at(&r, "sub"));
+    assert!(at(&r, "sub") < at(&r, "root"));
+}
+
+#[test]
+fn bytes_mode_reports_exact_sizes() {
+    let (_d, root) = tree("bytes");
+    let r = rows(&du(&["-b", "-a", root.to_str().unwrap()]));
+    assert_eq!(size(&r, "f1"), "1");
+    assert_eq!(size(&r, "f1000"), "1000");
+    assert_eq!(size(&r, "sub"), "8072");
+    assert_eq!(size(&r, "deep"), "2048");
+    assert_eq!(size(&r, "root"), "10097");
+    // --apparent-size is the same sizing.
+    let a = rows(&du(&["--apparent-size", root.to_str().unwrap()]));
+    assert_eq!(size(&a, "root"), "10097");
+}
+
+#[test]
+fn all_lists_every_file() {
+    let (_d, root) = tree("all");
+    let r = rows(&du(&["-a", root.to_str().unwrap()]));
+    assert_eq!(r.len(), 10, "{r:?}");
+    for (name, want) in [
+        ("f1000", "1"),
+        ("f1", "1"),
+        ("top1024", "1"),
+        ("sub/f1024", "1"),
+        ("sub/f5000", "5"),
+        ("sub/deep/f2048", "2"),
+        ("empty", "0"),
+    ] {
+        assert_eq!(size(&r, name), want, "{name} in {r:?}");
+    }
+    assert!(at(&r, "sub/deep/f2048") < at(&r, "deep"));
+    assert!(at(&r, "sub/f5000") < at(&r, "sub"));
+    assert!(at(&r, "f1000") < at(&r, "root"));
+    assert_eq!(at(&r, "root"), r.len() - 1);
+}
+
+#[test]
+fn summarize_prints_only_the_start_point() {
+    let (_d, root) = tree("summ");
+    let r = rows(&du(&["-s", root.to_str().unwrap()]));
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].0, "11");
+    assert_eq!(
+        r[0].1.replace('\\', "/"),
+        root.to_str().unwrap().replace('\\', "/")
+    );
+    // -d 0 is the same thing.
+    let d = rows(&du(&["-d", "0", root.to_str().unwrap()]));
+    assert_eq!(d, r);
+    // Summary and -a together are refused, as du refuses them.
+    let bad = du(&["-s", "-a", root.to_str().unwrap()]);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
+fn total_adds_a_line_and_sums_every_start_point() {
+    let (_d, root) = tree("total");
+    let r = rows(&du(&["-c", "-s", root.to_str().unwrap()]));
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert_eq!(r[1].0, "11");
+    assert!(r[1].1.ends_with("total") && !r[1].1.contains('/'), "{r:?}");
+    // A second, unrelated tree adds to the same total.
+    let other = root.with_file_name("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("f3000"), vec![b'x'; 3000]).unwrap();
+    let two = rows(&du(&[
+        "-c",
+        "-s",
+        root.to_str().unwrap(),
+        other.to_str().unwrap(),
+    ]));
+    assert_eq!(size(&two, "other"), "3");
+    assert_eq!(two.last().unwrap().0, "14", "{two:?}");
+    assert_eq!(two.last().unwrap().1, "total");
+}
+
+#[test]
+fn max_depth_limits_the_lines_not_the_totals() {
+    let (_d, root) = tree("depth");
+    let r = rows(&du(&["-d", "1", root.to_str().unwrap()]));
+    assert_eq!(r.len(), 3, "{r:?}");
+    assert_eq!(size(&r, "sub"), "8");
+    assert_eq!(size(&r, "empty"), "0");
+    assert_eq!(size(&r, "root"), "11");
+    // Files obey the depth too: only depth-2 files appear under -d 2.
+    let a = rows(&du(&["-a", "-d", "2", root.to_str().unwrap()]));
+    assert!(size(&a, "sub/f1024") == "1", "{a:?}");
+    assert!(!a.iter().any(|(_, p)| p.ends_with("f2048")), "{a:?}");
+}
+
+#[test]
+fn inodes_counts_entries() {
+    let (_d, root) = tree("inodes");
+    let r = rows(&du(&["--inodes", "-a", root.to_str().unwrap()]));
+    assert_eq!(size(&r, "root"), "10");
+    assert_eq!(size(&r, "sub"), "5");
+    assert_eq!(size(&r, "deep"), "2");
+    assert_eq!(size(&r, "empty"), "1");
+    assert_eq!(size(&r, "f5000"), "1");
+}
+
+#[test]
+fn threshold_keeps_small_or_large_entries() {
+    let (_d, root) = tree("thresh");
+    let big = rows(&du(&["-a", "-t", "2048", root.to_str().unwrap()]));
+    for kept in ["root", "sub", "deep", "sub/f5000", "sub/deep/f2048"] {
+        assert!(at(&big, kept) < big.len(), "{kept} missing from {big:?}");
+    }
+    for gone in ["f1024", "f1000", "f1", "top1024", "empty"] {
+        assert!(
+            !big.iter().any(|(_, p)| p.ends_with(&format!("/{gone}"))),
+            "{gone} should be filtered out of {big:?}"
+        );
+    }
+    let small = rows(&du(&["-a", "--threshold=-1024", root.to_str().unwrap()]));
+    for kept in ["f1024", "f1000", "f1", "top1024", "empty"] {
+        assert!(
+            at(&small, kept) < small.len(),
+            "{kept} missing from {small:?}"
+        );
+    }
+    assert!(
+        !small.iter().any(|(_, p)| p.ends_with("/root")),
+        "{small:?}"
+    );
+}
+
+#[test]
+fn separate_dirs_reports_own_size_only() {
+    let (_d, root) = tree("sep");
+    let r = rows(&du(&["-a", "-S", root.to_str().unwrap()]));
+    assert_eq!(size(&r, "sub"), "6");
+    assert_eq!(size(&r, "deep"), "2");
+    assert_eq!(size(&r, "root"), "3");
+}
+
+#[test]
+fn human_sizes_follow_du() {
+    let (_d, root) = human_tree("human");
+    let r = rows(&du(&["-h", "-a", root.to_str().unwrap()]));
+    assert_eq!(size(&r, "f4096"), "4.0K");
+    assert_eq!(size(&r, "f10240"), "10K");
+    assert_eq!(size(&r, "root"), "14K");
+    let si = rows(&du(&["--si", "-a", root.to_str().unwrap()]));
+    assert_eq!(size(&si, "f4096"), "4.1k");
+    assert_eq!(size(&si, "f10240"), "11k");
+    assert_eq!(size(&si, "root"), "15k");
+}
+
+#[test]
+fn hardlinks_count_once_and_stats_say_so() {
+    let (_d, root) = tree("hard");
+    let a = root.join("hard-a");
+    let b = root.join("hard-b");
+    fs::write(&a, vec![b'x'; 4096]).unwrap();
+    if fs::hard_link(&a, &b).is_err() {
+        eprintln!("hard links are not supported here; skipping");
+        return;
+    }
+    let o = du(&["-a", "-b", "--stats", root.to_str().unwrap()]);
+    let r = rows(&o);
+    // One of the two names is charged, the other is dropped from the listing.
+    let counted = [size_of(&r, "hard-a"), size_of(&r, "hard-b")];
+    let sum: u64 = counted
+        .iter()
+        .flatten()
+        .map(|s| s.parse::<u64>().unwrap())
+        .sum();
+    assert_eq!(counted.iter().filter(|v| v.is_some()).count(), 1, "{r:?}");
+    assert_eq!(sum, 4096, "{r:?}");
+    // root is the 11 blocks of the base tree plus one 4 KiB file.
+    assert_eq!(size(&r, "root"), (10097 + 4096).to_string());
+    assert!(
+        stderr(&o).contains("hardlink names already counted"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+fn size_of(rows: &[(String, String)], rel: &str) -> Option<String> {
+    let want = format!("/{rel}");
+    rows.iter()
+        .find(|(_, p)| p == rel || p.ends_with(&want))
+        .map(|(s, _)| s.clone())
+}
+
+#[test]
+fn dereference_is_refused_with_a_pointer_to_find() {
+    let (_d, root) = tree("deref");
+    let o = du(&["-L", root.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(2));
+    let e = stderr(&o);
+    assert!(e.contains("dusage find --follow"), "{e}");
+    // The default, spelled out, is fine.
+    assert!(du(&["-P", root.to_str().unwrap()]).status.success());
+}
+
+#[test]
+fn time_prints_a_stamp_between_size_and_path() {
+    let (_d, root) = tree("time");
+    let s = ok(&du(&["--time", "-s", root.to_str().unwrap()]));
+    let line = s.lines().next().unwrap();
+    let fields: Vec<&str> = line.split('\t').collect();
+    assert_eq!(fields.len(), 3, "{line}");
+    assert!(fields[0].parse::<u64>().is_ok(), "{line}");
+    let stamp = fields[1];
+    assert_eq!(stamp.len(), 16, "{line}");
+    assert_eq!(stamp.as_bytes()[4], b'-', "{line}");
+    assert_eq!(stamp.as_bytes()[10], b' ', "{line}");
+    assert_eq!(stamp.as_bytes()[13], b':', "{line}");
+    // A custom format drops the constant parts it was not asked for.
+    let c = ok(&du(&[
+        "--time",
+        "--time-style=+%Y/%m/%d",
+        "-s",
+        root.to_str().unwrap(),
+    ]));
+    assert_eq!(
+        c.lines().next().unwrap().split('\t').nth(1).unwrap().len(),
+        10
+    );
+}
+
+#[test]
+fn exclude_skips_matching_entries() {
+    let (_d, root) = tree("excl");
+    let r = rows(&du(&["-a", "--exclude", "f*", root.to_str().unwrap()]));
+    assert!(!r.iter().any(|(_, p)| p.contains("f1024")), "{r:?}");
+    assert_eq!(size(&r, "sub"), "0");
+    // top1024 does not match `f*`, so it is still counted.
+    assert_eq!(size(&r, "root"), "1");
+    let sub = rows(&du(&["--exclude", "sub/deep", root.to_str().unwrap()]));
+    assert!(at(&sub, "sub") < sub.len());
+    assert!(!sub.iter().any(|(_, p)| p.ends_with("deep")), "{sub:?}");
+    let from = root.join("patterns");
+    fs::write(&from, "# a comment\n\nsub/f5000\n").unwrap();
+    let f = rows(&du(&[
+        "-a",
+        "--exclude-from",
+        from.to_str().unwrap(),
+        root.to_str().unwrap(),
+    ]));
+    assert!(!f.iter().any(|(_, p)| p.ends_with("f5000")), "{f:?}");
+    assert_eq!(size(&f, "sub"), "3");
+    fs::remove_file(&from).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_directory_is_reported_and_counts_zero() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, root) = tree("deny");
+    let locked = root.join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::write(locked.join("f"), vec![b'x'; 64]).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let o = du(&["-b", root.to_str().unwrap()]);
+    let readable = o.status.success();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    if readable {
+        eprintln!("this user can read an 0000 directory (root?); skipping");
+        return;
+    }
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("cannot read directory"),
+        "{}",
+        stderr(&o)
+    );
+    let r = rows_any(&o);
+    assert_eq!(size(&r, "locked"), "0");
+    assert_eq!(size(&r, "root"), "10097");
+}
+
+#[test]
+fn missing_start_point_fails_but_keeps_the_others() {
+    let (_d, root) = tree("missing");
+    let gone = root.join("nope");
+    let r = du(&["-s", root.to_str().unwrap(), gone.to_str().unwrap()]);
+    assert_eq!(r.status.code(), Some(1));
+    assert!(stderr(&r).contains("cannot access"), "{}", stderr(&r));
+    let s = ok(&du(&[
+        "-s",
+        root.to_str().unwrap(),
+        root.join("sub").to_str().unwrap(),
+    ]));
+    assert_eq!(s.lines().count(), 2, "{s}");
+}
+
+#[test]
+fn help_lists_the_mode_and_no_short_help_flag() {
+    let h = ok(&du(&["--help"]));
+    for needle in [
+        "--max-depth",
+        "--inodes",
+        "--threshold",
+        "--exclude",
+        "--stats",
+    ] {
+        assert!(h.contains(needle), "{needle} missing from help");
+    }
+    // -h is human-readable, so it sizes rather than printing help.
+    let (_d, root) = tree("helpsize");
+    let r = ok(&du(&["-h", "-s", root.to_str().unwrap()]));
+    assert!(
+        r.trim_end()
+            .ends_with(&root.to_string_lossy().replace('\\', "/"))
+            || r.contains("K"),
+        "{r}"
+    );
+    assert!(!r.contains("USAGE"), "-h must not print the help");
+}
+
+#[test]
+fn thread_count_never_changes_the_output() {
+    let (_d, root) = tree("threads");
+    let a = ok(&du(&["-a", "--threads", "1", root.to_str().unwrap()]));
+    let b = ok(&du(&["-a", "--threads", "8", root.to_str().unwrap()]));
+    assert_eq!(a, b);
+}
+
+/// Guard against a start point being walked as a file: `du <file>` is one line.
+#[test]
+fn a_file_start_point_is_one_line() {
+    let (_d, root) = tree("file");
+    let f = root.join("f5000").with_file_name("sub").join("f5000");
+    let r = rows(&du(&["-b", f.to_str().unwrap()]));
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].0, "5000");
+    assert!(Path::new(&r[0].1).ends_with("sub/f5000"), "{r:?}");
+}
