@@ -1335,18 +1335,30 @@ fn rarest_byte(lit: &[u8]) -> Option<u8> {
 // found a match on. Lines that need the character program never get here: they stay on the
 // VM, which is exact for code points and is not where the bytes are.
 //
+// A pattern that reads no assertions has one context, and for those a state's transitions are
+// also kept densely by byte (`Dfa::dense`): the walk is then a single indexed load per byte
+// rather than a class lookup feeding a table lookup. Those rows are capped too, and a state
+// without one falls back to the class-keyed table, so nothing here is ever wrong, only slower.
+//
 // Every state is built on demand and the cache is capped (`MAX_DFA_STATES`); a pattern that
 // blows the cap abandons the DFA for good and the VM answers from then on, so the worst case
 // is the engine this one replaces, never something worse.
 
 /// Cap on the states, and so the 1 KiB transition tables, one pattern may build.
 const MAX_DFA_STATES: usize = 10_000;
+/// Cap on the states that get a dense stride-256 row, and so the 1 MiB a table may take.
+/// Past it the walk falls back to the class-keyed table for the states that have no row.
+const MAX_DENSE_STATES: usize = 1_024;
 /// Byte ranges a scan may skip over, when the start state escapes on few enough bytes: four
 /// keep the word-at-a-time test one masked word wide.
 const MAX_SKIP_RANGES: usize = 4;
 /// Bytes a skip set may hold before skipping is judged not worth the range test — a set this
 /// wide makes up most of what a line is.
 const MAX_SKIP_BYTES: u16 = 48;
+/// Bytes a dense walk's skip set may hold before stepping through them beats scanning for
+/// them. The scan runs at about a byte per 0.19 ns and one indexed load at about 0.2 ns, so
+/// only a start state that escapes on a couple of bytes is worth jumping to.
+const MAX_DENSE_SKIP_BYTES: usize = 4;
 /// Patterns one thread keeps a DFA for. A `search` run holds one; a test that also builds a
 /// second pattern for comparison holds two.
 const MAX_CACHED_DFAS: usize = 2;
@@ -1503,9 +1515,15 @@ struct Dfa {
     class: Box<[u8; 256]>,
     reps: Vec<u8>,
     nclass: usize,
-    /// Two flags per state: a match ends in it, and nothing at all is alive in it.
+    /// `dense[state][byte]` for a program with one context: the same transitions as `trans`
+    /// with the class lookup already resolved, so the walk is one indexed load per byte
+    /// instead of two dependent ones. A row exists for the first `MAX_DENSE_STATES` states
+    /// and none for the rest, which keep the class table; the two agree where both exist.
+    dense: Vec<[u32; 256]>,
+    /// Two flags per state: a match ends in it, and nothing at all is alive in it. A state
+    /// that has not been built yet holds `STOP_UNBUILT`, which is what sends the walk to
+    /// `prepare` without a second table read first.
     stop: Vec<u8>,
-    built: Vec<bool>,
     built_count: usize,
     /// Dense context count, and the raw context each index stands for.
     nctx: usize,
@@ -1517,6 +1535,8 @@ const STOP_ACCEPT: u8 = 1;
 /// Nothing is alive in this state. For a pattern that may only begin at the text start,
 /// reaching one means the rest of the haystack is hopeless.
 const STOP_SINK: u8 = 2;
+/// This slot's transitions have not been built yet.
+const STOP_UNBUILT: u8 = u8::MAX;
 
 impl Dfa {
     fn new(nctx: usize, raw: Vec<u8>, prog: &[Inst<ByteSet>]) -> Dfa {
@@ -1531,8 +1551,12 @@ impl Dfa {
             class,
             reps,
             nclass,
-            stop: vec![0; nctx],
-            built: vec![false; nctx],
+            dense: if nctx == 1 {
+                vec![[0; 256]]
+            } else {
+                Vec::new()
+            },
+            stop: vec![STOP_UNBUILT; nctx],
             built_count: 0,
             nctx,
             raw,
@@ -1549,14 +1573,16 @@ impl Dfa {
         self.index.insert(set.to_vec(), id);
         self.trans
             .resize(self.trans.len() + self.nctx * self.nclass, 0);
-        self.stop.resize(self.stop.len() + self.nctx, 0);
-        self.built.resize(self.built.len() + self.nctx, false);
+        if self.nctx == 1 && self.dense.len() < MAX_DENSE_STATES {
+            self.dense.push([0; 256]);
+        }
+        self.stop.resize(self.stop.len() + self.nctx, STOP_UNBUILT);
         id
     }
 
     /// Build the transitions of one state on first use. `false` means the state cap is hit.
     fn prepare(&mut self, prog: &[Inst<ByteSet>], slot: usize) -> bool {
-        if self.built[slot] {
+        if self.stop[slot] != STOP_UNBUILT {
             return true;
         }
         if self.built_count == MAX_DFA_STATES {
@@ -1583,8 +1609,12 @@ impl Dfa {
                 self.trans[slot * self.nclass + c] = self.intern(&into) * self.nctx as u32;
             }
         }
+        if let Some(row) = self.dense.get_mut(pid) {
+            for (b, into) in row.iter_mut().enumerate() {
+                *into = self.trans[slot * self.nclass + self.class[b] as usize];
+            }
+        }
         self.reps = reps;
-        self.built[slot] = true;
         self.built_count += 1;
         true
     }
@@ -1725,8 +1755,9 @@ struct DfaCache {
     /// index without a branch.
     before_bits: [u8; 257],
     cur_bits: [u8; 257],
-    /// Bytes that leave the start state, for the forward walk to skip over: `None` until
-    /// the first scan works them out.
+    /// Bytes that leave the start state, for a walk to jump over: `None` until the first scan
+    /// works them out. A dense walk reads it too, but only for a set narrow enough that the
+    /// scan costs less than the loads it replaces.
     skip: Option<Vec<(u8, u8)>>,
     /// Nothing can begin anywhere but at the start of the haystack, so a forward state with
     /// nothing alive ends the search.
@@ -1886,12 +1917,90 @@ impl DfaCache {
         if self.skip.is_none() {
             self.skip = Some(self.fwd.skip_set(prog));
         }
-        let mut at = start;
-        let mut slot = self.slot(
+        if self.fwd.nctx == 1 {
+            return self.forward_dense(prog, hay, start, hopeless);
+        }
+        let slot = self.slot(
             0,
             start.checked_sub(1).map(|i| hay[i]),
             hay.get(start).copied(),
         );
+        self.forward_slots(prog, hay, start, slot, hopeless)
+    }
+
+    /// The forward walk over a program with one context: a state's row is fetched once and
+    /// every byte in it is one indexed load, until the byte that leaves the state.
+    fn forward_dense(
+        &mut self,
+        prog: &[Inst<ByteSet>],
+        hay: &[u8],
+        start: usize,
+        hopeless: bool,
+    ) -> Option<Option<usize>> {
+        let mut at = start;
+        let mut state = 0u32;
+        let skip = self.skip.as_ref().filter(|ranges| {
+            !ranges.is_empty()
+                && ranges
+                    .iter()
+                    .map(|&(lo, hi)| (hi - lo) as usize + 1)
+                    .sum::<usize>()
+                    <= MAX_DENSE_SKIP_BYTES
+        });
+        'states: loop {
+            let mut stop = self.fwd.stop[state as usize];
+            if stop == STOP_UNBUILT {
+                if !self.fwd.prepare(prog, state as usize) {
+                    return None;
+                }
+                stop = self.fwd.stop[state as usize];
+            }
+            if stop & STOP_ACCEPT != 0 {
+                return Some(Some(at));
+            }
+            if stop & STOP_SINK != 0 && hopeless {
+                return Some(None);
+            }
+            if state == 0 && !hopeless {
+                if let Some(ranges) = skip {
+                    match crate::bytes::find_in_ranges(hay, ranges, at) {
+                        Some(next) if next > at => {
+                            at = next;
+                            continue 'states;
+                        }
+                        Some(_) => {}
+                        None => return Some(None),
+                    }
+                }
+            }
+            let Some(row) = self.fwd.dense.get(state as usize) else {
+                return self.forward_slots(prog, hay, at, state as usize, hopeless);
+            };
+            loop {
+                let Some(&byte) = hay.get(at) else {
+                    return Some(None);
+                };
+                at += 1;
+                let next = row[byte as usize];
+                if next != state {
+                    state = next;
+                    continue 'states;
+                }
+            }
+        }
+    }
+
+    /// The forward walk over the class-keyed table, for a program with several contexts and
+    /// for the states past the dense cap.
+    fn forward_slots(
+        &mut self,
+        prog: &[Inst<ByteSet>],
+        hay: &[u8],
+        start: usize,
+        mut slot: usize,
+        hopeless: bool,
+    ) -> Option<Option<usize>> {
+        let mut at = start;
         loop {
             if !self.fwd.prepare(prog, slot) {
                 return None;
@@ -1943,8 +2052,65 @@ impl DfaCache {
         hay: &[u8],
         floor: usize,
     ) -> Option<Option<usize>> {
+        if self.rev.nctx == 1 {
+            return self.reverse_dense(rprog, hay, floor);
+        }
+        let at = hay.len();
+        let slot = self.slot(0, at.checked_sub(1).map(|i| hay[i]), None);
+        self.reverse_slots(rprog, hay, floor, at, slot)
+    }
+
+    /// The reverse walk over a program with one context, the mirror of `forward_dense`. A
+    /// state accepts at every position it covers, so a run of one state reports the leftmost
+    /// position it reaches, which is the one it leaves at.
+    fn reverse_dense(
+        &mut self,
+        rprog: &[Inst<ByteSet>],
+        hay: &[u8],
+        floor: usize,
+    ) -> Option<Option<usize>> {
         let mut at = hay.len();
-        let mut slot = self.slot(0, at.checked_sub(1).map(|i| hay[i]), None);
+        let mut state = 0u32;
+        let mut leftmost = None;
+        'states: loop {
+            let mut stop = self.rev.stop[state as usize];
+            if stop == STOP_UNBUILT {
+                if !self.rev.prepare(rprog, state as usize) {
+                    return None;
+                }
+                stop = self.rev.stop[state as usize];
+            }
+            let accepts = stop & STOP_ACCEPT != 0;
+            let Some(row) = self.rev.dense.get(state as usize) else {
+                return self.reverse_slots(rprog, hay, floor, at, state as usize);
+            };
+            while at > floor {
+                let next = row[hay[at - 1] as usize];
+                at -= 1;
+                if next != state {
+                    if accepts {
+                        leftmost = Some(at + 1);
+                    }
+                    state = next;
+                    continue 'states;
+                }
+            }
+            if accepts {
+                leftmost = Some(at);
+            }
+            return Some(leftmost);
+        }
+    }
+
+    /// The reverse walk over the class-keyed table.
+    fn reverse_slots(
+        &mut self,
+        rprog: &[Inst<ByteSet>],
+        hay: &[u8],
+        floor: usize,
+        mut at: usize,
+        mut slot: usize,
+    ) -> Option<Option<usize>> {
         let mut leftmost = None;
         loop {
             if !self.rev.prepare(rprog, slot) {
