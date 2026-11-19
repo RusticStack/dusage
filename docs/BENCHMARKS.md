@@ -157,8 +157,8 @@ Peak resident set (`/usr/bin/time -f '%M'`), measured on the same box:
 
 | Case | dusage | reference |
 | --- | --- | --- |
-| search `-l` over `/usr` (162k files, 7.9 GB) | **70 MB** | `rg` 13 MB |
-| search `-c` over `/usr/local/go` (15.6k files) | 18 MB | `rg` 9 MB, `grep` 4.6 MB |
+| search `-l` over `/usr` (162k files, 7.9 GB) | **15 MB** | `rg` 13 MB |
+| search `-c` over `/usr/local/go` (15.6k files) | **10 MB** | `rg` 9 MB, `grep` 4.6 MB |
 | search `-c` over one 550 MB binary | **3.3 MB** | — |
 | search `-c` over one 224 MB text file | **3.1 MB** | `rg` 233 MB |
 | scan `/usr` (180k files) | 7 MB | `du -sb` 4.3 MB |
@@ -170,9 +170,10 @@ Three of those rows are deliberate and one is not:
   then a megabyte at a time. ripgrep maps the file, so its resident set is the file.
 - **A binary file is scanned for one match and no line structure at all**, which is why a 550 MB
   executable costs 3.3 MB and 0.09 s against 91 MB and 0.30 s before.
-- **A tree costs more than ripgrep** because the walk collects its candidates before the readers
-  start: 162k candidates at roughly 350 bytes each, plus the line buffers a worker reuses. Cutting
-  that means feeding files to the workers as they are found, with a bounded queue.
+- **A tree is now within a couple of megabytes of ripgrep**: a worker that lists a directory scans
+  the files in it before taking the next directory, so the queue carries directories and a
+  directory's files live only while it is being read. Before that change the walk collected all
+  162k candidates first and the peak was 228 MB.
 - **`find` costs the most** for the same reason, and here the candidates *are* the output.
 
 ## Thread defaults

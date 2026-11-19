@@ -347,7 +347,9 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
 /// List every candidate under the roots, in a deterministic order. Directories are read by
 /// every worker thread at once, so the walk costs a fraction of its sequential time on a
 /// tree with many directories.
-fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
+/// The jobs a walk starts from: the roots that are directories, plus the files named directly
+/// on the command line, which are taken as given.
+fn root_jobs(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Vec<WalkJob>, Stats) {
     let mut all: Vec<Candidate> = Vec::new();
     let mut stats = Stats::default();
     let mut jobs: Vec<WalkJob> = Vec::new();
@@ -395,6 +397,11 @@ fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
             }
         }
     }
+    (all, jobs, stats)
+}
+
+fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
+    let (mut all, jobs, mut stats) = root_jobs(o, root_dev);
     if !jobs.is_empty() {
         let want_dirs = o.scope == Scope::Paths;
         let threads = o.threads.max(1);
@@ -494,7 +501,6 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
     } else {
         0
     };
-    let (cands, mut stats) = walk(o, root_dev);
     let mut report = SearchReport {
         paths: Vec::new(),
         files: Vec::new(),
@@ -502,42 +508,21 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
         any_match: false,
     };
     if o.scope == Scope::Paths {
+        let (cands, stats) = walk(o, root_dev);
         report.paths = cands;
         report.stats = stats;
         report.any_match = !report.paths.is_empty();
         report.stats.elapsed = t0.elapsed();
         return Ok(report);
     }
-    if o.quiet {
-        for c in &cands {
-            match scan_file(&c.path, o, &mut stats) {
-                Ok(Some(f)) if f.matches > 0 => {
-                    report.any_match = true;
-                    report.stats = stats;
-                    report.stats.elapsed = t0.elapsed();
-                    return Ok(report);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    if e.kind() != io::ErrorKind::NotFound {
-                        stats.errors.record(&e);
-                    }
-                }
-            }
-        }
-        report.stats = stats;
-        report.stats.elapsed = t0.elapsed();
-        return Ok(report);
-    }
-    // Only the files that matched are kept, and the paths are borrowed from the candidate list
-    // rather than cloned into a second one: on a 162k-file tree the clone alone was 22 MB.
+    // Content scope: one pass. A worker that lists a directory scans the files it found before
+    // it takes the next directory, so the tree is never held in memory: the queue carries
+    // directories, and a directory's files live only while it is being read.
+    let (direct, jobs, mut stats) = root_jobs(o, root_dev);
     let shared: Mutex<(Vec<FileHits>, Stats)> = Mutex::new((Vec::new(), Stats::default()));
-    let items: Vec<(usize, &Path)> = cands
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (i, c.path.as_path()))
-        .collect();
-    par_for_each(items, o.threads, |(_, path), _push| {
+    // `-q` answers the first match it sees and asks the rest of the walk to stop early.
+    let found_one = std::sync::atomic::AtomicBool::new(false);
+    let scan_one = |path: &Path, shared: &Mutex<(Vec<FileHits>, Stats)>, early: bool| {
         let mut local = Stats::default();
         let got = match scan_file(path, o, &mut local) {
             Ok(got) => got,
@@ -550,24 +535,61 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
         };
         let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(hit) = got {
+            if early && hit.matches > 0 {
+                found_one.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             guard.0.push(hit);
         }
-        let agg = &mut guard.1;
-        agg.files_scanned += local.files_scanned;
-        agg.files_binary += local.files_binary;
-        agg.bytes_scanned += local.bytes_scanned;
-        agg.matches += local.matches;
-        agg.errors.add(&local.errors);
-    });
+        merge_stats(&mut guard.1, &local);
+    };
+    for c in &direct {
+        scan_one(&c.path, &shared, o.quiet);
+    }
+    if !jobs.is_empty() {
+        let early = o.quiet;
+        par_for_each(jobs, o.threads, |job, spawn| {
+            if found_one.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let out = read_job(job, o, false);
+            for child in out.children {
+                spawn(child);
+            }
+            let mut local = out.stats;
+            for c in &out.cands {
+                if found_one.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let mut one = Stats::default();
+                let got = match scan_file(&c.path, o, &mut one) {
+                    Ok(got) => got,
+                    Err(e) => {
+                        if e.kind() != io::ErrorKind::NotFound {
+                            one.errors.record(&e);
+                        }
+                        None
+                    }
+                };
+                merge_stats(&mut local, &one);
+                let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(hit) = got {
+                    if early && hit.matches > 0 {
+                        found_one.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    guard.0.push(hit);
+                }
+                merge_stats(&mut guard.1, &local);
+                local = Stats::default();
+            }
+            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            merge_stats(&mut guard.1, &local);
+        });
+    }
     let (mut found, agg) = shared.into_inner().unwrap_or_else(|e| e.into_inner());
     // Results come back in whatever order the workers finished; the report is sorted so two
     // runs of the same search print the same thing.
     found.sort_by(|a, b| a.path.cmp(&b.path));
-    stats.files_scanned += agg.files_scanned;
-    stats.files_binary += agg.files_binary;
-    stats.bytes_scanned += agg.bytes_scanned;
-    stats.matches += agg.matches;
-    stats.errors.add(&agg.errors);
+    merge_stats(&mut stats, &agg);
     for got in found {
         if o.files_without_matches {
             if got.matches == 0 {
@@ -589,6 +611,11 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
         } else {
             report.files.push(got);
         }
+    }
+    if o.quiet && found_one.load(std::sync::atomic::Ordering::Relaxed) {
+        report.any_match = true;
+        // `-q` prints nothing: the matches it found are not part of the answer.
+        report.files.clear();
     }
     if o.files_without_matches {
         report.any_match = !report.files.is_empty();
@@ -1056,6 +1083,15 @@ fn finished(
     };
     sc.recycle();
     Ok(Some(out))
+}
+
+/// Fold one file's counters into an aggregate.
+fn merge_stats(into: &mut Stats, from: &Stats) {
+    into.files_scanned += from.files_scanned;
+    into.files_binary += from.files_binary;
+    into.bytes_scanned += from.bytes_scanned;
+    into.matches += from.matches;
+    into.errors.add(&from.errors);
 }
 
 /// Handle one line. Returns true when the file should stop being read (`-m` reached).
