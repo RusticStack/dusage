@@ -297,6 +297,15 @@ enum Node {
     Group(u32, Box<Node>),
 }
 
+/// A haystack read as text: the character program to run over it, its characters, and the
+/// byte offset each character starts at, with a sentinel holding the text's length.
+#[derive(Clone, Copy)]
+struct Text<'a> {
+    prog: &'a [Inst<CharClass>],
+    chars: &'a [char],
+    bytes: &'a [usize],
+}
+
 /// A compiled pattern.
 #[derive(Debug)]
 pub struct Regex {
@@ -596,6 +605,26 @@ impl Regex {
         if start > hay.len() {
             return None;
         }
+        // An ASCII line and a line that is not UTF-8 are both answered by the byte
+        // program: the first is exact for it, and the second has no characters to
+        // speak of, so it keeps the byte semantics it had before this engine learned
+        // any. Only text is decoded.
+        if let Some(cprog) = &self.cprog {
+            if !hay.is_ascii() {
+                if let Ok(text) = std::str::from_utf8(hay) {
+                    return self.run_chars(cprog, text, start);
+                }
+            }
+        }
+        self.find_bytes_at(hay, start)
+    }
+
+    /// The byte program's answer at `start`, which is exact for an ASCII haystack and the
+    /// only answer a haystack that is not UTF-8 has.
+    fn find_bytes_at(&self, hay: &[u8], start: usize) -> Option<Match> {
+        if start > hay.len() {
+            return None;
+        }
         if let Some(lit) = &self.lit {
             let i = crate::bytes::memmem_from(hay, lit, start)?;
             return Some(Match {
@@ -608,22 +637,125 @@ impl Regex {
         if let Some((_, finder)) = &self.run {
             finder.find_from(hay, start)?;
         }
-        // An ASCII line and a line that is not UTF-8 are both answered by the byte
-        // program: the first is exact for it, and the second has no characters to
-        // speak of, so it keeps the byte semantics it had before this engine learned
-        // any. Only text is decoded.
-        if let Some(cprog) = &self.cprog {
-            if !hay.is_ascii() {
-                if let Ok(text) = std::str::from_utf8(hay) {
-                    return self.run_chars(cprog, text, start);
-                }
-            }
-        }
         match with_dfa(self, |c| c.find(&self.prog, hay, start, self.anchor())) {
             // The DFA answered; its `None` is a real answer, not a fallback.
             Some(Some(found)) => found,
             _ => self.run(&self.prog, hay, start),
         }
+    }
+
+    /// Every non-overlapping match in one haystack, for a search that sees a whole file at
+    /// once (`-U`). `accept` is the caller's rule on top of the pattern — the word
+    /// boundaries `-w` asks for — and a rejected match retries one symbol later, the way
+    /// `find_at` is asked again.
+    ///
+    /// `find_at` decides per call whether the haystack is text, which for a file is a scan
+    /// of it per match, and when it is text a decode of it per match. Whether a haystack is
+    /// text is a property of the haystack, so here it is decided once and decoded once.
+    pub fn find_all_in(
+        &self,
+        hay: &[u8],
+        limit: usize,
+        accept: impl Fn(&Match) -> bool,
+    ) -> Vec<Match> {
+        // Only a haystack that is text this engine decodes can need the character program.
+        // A file with no non-ASCII byte is answered by the byte program, which is exact for
+        // it; a file that is not UTF-8 has no characters to decode.
+        let Some(cprog) = self.cprog.as_ref().filter(|_| !hay.is_ascii()) else {
+            return self.find_all_parts(hay, None, limit, &accept);
+        };
+        // A mandatory literal the file does not hold rules out a match under either
+        // semantics, so such a file never needs decoding: UTF-8 spells no ASCII byte inside a
+        // multi-byte character, and spells a non-ASCII one only one way. Proving that is a
+        // scan, and a scan is what the decode would cost and more.
+        let holds_mandatory = match &self.run {
+            Some((_, finder)) => finder.find_from(hay, 0).is_some(),
+            None => match self.required {
+                Some(b) => crate::bytes::find_byte(hay, b, 0).is_some(),
+                None => true,
+            },
+        };
+        if !holds_mandatory {
+            return Vec::new();
+        }
+        match std::str::from_utf8(hay) {
+            Ok(text) => {
+                let (chars, bytes) = decode(text);
+                let text = Text {
+                    prog: cprog,
+                    chars: &chars,
+                    bytes: &bytes,
+                };
+                self.find_all_parts(hay, Some(text), limit, &accept)
+            }
+            Err(_) => self.find_all_parts(hay, None, limit, &accept),
+        }
+    }
+
+    /// The same search with the ASCII shortcut taken away: text is decoded and its character
+    /// program run even when every byte of it is ASCII. The equivalence the ASCII shortcut
+    /// rests on is that this answers exactly what the byte program answers.
+    #[cfg(test)]
+    fn find_all_decoded(
+        &self,
+        hay: &[u8],
+        limit: usize,
+        accept: impl Fn(&Match) -> bool,
+    ) -> Vec<Match> {
+        let (chars, bytes) = match std::str::from_utf8(hay) {
+            Ok(text) => decode(text),
+            Err(_) => return self.find_all_parts(hay, None, limit, &accept),
+        };
+        let text = self.cprog.as_ref().map(|prog| Text {
+            prog,
+            chars: &chars,
+            bytes: &bytes,
+        });
+        self.find_all_parts(hay, text, limit, &accept)
+    }
+
+    /// The match loop shared by both paths. `text` is the same haystack read as characters,
+    /// when it is text; without it the byte offsets are the haystack's own.
+    fn find_all_parts(
+        &self,
+        hay: &[u8],
+        text: Option<Text<'_>>,
+        limit: usize,
+        accept: &impl Fn(&Match) -> bool,
+    ) -> Vec<Match> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        while out.len() < limit {
+            // `at`, `m.start` and `m.end` are character offsets when the haystack was
+            // decoded and byte offsets otherwise; `len` is the haystack in the same unit.
+            let (m, len) = match text {
+                Some(Text { prog, chars, .. }) => match self.run(prog, chars, at) {
+                    Some(m) => (m, chars.len()),
+                    None => break,
+                },
+                None => match self.find_bytes_at(hay, at) {
+                    Some(m) => (m, hay.len()),
+                    None => break,
+                },
+            };
+            let span = match text {
+                Some(Text { bytes, .. }) => Match {
+                    start: bytes[m.start],
+                    end: bytes[m.end],
+                },
+                None => m,
+            };
+            if accept(&span) {
+                out.push(span);
+                at = if m.end > m.start { m.end } else { m.start + 1 };
+            } else {
+                at = m.start + 1;
+            }
+            if at > len {
+                break;
+            }
+        }
+        out
     }
 
     /// The run every match begins with, for an automaton to jump between.
@@ -3647,6 +3779,144 @@ mod tests {
         )
         .unwrap()
         .is_unicode());
+    }
+
+    /// Files a whole-file (`-U`) search meets: ASCII, text with non-ASCII in it, non-ASCII
+    /// next to the ASCII word characters a boundary is decided by, and bytes that are not
+    /// text at all.
+    fn mixed_corpus() -> Vec<(&'static str, &'static [u8])> {
+        vec![
+            ("ascii", b"type Widget struct {\n\tName string\n}\n"),
+            (
+                "non-ASCII in a comment",
+                "// the 64-byte \u{3bc} value (omitted)\ntype Widget struct {\n\tName string\n}\n"
+                    .as_bytes(),
+            ),
+            (
+                "accented type name",
+                "type Caf\u{e9} struct {\n}\ncaf\u{e9} au lait\n".as_bytes(),
+            ),
+            (
+                "non-ASCII but no literal",
+                "na\u{ef}vet\u{e9} \u{fc}n\u{ef}code\n\u{65e5}\u{672c}\u{8a9e}\n".as_bytes(),
+            ),
+            ("adjacent to ASCII", "\u{e9}abc type Widget struct\nabc\u{e9}\n".as_bytes()),
+            ("greek", "\u{3a3}\u{399}\u{3a3}\u{3a5}\u{3a6}\u{39f}\u{3a3} \u{3c3}\u{3af}\u{3c3}\u{3c5}\u{3c6}\u{3bf}\u{3c2}\n".as_bytes()),
+            ("combining mark", "e\u{301} type Widget struct\n".as_bytes()),
+            ("arabic-indic digits", "\u{663}\u{664}\u{665} 123 type Widget struct\n".as_bytes()),
+            ("punctuation only", "a\u{2014}b type Widget struct \u{ab}\u{bb}\n".as_bytes()),
+            ("empty", b""),
+            ("blank lines", b"type A struct\n\ntype B struct\n"),
+            ("not text", &[b'c', 0xff, b'a', 0xfe, b'f', 0xc3]),
+            ("not text with the literal", b"type \xff Widget struct\n"),
+        ]
+    }
+
+    /// Every construct whose Unicode meaning differs from its byte meaning: `\w`, `\d`,
+    /// `\s`, `\b`, `.`, a class with a non-ASCII member, a negated class, quantifiers,
+    /// anchors, and case folding.
+    const UNICODE_PATTERNS: &[(&str, bool)] = &[
+        (r"type \w+ struct", false),
+        (r"type \w+ struct", true),
+        (r"\w+", false),
+        (r"\b\w+\b", false),
+        (r"\b", false),
+        (r"\B", false),
+        (r"\d+", false),
+        (r"\w{2,4}", false),
+        (r"\w+? struct", false),
+        (r"a.b", false),
+        (r".{3}", false),
+        ("(?s).", false),
+        ("(?m)^\\w+", false),
+        (r"\w+$", false),
+        (r"\p{L}+", false),
+        ("[\\w\u{e9}-]+", false),
+        ("[^a-z\n]+", false),
+        (r"type\s+\w+\s+struct", false),
+        ("\u{e9}+", false),
+        ("\u{3a3}+", true),
+        ("\u{3c3}+", true),
+        ("\u{e9}\\b", false),
+        ("(?:ab|\u{e9})c", false),
+        (r"\w+ \w+ \w+", false),
+        ("\u{2014}|\u{3bc}", false),
+    ];
+
+    /// The rule `-w` adds on top of a pattern's own answer.
+    fn word_rule(hay: &'static [u8], word: bool) -> impl Fn(&Match) -> bool {
+        move |m: &Match| !word || crate::bytes::at_word_boundary(hay, m.start, m.end)
+    }
+
+    /// The claim the whole-file fast path rests on: for a pattern that needs Unicode
+    /// semantics, the byte program's answer on a file with no non-ASCII byte is exactly the
+    /// character program's answer on the decoded file. If that were false anywhere, `-U`
+    /// would report a different match, a different `-c` count and a different exit code
+    /// depending only on which path a file happened to take.
+    #[test]
+    fn the_ascii_shortcut_answers_what_decoding_always_did() {
+        let mut decoded_patterns = 0;
+        for (pat, ci) in UNICODE_PATTERNS {
+            let flags = Flags {
+                case_insensitive: *ci,
+                ..Flags::default()
+            };
+            let re = Regex::new_with(pat, flags).unwrap_or_else(|e| panic!("{pat:?}: {e}"));
+            if re.is_unicode() {
+                decoded_patterns += 1;
+            }
+            for (name, hay) in mixed_corpus() {
+                for word in [false, true] {
+                    let fast = re.find_all_in(hay, usize::MAX, word_rule(hay, word));
+                    let slow = re.find_all_decoded(hay, usize::MAX, word_rule(hay, word));
+                    assert_eq!(fast, slow, "{pat:?} (-i {ci}, -w {word}) on {name:?}");
+                    // Equal spans are equal `-c` counts, and `-c` is what decides the exit
+                    // code: 0 for a file that matched, 1 for one that did not.
+                    assert_eq!(
+                        fast.len(),
+                        slow.len(),
+                        "{pat:?} (-i {ci}, -w {word}) on {name:?}: match count"
+                    );
+                    assert_eq!(
+                        fast.is_empty(),
+                        slow.is_empty(),
+                        "{pat:?} (-i {ci}, -w {word}) on {name:?}: exit code"
+                    );
+                }
+            }
+        }
+        assert!(
+            decoded_patterns >= 12,
+            "the pattern list must exercise the character program"
+        );
+    }
+
+    /// A mandatory literal the file does not hold rules out a match under either reading, so
+    /// the file is never decoded — the shortcut is a proof, not a heuristic.
+    #[test]
+    fn a_file_without_the_mandatory_literal_is_answered_without_decoding() {
+        let re = Regex::new(r"type \w+ struct").unwrap();
+        assert!(re.is_unicode());
+        assert!(re.required_literal().is_some());
+        for hay in ["caf\u{e9} au lait\n", "\u{65e5}\u{672c}\u{8a9e} \u{2014}\n"] {
+            let hay = hay.as_bytes();
+            assert!(re.find_all_in(hay, usize::MAX, |_| true).is_empty());
+            assert!(re.find(hay).is_none(), "the per-call path agrees");
+        }
+    }
+
+    /// And a file that holds it is decoded and matched with the character program's idea of
+    /// a word character, which is the whole reason the mode exists.
+    #[test]
+    fn a_file_that_holds_the_literal_is_decoded_and_matched() {
+        let re = Regex::new(r"type \w+ struct").unwrap();
+        let hay = "// \u{3bc}\ntype Caf\u{e9} struct {\n}\n".as_bytes();
+        let got = re.find_all_in(hay, usize::MAX, |_| true);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            &hay[got[0].start..got[0].end],
+            "type Caf\u{e9} struct".as_bytes()
+        );
     }
 
     #[test]

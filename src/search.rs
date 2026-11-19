@@ -1545,7 +1545,9 @@ fn scan_multiline(
             stats.bytes_scanned += data.len() as u64;
         }
     }
-    let found = o.pattern.find_all(&data, usize::MAX);
+    // The whole file at once: `find_all_in` decides once, rather than once per match,
+    // whether a Unicode pattern has to read these bytes as characters.
+    let found = o.pattern.find_all_in(&data, usize::MAX);
     let name = || path.to_string_lossy().into_owned();
     if found.is_empty() {
         let wants = o.files_without_matches || (o.include_zero && o.count) || o.passthru;

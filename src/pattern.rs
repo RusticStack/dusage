@@ -402,6 +402,21 @@ impl Pattern {
         self.kind == PatternKind::Pcre
     }
 
+    /// Every non-overlapping match in one haystack, for a search that sees a whole file at
+    /// once (`-U`). A pattern that needs Unicode semantics decides once here, rather than in
+    /// every `find_at`, whether the file is text: on a megabyte file the per-call answer is a
+    /// scan of the file per match, and a decode of it per match when it is text.
+    pub fn find_all_in(&self, hay: &[u8], limit: usize) -> Vec<Match> {
+        let re = match (self.kind, &self.re) {
+            (PatternKind::Regex, Some(re)) if re.is_unicode() => re,
+            _ => return self.find_all(hay, limit),
+        };
+        let word = self.word;
+        re.find_all_in(hay, limit, |m| {
+            !word || bytes::at_word_boundary(hay, m.start, m.end)
+        })
+    }
+
     pub fn find_all(&self, hay: &[u8], limit: usize) -> Vec<Match> {
         let mut out = Vec::new();
         let mut at = 0;
