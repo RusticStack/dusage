@@ -77,6 +77,8 @@ pub struct SearchOptions {
     pub text: bool,
     /// Print the largest-match number of bytes per line: `--max-columns`, 0 = unlimited.
     pub max_columns: usize,
+    /// Mark a line that `--max-columns` cut (`--max-columns-preview`).
+    pub max_columns_preview: bool,
     /// Force a text encoding, or `None` to detect one per file.
     pub encoding: Option<Encoding>,
     /// Separate the file name from the rest with a NUL byte (`-Z`/`--null`).
@@ -137,6 +139,11 @@ pub enum SortKey {
     None,
     /// Oldest modification time first (`--sort modified`).
     Modified,
+    /// Oldest access time first (`--sort accessed`).
+    Accessed,
+    /// Oldest creation time first (`--sort created`), which on Linux is the inode's change
+    /// time where no birth time is recorded.
+    Created,
 }
 
 impl SearchOptions {
@@ -168,6 +175,7 @@ impl SearchOptions {
             one_filesystem: false,
             text: false,
             max_columns: 0,
+            max_columns_preview: false,
             encoding: None,
             null: false,
             details: false,
@@ -555,13 +563,17 @@ fn sort_paths(v: &mut Vec<Candidate>, o: &SearchOptions) {
     match o.sort {
         SortKey::None => {}
         SortKey::Path => v.sort_by(|a, b| a.rel.cmp(&b.rel).then_with(|| a.path.cmp(&b.path))),
-        SortKey::Modified => {
+        SortKey::Modified | SortKey::Accessed | SortKey::Created => {
             // The walk only stats entries when it must, so an explicit time sort reads the
-            // mtime of each result once instead of once per comparison.
+            // time of each result once instead of once per comparison.
+            let key = o.sort;
             let mut keyed: Vec<(SystemTime, Candidate)> = std::mem::take(v)
                 .into_iter()
                 .map(|c| {
-                    let t = c.modified.unwrap_or_else(|| modified_of(&c.path));
+                    let t = match key {
+                        SortKey::Modified => c.modified.unwrap_or_else(|| time_of(&c.path, key)),
+                        _ => time_of(&c.path, key),
+                    };
                     (t, c)
                 })
                 .collect();
@@ -580,11 +592,12 @@ fn sort_hits(v: &mut Vec<FileHits>, o: &SearchOptions) {
     match o.sort {
         SortKey::None => {}
         SortKey::Path => v.sort_by(|a, b| a.path.cmp(&b.path)),
-        SortKey::Modified => {
+        SortKey::Modified | SortKey::Accessed | SortKey::Created => {
+            let key = o.sort;
             let mut keyed: Vec<(SystemTime, FileHits)> = std::mem::take(v)
                 .into_iter()
                 .map(|f| {
-                    let t = modified_of(Path::new(&f.path));
+                    let t = time_of(Path::new(&f.path), key);
                     (t, f)
                 })
                 .collect();
@@ -597,10 +610,18 @@ fn sort_hits(v: &mut Vec<FileHits>, o: &SearchOptions) {
     }
 }
 
-fn modified_of(path: &Path) -> SystemTime {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(std::time::UNIX_EPOCH)
+/// One of the three times a result can be sorted by, `UNIX_EPOCH` when the filesystem does
+/// not keep it (an access time is often disabled, and Windows may have no birth time).
+fn time_of(path: &Path, key: SortKey) -> SystemTime {
+    let Ok(md) = std::fs::metadata(path) else {
+        return std::time::UNIX_EPOCH;
+    };
+    let t = match key {
+        SortKey::Accessed => md.accessed(),
+        SortKey::Created => md.created(),
+        _ => md.modified(),
+    };
+    t.unwrap_or(std::time::UNIX_EPOCH)
 }
 
 /// True for the modes whose answer for a binary file is just "it matches" or "it does not".
@@ -1483,11 +1504,23 @@ fn finished(
     stats.matches += sc.matches;
     for h in &mut sc.hits {
         if o.max_columns > 0 && h.text.len() > o.max_columns {
-            h.text.truncate(o.max_columns);
-            h.spans.retain(|(s, _)| *s < o.max_columns);
+            // Columns are characters, as in ripgrep, so a cut never lands inside a code
+            // point; a line that is not UTF-8 is cut by bytes.
+            let cut = match std::str::from_utf8(&h.text) {
+                Ok(text) => text
+                    .char_indices()
+                    .nth(o.max_columns)
+                    .map_or(h.text.len(), |(i, _)| i),
+                Err(_) => o.max_columns,
+            };
+            h.text.truncate(cut);
+            if o.max_columns_preview {
+                h.text.extend_from_slice(TRUNCATED);
+            }
+            h.spans.retain(|(s, _)| *s < cut);
             for (_, e) in h.spans.iter_mut() {
-                if *e > o.max_columns {
-                    *e = o.max_columns;
+                if *e > cut {
+                    *e = cut;
                 }
             }
         }
@@ -1695,6 +1728,9 @@ fn rewrite(
     out.extend_from_slice(&text[last..]);
     (out, spans)
 }
+
+/// What `--max-columns-preview` appends to a line it had to cut.
+const TRUNCATED: &[u8] = b" [... omitted end of long line]";
 
 fn strip_cr(line: &[u8]) -> &[u8] {
     match line.last() {

@@ -1239,3 +1239,48 @@ fn types_can_be_added_and_cleared() {
         0
     );
 }
+
+#[test]
+fn columns_preview_and_time_sorts() {
+    let f = Fixture::new("polish");
+    let dir = f.root.join("pol");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("long.txt"), "a very long line with needle in it\n").unwrap();
+    fs::write(dir.join("b.txt"), "needle\n").unwrap();
+    fs::write(dir.join("a.txt"), "needle\n").unwrap();
+
+    // `--max-columns` cuts at a character and `--max-columns-preview` says it did.
+    let cut = stdout(&run(
+        &[
+            "search",
+            "-h",
+            "--max-columns",
+            "20",
+            "--max-columns-preview",
+            "needle",
+        ],
+        &dir,
+    ));
+    assert!(
+        cut.ends_with("a very long line wit [... omitted end of long line]\n"),
+        "{cut}"
+    );
+    // The short lines are untouched: the cut is for the lines that need it.
+    assert_eq!(cut.lines().filter(|l| *l == "needle").count(), 2, "{cut}");
+
+    // The time sorts order by the time they name, and `--sortr` reverses.
+    let oldest_first = stdout(&run(&["search", "-l", "--sort", "created", "needle"], &dir));
+    let reversed = stdout(&run(
+        &["search", "-l", "--sortr", "created", "needle"],
+        &dir,
+    ));
+    assert_eq!(
+        oldest_first.lines().next(),
+        reversed.lines().last(),
+        "the two orders are each other's reverse"
+    );
+    // An unknown key names the ones that exist.
+    let bad = run(&["search", "--sort", "size", "needle"], &dir);
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).contains("accessed"), "{}", stderr(&bad));
+}

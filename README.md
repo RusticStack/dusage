@@ -236,6 +236,11 @@ dusage find   [OPTIONS] <glob|substring> [paths...]
 | `dusage search -g '*.md' -n 'zero dependencies' .` | only paths matching a glob |
 | `dusage search --encoding latin1 'café' old/` | force an encoding instead of detecting it |
 | `dusage search --json -n 'mod ' src/lib.rs` | JSON for scripts, with a stats block |
+| `dusage search -r 'name: $1' 'fn (\w+)' src/` | rewrite the match in the output, capture groups included |
+| `dusage search -U -n 'fn \w+\(\) \{\n' src/` | a match that spans lines |
+| `dusage search -z -n 'timeout' var/log/*.gz` | search inside gzip files |
+| `dusage search --follow -l 'TODO' .` | follow symlinks, walking each real directory once |
+| `dusage find --name '*.rs' --sortr modified .` | names only, newest first |
 | `dusage find '*.lock'` | paths matching a glob |
 | `dusage find --files --ext rs --long --size +4K '*' src` | size and modification time per file |
 | `dusage find --dirs 's*' .` | directories only |
@@ -253,12 +258,13 @@ the ignore rules off as well.
 
 **Patterns.** A pattern that is plain text takes a byte-scan fast path; the rest is a
 backtracking-free regular expression engine supporting `. * + ? {n,m}`, byte classes,
-groups, `|`, `^ $ \A \z \b \B`, `\d \w \s` and inline `(?i) (?s) (?m)`. Lookaround,
-backreferences and `\p{...}` classes are refused with an error that names the offset, and
-matching is line by line, so no pattern can span a newline. Under `-i` a literal needle folds
-case per Unicode character (`-i café` matches `CAFÉ`), while a regular expression folds ASCII
-letters only. `-w` treats every byte of a non-ASCII character as a word byte, so `-w caf`
-does not match inside `café`.
+groups and capture references in `-r`, `|`, `^ $ \A \z \b \B`, `\d \w \s` and inline
+`(?i) (?s) (?m)`. Lookaround and backreferences fall back to a bounded backtracking engine
+(`-P` forces it); `\p{...}` classes are refused with an error that names the offset.
+Matching is line by line unless `-U` asks for whole-file matching, where a pattern may span
+newlines. Under `-i` a literal needle folds case per Unicode character (`-i café` matches
+`CAFÉ`), while a regular expression folds ASCII letters only. `-w` treats every byte of a
+non-ASCII character as a word byte, so `-w caf` does not match inside `café`.
 
 **Encodings.** Files are read as UTF-8 by default, and UTF-16LE/BE is detected from a byte
 order mark or the NUL-byte pattern such files have. `--encoding utf-16le|utf-16be|latin1`
@@ -270,11 +276,22 @@ path. The same three values `dusage` and `fastdel` already use. A reader that st
 (`dusage search foo | head`) ends the run with `0` and no message, which is what `rg` does and
 what `grep` makes look like a crash.
 
-**vs ripgrep, grep and find.** Not a drop-in replacement, and not trying to be one. There is
-no PCRE2 `-P`, so no lookaround and no backreferences; no multi-line matching (`-U`); no
-`--follow`, no mmap, no compressed-file search. `-x` here means `--one-filesystem`, not grep's
-whole-line match. Bundled short flags work (`-in`, `-ilw`, `-inm5`) and `-f PATTERNFILE` reads
-one pattern per line, as grep and rg do. Ignore files are read from the roots down, so a `.gitignore` above the root,
+**vs ripgrep, grep and find.** The whole everyday surface is here: `-i/-s/-S` case modes,
+`-w`, `-v`, `-F`, `-P`, `-o`, `-r` with capture groups, `-c`, `--count-matches`, `-l`, `-L`,
+`-q`, `-m`, `-A/-B/-C`, `-n`, `--column`, `--byte-offset`, `--heading`, `-H/-h`, `-Z`,
+`--json`, `--color`, `-e`, `-f`, `-g`/`--iglob`, `-t`/`-T`/`--type-list`/`--type-add`,
+`-u/-uu/-uuu`, `--hidden`, the `--no-ignore-*` family, `--max-depth`, `--max-filesize`,
+`--max-columns`, `--encoding`, `--sort`/`--sortr`, `--passthru`, `--follow`, `-U` with
+`--multiline-dotall`, and `-z` for gzip. Bundled short flags work (`-in`, `-ilw`, `-inm5`).
+
+What is still missing: `--pre` and `--pre-glob`, and the other compressed formats (`-z`
+handles gzip only). Three letters mean something different here, and the difference is
+deliberate: `-L` is `--files-without-match` (grep's meaning) rather than ripgrep's
+`--follow`, which has no short form; `-s` is `--case-sensitive` (ripgrep's meaning) rather
+than grep's `--no-messages`, which is `--no-messages` here; and `-x` is `--one-filesystem`
+rather than grep's whole-line match, which is `--line-regexp`.
+
+Ignore files are read from the roots down, so a `.gitignore` above the root,
 `.git/info/exclude` and a global `core.excludesFile` are not consulted. The defaults are
 also more aggressive than ripgrep's: the cache list applies everywhere (outside a
 git repository too) and `.gitignore` is honoured outside a repository as well. What you get
