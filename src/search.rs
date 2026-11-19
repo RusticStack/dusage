@@ -1052,6 +1052,7 @@ impl ExprWalk<'_> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.clone());
+        let below = sub_path(sub);
         let empty = self.want_empty
             && match facts.kind {
                 Kind::File => facts.size == 0,
@@ -1075,7 +1076,7 @@ impl ExprWalk<'_> {
             fs: self.fs_names.get(&facts.dev).map(String::as_str),
             target: facts.target.as_deref(),
             target_kind: facts.target_kind,
-            ..findexpr::Entry::new(&path, &name, sub, facts.kind)
+            ..findexpr::Entry::new(&path, &name, &below, facts.kind)
         };
         let verdict = self.expr.eval(&entry, self.ctx, &mut *self.sink)?;
         if verdict.selected {
@@ -1085,6 +1086,16 @@ impl ExprWalk<'_> {
             self.stop = true;
         }
         Ok(!verdict.prune)
+    }
+}
+
+/// The path below the starting point with the platform's separators, which is what `%P`
+/// prints: the walk keeps `/` internally because the ignore rules are matched that way.
+fn sub_path(rel: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
+        rel.to_string()
+    } else {
+        rel.replace('/', std::path::MAIN_SEPARATOR_STR)
     }
 }
 

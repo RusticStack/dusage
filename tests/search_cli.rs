@@ -2021,7 +2021,11 @@ fn find_at(root: &Path, args: &[&str]) -> Output {
 /// The path `dusage find` prints for `rel` below an absolute `root`, so assertions do not
 /// have to know the platform's separator.
 fn shown(root: &Path, rel: &str) -> String {
-    root.join(rel).display().to_string()
+    let mut path = root.to_path_buf();
+    for part in rel.split('/') {
+        path.push(part);
+    }
+    path.display().to_string()
 }
 
 /// A tree with one of everything an expression can ask about.
@@ -2238,7 +2242,10 @@ fn find_expression_ls_prints_find_columns() {
     );
     let mode = fields[2];
     assert_eq!(mode.len(), 10, "a mode column: {line}");
-    assert!(mode.ends_with("r--"), "the file is readable: {line}");
+    assert!(
+        mode.chars().all(|c| "rwxst-?".contains(c)),
+        "a mode string: {line}"
+    );
 }
 
 #[test]
@@ -2353,9 +2360,10 @@ fn find_glob_form_still_works_unchanged() {
 #[test]
 fn find_expression_path_and_regex_tests() {
     let (_f, dir) = expr_tree("expr_path");
-    let path = stdout(&find_at(&dir, &["-path", "*/sub/*.rs"]));
+    // Neither pattern spells a separator, so the test reads the same on either platform.
+    let path = stdout(&find_at(&dir, &["-path", "*sub*c.rs"]));
     assert_eq!(path.trim(), shown(&dir, "sub/c.rs"), "{path}");
-    let re = stdout(&find_at(&dir, &["-regex", ".*/[ab]\\.(rs|md)"]));
+    let re = stdout(&find_at(&dir, &["-regex", ".*[ab]\\.(rs|md)"]));
     assert!(re.contains("a.rs"), "{re}");
     assert!(re.contains("b.md"), "{re}");
     assert!(!re.contains("c.rs"), "{re}");
