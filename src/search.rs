@@ -21,6 +21,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// Read size for content scanning. Large enough to matter, small enough to stay in cache.
 const BLOCK: usize = 64 * 1024;
+/// The read size a file switches to once one [`BLOCK`] has not finished it.
+const BIG_BLOCK: usize = 1024 * 1024;
+/// The longest line this scanner will hold before deciding the data is not really made of
+/// lines: a multi-megabyte binary with no newline in it otherwise accumulates the whole file in
+/// the carry buffer, which is how a search over `/usr` reached 300 MB resident. Beyond this a
+/// line is matched in pieces, so a `-w` boundary at such a split is not a real boundary.
+const CARRY_MAX: usize = 8 * 1024 * 1024;
 /// Bytes inspected for a NUL when deciding whether a file is binary.
 const BINARY_SCAN: usize = 8 * 1024;
 /// Upper bound on how many matches `-o` will report on one line, so a pathological
@@ -416,6 +423,34 @@ fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
     (all, stats)
 }
 
+/// True for the modes whose answer for a binary file is just "it matches" or "it does not".
+fn binary_by_name_only(o: &SearchOptions) -> bool {
+    !o.text
+        && !o.invert
+        && !o.count
+        && !o.count_matches
+        && !o.only_matching
+        && o.before == 0
+        && o.after == 0
+        && !o.pattern.is_word()
+}
+
+/// The report for a binary file scanned block by block.
+fn binary_hit(path: &Path, o: &SearchOptions, stats: &mut Stats, found: bool) -> Option<FileHits> {
+    if found {
+        stats.matches += 1;
+    } else if !o.files_without_matches {
+        return None;
+    }
+    Some(FileHits {
+        path: path.to_string_lossy().into_owned(),
+        hits: Vec::new(),
+        matches: u64::from(found),
+        total: u64::from(found),
+        binary: true,
+    })
+}
+
 /// Search `o.roots`. Files that match are returned with their lines; errors on individual
 /// files are counted, never returned.
 /// Search one in-memory buffer, for `-` on the command line (stdin, a pipe). The buffer is
@@ -494,14 +529,15 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
         report.stats.elapsed = t0.elapsed();
         return Ok(report);
     }
-    let slots: Mutex<(Vec<Option<FileHits>>, Stats)> =
-        Mutex::new((vec![None; cands.len()], Stats::default()));
-    let items: Vec<(usize, PathBuf)> = cands
+    // Only the files that matched are kept, and the paths are borrowed from the candidate list
+    // rather than cloned into a second one: on a 162k-file tree the clone alone was 22 MB.
+    let shared: Mutex<(Vec<FileHits>, Stats)> = Mutex::new((Vec::new(), Stats::default()));
+    let items: Vec<(usize, &Path)> = cands
         .iter()
         .enumerate()
-        .map(|(i, c)| (i, c.path.clone()))
+        .map(|(i, c)| (i, c.path.as_path()))
         .collect();
-    par_for_each(items, o.threads, |(i, path), _push| {
+    par_for_each(items, o.threads, |(_, path), _push| {
         let mut local = Stats::default();
         let got = match scan_file(path, o, &mut local) {
             Ok(got) => got,
@@ -512,8 +548,10 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
                 None
             }
         };
-        let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
-        guard.0[*i] = got;
+        let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = got {
+            guard.0.push(hit);
+        }
         let agg = &mut guard.1;
         agg.files_scanned += local.files_scanned;
         agg.files_binary += local.files_binary;
@@ -521,13 +559,16 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
         agg.matches += local.matches;
         agg.errors.add(&local.errors);
     });
-    let (found, agg) = slots.into_inner().unwrap_or_else(|e| e.into_inner());
+    let (mut found, agg) = shared.into_inner().unwrap_or_else(|e| e.into_inner());
+    // Results come back in whatever order the workers finished; the report is sorted so two
+    // runs of the same search print the same thing.
+    found.sort_by(|a, b| a.path.cmp(&b.path));
     stats.files_scanned += agg.files_scanned;
     stats.files_binary += agg.files_binary;
     stats.bytes_scanned += agg.bytes_scanned;
     stats.matches += agg.matches;
     stats.errors.add(&agg.errors);
-    for got in found.into_iter().flatten() {
+    for got in found {
         if o.files_without_matches {
             if got.matches == 0 {
                 report.files.push(got);
@@ -561,16 +602,61 @@ thread_local! {
     /// The scan buffer, allocated once per worker thread and handed back after every file.
     static SCAN_BUF: std::cell::RefCell<Vec<u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The line-level buffers a scan of one file needs. Allocating them per file is what made a
+    /// 162k-file search sit at 250 MB resident: not the live data, but the freed blocks each
+    /// arena keeps, which a trim threshold of 128 KiB brings back to 170 MB.
+    static SCAN_LINES: std::cell::RefCell<Lines> =
+        std::cell::RefCell::new(Lines::new());
+}
+
+/// The reusable half of a [`Scanner`]: everything that is only scratch space per file.
+struct Lines {
+    carry: Vec<u8>,
+    line: Vec<u8>,
+    history: VecDeque<(u64, Vec<u8>)>,
+    hits: Vec<LineHit>,
+}
+
+impl Lines {
+    fn new() -> Lines {
+        Lines {
+            carry: Vec::new(),
+            line: Vec::new(),
+            history: VecDeque::new(),
+            hits: Vec::new(),
+        }
+    }
+
+    fn take() -> Lines {
+        SCAN_LINES.with(|l| std::mem::replace(&mut *l.borrow_mut(), Lines::new()))
+    }
+
+    fn put_back(&mut self) {
+        self.carry.clear();
+        self.line.clear();
+        self.history.clear();
+        self.hits.clear();
+    }
 }
 
 fn scan_buffer() -> Vec<u8> {
     SCAN_BUF.with(|b| {
         let mut slot = b.borrow_mut();
-        if slot.len() < BLOCK {
-            slot.resize(BLOCK, 0);
+        if slot.len() < BIG_BLOCK {
+            slot.resize(BIG_BLOCK, 0);
         }
         std::mem::take(&mut *slot)
     })
+}
+
+/// Read the next chunk, allowing the big block once the file has proved bigger than one.
+///
+/// A small first read keeps the cost of the 162k files that are one block long down to one
+/// 64 KiB read; a file that keeps going is then read a megabyte at a time, which is what the
+/// few hundred large files on a system want and what a 64 KiB loop pays a syscall per block for.
+fn read_chunk(f: &mut File, buf: &mut [u8], big: bool) -> io::Result<usize> {
+    let want = if big { buf.len() } else { BLOCK.min(buf.len()) };
+    f.read(&mut buf[..want])
 }
 
 fn recycle_buffer(buf: Vec<u8>) {
@@ -624,14 +710,32 @@ fn scan_file_with(
         sc.feed(&text);
         return finished(path, o, stats, sc, false);
     }
-    let mut sc = Scanner::new(o);
+    // A binary file is reported by name, never by line, so there is no line structure to keep:
+    // scanning its blocks for one match avoids the carry buffer a 550 MB executable otherwise
+    // grows to 90 MB of resident memory. The modes that print counts or invert the match keep
+    // the line path, where those answers come from.
+    if binary && binary_by_name_only(o) {
+        stats.files_binary += 1;
+        let mut found = o.pattern.find_at(&buf[..n], 0).is_some();
+        stats.bytes_scanned += n as u64;
+        while !found {
+            let n = read_chunk(&mut f, buf, true)?;
+            if n == 0 {
+                break;
+            }
+            stats.bytes_scanned += n as u64;
+            found = o.pattern.find_at(&buf[..n.min(BIG_BLOCK)], 0).is_some();
+        }
+        return Ok(binary_hit(path, o, stats, found));
+    }
+    let mut sc = Scanner::pooled(o);
     if binary {
         stats.files_binary += 1;
     }
     stats.bytes_scanned += n as u64;
     sc.feed(&buf[..n]);
     while !sc.done() {
-        let n = f.read(&mut *buf)?;
+        let n = read_chunk(&mut f, buf, true)?;
         if n == 0 {
             break;
         }
@@ -662,11 +766,20 @@ struct Scanner<'a> {
 
 impl<'a> Scanner<'a> {
     fn new(o: &'a SearchOptions) -> Self {
+        Scanner::with_lines(o, Lines::new())
+    }
+
+    /// A scanner on this thread's reusable buffers.
+    fn pooled(o: &'a SearchOptions) -> Self {
+        Scanner::with_lines(o, Lines::take())
+    }
+
+    fn with_lines(o: &'a SearchOptions, lines: Lines) -> Self {
         Scanner {
             o,
-            carry: Vec::new(),
-            history: VecDeque::new(),
-            hits: Vec::new(),
+            carry: lines.carry,
+            history: lines.history,
+            hits: lines.hits,
             line_no: 0,
             matches: 0,
             remaining_after: 0,
@@ -674,9 +787,21 @@ impl<'a> Scanner<'a> {
             want_lines: !o.count && !o.files_with_matches && !o.files_without_matches && !o.quiet,
             limit: o.max_count.unwrap_or(u64::MAX),
             stopped: false,
-            line: Vec::new(),
+            line: lines.line,
             total: 0,
         }
+    }
+
+    /// Give the buffers back to the thread, so the next file on it allocates nothing.
+    fn recycle(mut self) {
+        let mut lines = Lines {
+            carry: std::mem::take(&mut self.carry),
+            line: std::mem::take(&mut self.line),
+            history: std::mem::take(&mut self.history),
+            hits: std::mem::take(&mut self.hits),
+        };
+        lines.put_back();
+        SCAN_LINES.with(|l| *l.borrow_mut() = lines);
     }
 
     /// True once `--max-count` is reached: the file needs no more reading.
@@ -719,6 +844,7 @@ impl<'a> Scanner<'a> {
         }
         if start < chunk.len() {
             self.carry.extend_from_slice(&chunk[start..]);
+            self.flush_overlong();
         }
     }
 
@@ -768,6 +894,7 @@ impl<'a> Scanner<'a> {
             Some(i) => i,
             None => {
                 self.carry.extend_from_slice(body);
+                self.flush_overlong();
                 return true;
             }
         };
@@ -839,6 +966,22 @@ impl<'a> Scanner<'a> {
         true
     }
 
+    /// Hand the carry over as a line once it grows past [`CARRY_MAX`], so a file that is not
+    /// made of newlines cannot hold the whole of itself in memory. A match that would have
+    /// straddled that boundary is not found, which is the price of a bounded line.
+    fn flush_overlong(&mut self) {
+        if self.carry.len() < CARRY_MAX || self.done() {
+            return;
+        }
+        self.line.clear();
+        std::mem::swap(&mut self.line, &mut self.carry);
+        self.carry.clear();
+        self.line_no += 1;
+        let buf = std::mem::take(&mut self.line);
+        self.emit(&buf);
+        self.line = buf;
+    }
+
     /// Handle the trailing line of a file that does not end in a newline.
     fn flush(&mut self) {
         if self.done() || self.carry.is_empty() {
@@ -881,17 +1024,15 @@ fn finished(
 ) -> io::Result<Option<FileHits>> {
     sc.flush();
     if sc.matches == 0 {
-        return Ok(if o.files_without_matches {
-            Some(FileHits {
-                path: path.to_string_lossy().into_owned(),
-                hits: Vec::new(),
-                matches: 0,
-                total: 0,
-                binary,
-            })
-        } else {
-            None
+        let hit = o.files_without_matches.then(|| FileHits {
+            path: path.to_string_lossy().into_owned(),
+            hits: Vec::new(),
+            matches: 0,
+            total: 0,
+            binary,
         });
+        sc.recycle();
+        return Ok(hit);
     }
     stats.matches += sc.matches;
     for h in &mut sc.hits {
@@ -905,13 +1046,16 @@ fn finished(
             }
         }
     }
-    Ok(Some(FileHits {
+    let hits = std::mem::take(&mut sc.hits);
+    let out = FileHits {
         path: path.to_string_lossy().into_owned(),
-        hits: sc.hits,
+        hits,
         matches: sc.matches,
         total: sc.total,
         binary,
-    }))
+    };
+    sc.recycle();
+    Ok(Some(out))
 }
 
 /// Handle one line. Returns true when the file should stop being read (`-m` reached).

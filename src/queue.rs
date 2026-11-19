@@ -174,7 +174,7 @@ where
 /// stop and the panic propagates to the caller.
 pub fn par_for_each<T, F>(initial: Vec<T>, threads: usize, f: F)
 where
-    T: Send + 'static,
+    T: Send,
     F: Fn(&T, &dyn Fn(T)) + Send + Sync,
 {
     if initial.is_empty() {
