@@ -830,11 +830,15 @@ fn passthru_prints_every_line() {
     assert_eq!(code(&o), 0, "stderr: {}", stderr(&o));
     // The matched line keeps its ':' separator and the rest come out as context ('-'),
     // which is exactly what ripgrep prints.
+    let p = |name: &str| dir.join(name).display().to_string();
     assert_eq!(
         stdout(&o),
         format!(
-            "{0}/a.txt-aaa\n{0}/a.txt:needle\n{0}/a.txt-bbb\n{0}/b.txt-zzz\n",
-            dir.display()
+            "{}-aaa\n{}:needle\n{}-bbb\n{}-zzz\n",
+            p("a.txt"),
+            p("a.txt"),
+            p("a.txt"),
+            p("b.txt")
         )
     );
 
