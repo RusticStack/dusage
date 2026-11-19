@@ -4,10 +4,13 @@
 
 **Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are all still open, apart from the Linux work in the last section.
 
-**Status 0.5.0 (search).** `dusage` is now a search tool as well: `search` (contents,
-a grep/rg replacement), `find` (paths, a find replacement), `prune` (the fastdel engine,
-with presets), and the 0.4.0 `scan`/`big` intact behind subcommands in one binary. The
-section at the end lists what shipped and the limits that are still open.
+**Status 0.5.0 (search).** `dusage` is a search tool as well: `search` (contents,
+a grep/rg replacement), `find` (paths, a find replacement), `prune` (the fastdel
+engine, with presets), `du` (a du-compatible per-directory report), and the
+0.4.0 `scan`/`big` intact behind subcommands in one binary. A benchmark suite
+with a memory pass, a cold-cache pass and a regression guard now lives in
+`bench/` and `docs/BENCHMARKS.md`; the section at the end lists what shipped,
+the numbers and the limits that are still open.
 
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
@@ -177,8 +180,8 @@ explanation. Numbers measured on this machine are in the last section.
 - Run the benchmark list in section 4 and record results; decide the default thread count from the thread sweep.
 - Item 11: Dev Drive guidance in the docs.
 - Done in 0.5.0: the tools merged under subcommands in one binary (`dusage
-  scan|big|search|find|prune`), with the `fastdel` binary and `dusage fastdel|del` running
-  `prune`; and fastdel presets (`--preset`, `--print-presets`).
+  scan|big|search|find|prune|du`), with the `fastdel` binary and `dusage fastdel|del`
+  running `prune`; and fastdel presets (`--preset`, `--print-presets`).
 
 ## Sources
 
@@ -226,88 +229,154 @@ directory-entry noise.
 - macOS would need a kqueue/FSEvents change feed and its own guard list; the crate refuses
   to compile there today, on purpose.
 
-## Search suite (0.5.0)
+## Search suite, find and du (0.5.0, as shipped)
 
-**Done.** The main flags are covered by `tests/search_cli.rs` (built binaries, exit codes,
-output shapes) and by the unit suites in `regex`, `glob`, `ignore`, `pattern`, `encodings`
-and `preset`; every invocation in the README and the skill was run against the binary while
-those docs were written.
+**Status.** `search` (contents), `find` (paths), `du` (per-directory totals) and
+`prune` share one binary with `scan`/`big`. What follows is the state of branch
+`docs/truth` at `c9dd6a0`; every behaviour below was run against the built
+binary while `docs/SEARCH.md` was rewritten, and the performance numbers are the
+ones in `docs/BENCHMARKS.md`.
 
-- `search`: a walk plus a streaming line scanner, with `-i -s -S -w -v -n -H -h -l -L -c
-  --count-matches -o -r -q -a -F -P -E -G -e -f -g --iglob -t -T --type-list --type-add
-  --type-clear -A -B -C -m -j --max-depth --max-filesize --max-columns
-  --max-columns-preview --encoding --hidden --no-ignore --no-ignore-vcs/-dot/-parent/-files
-  -u -x --follow -U --multiline-dotall -z -Z --null-data --passthru --sort --sortr --column
-  --byte-offset --heading --line-regexp --include --exclude --exclude-dir --binary-files -I
-  -d --pre --pre-glob --json --color --stats`.
-- `find`: glob or `-F` substring over relative paths, with `-i --name --full-path -t --ext
-  --size --older --newer --newermt --newerat --newerct --empty --mindepth --dirs --files
-  --long --json --follow` and the same walk filters.
-- A regex engine of our own (`regex.rs`): Thompson NFA, run by a lazily built DFA (one
-  table lookup per byte) with the Pike VM underneath it, no backtracking, so a pathological
-  pattern costs time, never exponential time. A plain-literal pattern skips it for a byte
-  scan, and the rest is prefiltred twice: by a single mandatory byte and by the longest run of
-  bytes every match must contain (`.go` for `[A-Z][a-zA-Z0-9_]*\.go`), with the run's skip plan
-  built once at compile time. Together they took regex counting from 348 ms to 220 ms on
-  `/usr/local/go`. A block scan now runs regexes as well as literals: the forward automaton
-  alone finds where a match ends, which is enough to say which line to look at, and the exact
-  span is worked out afterwards on that one line. That is only sound for a pattern with no
-  line-relative assertion and no instruction that permits a newline, and only for a pattern
-  that does not need the character program, which `Pattern::block_re` checks. A pattern that
-  never matches is now slightly faster than ripgrep (`ZZZ[A-Z]qqq`: 80 ms against 90 ms);
-  the 2.4x loss that remains is for patterns that match often, where the per-byte automaton
-  walk is the cost and ripgrep's is more than twice as fast.
-- Ignore handling close enough to ripgrep to be unsurprising: the built-in cache list, then
-  `.gitignore` and `.ignore` per directory with deeper files winning and `!` re-including,
-  then `-g`; a positive `-g` switches the ignore layers off. `--no-ignore` switches them off
-  by hand.
-- UTF-16LE/BE detection (BOM or NUL pattern) and transcoding, Latin-1 on request.
-- Unicode case folding for literal needles and non-ASCII word bytes for `-w`; the regex
-  engine folds ASCII only.
-- Binary detection by a NUL in the first 8 KiB, reported as `Binary file X matches` unless
-  `-a`.
-- `prune`: `--preset` and `--print-presets`, with `cargo`, `node` and `agent-temp` built in
-  and a `presets.conf` of the user's own.
-- One binary with subcommands and the legacy `dusage <root>` form kept.
+**Done.**
+
+- `search`: the flag surface matches `dusage search --help`. Case modes
+  (`-i -s -S`), word and invert, `-n --column --byte-offset --vimgrep --heading
+  --trim`, the three separator flags and `--path-separator`, `-H -h`, `-l -L
+  -c --count-matches --include-zero -o -q -m`, `-A -B -C --stop-on-nonmatch`,
+  `-a -I --binary-files -d`, `-F -E -G -P --engine -e -f -r`, `-g --iglob -t -T
+  --type-list --type-add --type-clear --include --exclude --exclude-dir`, `-u`/`-uu`,
+  `--max-depth --max-filesize -M --max-columns-preview --encoding`, `-Z -0
+  --null-data`, `--hidden`, the `--no-ignore-*` family, `--ignore-file` with
+  `--ignore-file-case-insensitive`, `--follow`, `-x`, `--sort --sortr --sort-files`,
+  `--passthru`, `--pre --pre-glob`, `-z`, `-U --multiline-dotall`, `--json
+  --color --stats --no-messages`, and the ripgrep no-op flags (`--mmap` pair,
+  `--binary`, `--line-buffered`, `--block-buffered`, `--crlf`).
+- `find`, glob form: a glob with `* ? ** [...] [!...] {a,b}` and a trailing `/`,
+  `-F` for a substring, `-i`, `--name`/`--full-path`, `-t`/`--type`, `--ext`,
+  `--size`, `--older`, `--newer`, `--newermt`/`--newerat`/`--newerct`, `--empty`,
+  `--mindepth`/`--max-depth` with find's own numbering, `--dirs`/`--files`,
+  `--long`, `--sort`/`--sortr`, `--follow`, `-Z`, `--json`, and the same walk
+  filters and ignore layers as `search`.
+- `find`, expression form: GNU find's language wired to the CLI (`src/findexpr.rs`
+  plus `split_find_args` and `search::walk_expr`). `-name`/`-iname`, `-path`,
+  `-regex`, `-type`, `-size`, `-empty`, `-perm`, `-user`/`-group`/`-uid`/`-gid`,
+  `-links`, `-inum`, `-newer*`, `-mtime`/`-atime`/`-ctime` and the `-min` forms,
+  `-fstype`, `-true`/`-false`, `-a`/`-o`/`!` with parentheses, `-printf`, `-ls`,
+  `-print`/`-print0`, `-prune`, `-quit`, `-depth`, `-xdev`, `-exec`/`-execdir`
+  behind `--allow-exec`, and `-delete` refused in every spelling. Measured
+  against findutils 4.9.0: identical selections for `-name '*.gz' -type f`,
+  `-size +100k` and a `-prune` expression, the same set in a different order for
+  `%p %s` `-printf`, `-maxdepth 2 -type d` and `-mtime -3 -type f`, identical
+  `-printf` output for one entry's `%p %s %y %m %TY-%Tm-%Td`, and identical
+  `-exec … {} +` batch contents. `docs/SEARCH.md` §1.2 has the table and the
+  exact commands.
+- **The regex engine of our own** (`regex.rs`): a Thompson NFA, run by a lazily
+  built DFA keyed by byte classes with the Pike VM underneath it, so no pattern
+  backtracks. It has two programs now — a byte program for ASCII lines and a
+  character program for any line holding a non-ASCII byte or any pattern naming
+  something only Unicode can answer (`\p{L}`, `[[:alpha:]]`, `\w`, `\b`, `-i`
+  over non-ASCII). That closed the Unicode gap: `\w+` matches `café`, `\p{L}`
+  works on the default engine, `-i 'CAF[É]'` matches `café`, and `\b` and `-w`
+  now agree on non-ASCII text. A plain-literal pattern still skips the engine
+  for the vectorised byte scan, and the rest is prefiltred by a mandatory byte
+  and by the longest run of bytes every match must contain.
+- **The `-P` engine** (`pcre.rs`): a bounded backtracking matcher reached by
+  `-P`, `--engine pcre2`, or automatically when the linear engine rejects the
+  pattern. It implements the constructs the other engine cannot: lookahead and
+  bound-limited lookbehind, `\1`/`\k<name>`/`(?P=name)` backreferences, named
+  groups, atomic groups, possessive quantifiers and `(?#…)` comments. Case
+  folding there is ASCII-only, `\p{..}` is refused, capture groups are not
+  recorded (so `-r '$1'` is refused under `-P`), and every call runs under a
+  1,000,000-instruction budget.
+- **Multi-line search**: `-U`/`--multiline` over the whole file, with
+  `--multiline-dotall`; `-v` and the context flags are refused rather than
+  answered wrongly, and a pattern spelling a newline without `-U` is refused.
+- **Compressed input**: `-z` expands gzip, bzip2, lz4, xz, zstd and brotli
+  through decoders written in std (`archive.rs`, `archive_bz2.rs`,
+  `archive_lz4.rs`, `archive_xz.rs`, `archive_zstd.rs`, `archive_brotli.rs`,
+  with the shared Brotli dictionary in `archive_brotli_dict.rs`).
+- **Follow**: `--follow` walks links once per real directory, comparing the real
+  path chain so a link back up the tree is skipped. `-L` stays
+  `--files-without-match`.
+- **Ignore handling** matches ripgrep where it matters and beats it where it is
+  opinionated: the built-in cache list, git's global excludes file
+  (`core.excludesFile`, else `$XDG_CONFIG_HOME/git/ignore`), `.gitignore` and
+  `.ignore` per directory with deeper files winning, `.git/info/exclude` at a
+  `.git` directory, the rule files of a root's ancestors, and `--ignore-file`
+  for the caller's own. A positive `-g` switches the file layers off.
+- **`du`** (`cmd/du.rs`): a du-compatible per-directory report printing
+  allocated blocks by default (`st_blocks * 512`, `AllocationSize` on Windows),
+  with `-a -s -c -d -b --apparent-size -k -m --block-size -h --si --inodes -S
+  -t -x --exclude --exclude-from --time --time-style --threads --stats`. On
+  `/usr` its totals are byte-identical to GNU du 9.4 and it is faster (§ below).
+- **Benchmarks**: a measured suite (`bench/run.sh`, `bench/summary.sh`,
+  `bench/cases.sh`), peak-RSS and cold-cache passes, and a regression guard
+  (`scripts/perf-guard.sh`) with a machine-specific baseline. The numbers and
+  the caveats live in `docs/BENCHMARKS.md`.
+
+**Measured.**
+
+| Workload | dusage | reference | Source |
+|---|---|---|---|
+| search, frequent literal (print) | 139 ms | `rg` 153, `grep -rI` 134 | `docs/BENCHMARKS.md`, Summary |
+| search, rare literal | 95 ms | `rg` 88 | same |
+| search, case-insensitive | 108 ms | `rg -i` 104 | same |
+| search, general regex | 241 ms | `rg` 89, `grep -rIE` 224 | same |
+| search `-l` | 109 ms | `rg -l` 149 | same |
+| find `*.go` over `/usr` (glob form) | 351 ms, 69 MB | `find -name` 323 | same |
+| `find /usr -name '*.go'` (expression form) | 0.81–0.83 s, 5.7 MB | findutils 0.21–0.31 s, 4.8 MB | measured for this rewrite |
+| search `-o -F 'func '` over `/usr/local/go` | 0.17–0.18 s, 29 MB | `rg -o` 0.06–0.07 s, 9 MB | measured for this rewrite, alternating runs, warm cache |
+| `du -s /usr` | 0.19–0.22 s, 8,172,786 KiB | GNU du 0.32–0.33 s, same bytes | measured for this rewrite, warm cache |
 
 **Known limits, each an open item.**
 
-- No `-P`/PCRE2: no lookaround and no backreferences. The engine rejects them by name and
-  offset rather than silently matching something else. Adding them means a backtracking
-  engine beside the Pike VM, with the whole worst-case-cost argument that comes with it.
-- Regex `-i` folds ASCII letters only, so `-i 'CAF[É]'` misses `café` where ripgrep matches.
-  The fix is Unicode simple case folding in the compiler: every non-ASCII atom becomes a
-  class of its case variants, which costs program size but no complexity.
-- No multi-line matching (`rg -U`). Matching is per line by construction; `(?s)` only widens
-  `.`, it does not let a pattern cross a newline.
-- Regexes still cost about 2x ripgrep's time on a general pattern, and the line-at-a-time path
-  is not the reason any more: the DFA's transition table is keyed by byte classes and the
-  automaton now walks only the lines that hold the mandatory literal run. What is left is the
-  per-line cost of entering the automaton at all — about 60 ns a line against ripgrep's 30 —
-  and the block-scanned alternative was measured three times and lost every time: 0.7-1.5 s
-  against 0.18 s for `[A-Z][a-zA-Z0-9_]*\.go` over `/usr/local/go`, because a bounded reverse
-  walk still ends up re-entering the DFA once per candidate line. A reverse automaton that
-  answers "where does the match start" in one suffix pass over the block is the change that
-  would fix it; that is a new machine, not a tweak.
-- No `--follow`. The walker never follows a symlink, by the same invariant the scanner and
-  the pruner keep, and a followed tree needs cycle detection before it can be offered.
-- `dusage find` still collects every path before printing, because its output is the sorted
-  candidate list itself: 68 MB over `/usr` against `find(1)`'s 4.8 MB. Sorting at the end from a
-  stream is the change that would close it; `search` no longer has this shape.
-- No mmap. Files are read in 64 KiB blocks into a buffer each worker reuses, and mapping large
-  files instead was measured and rejected: on `/usr` the mapping's page faults cost more than
-  `read`'s copy (6.4-7.5 s against 3.7-4.8 s for the same search), and on a page-cached tree
-  the two are within noise.
-- No `.git/info/exclude` and no global `core.excludesFile`, and ignore files are read from
-  each root down, so a `.gitignore` above the root does not apply even though ripgrep honours
-  it inside a repository.
-- No `-U` (multi-line) and no `-P` lookaround, as above; those are the two flag-level gaps left.
+- **A general regex is still ~2.7x ripgrep's time** (241 ms against 89 ms on
+  `/usr/local/go`, `docs/BENCHMARKS.md`). The line-at-a-time path is not the
+  reason any more; what is left is entering the automaton once per line, and a
+  bounded reverse walk was measured three times and lost. The fix is a reverse
+  automaton that answers "where does this match start" in one suffix pass over
+  the block — a new machine, not a tweak.
+- **`-o` is still behind**: 2.8x ripgrep's wall clock and 3x its peak RSS on the
+  same query (measured above; `docs/BENCHMARKS.md` has no `-o` row of its own).
+  The two costs are the per-line match loop and the rule that every hit is kept
+  until the whole report is printed.
+- **The expression walk is sequential and 3.5x find's time.** `search::walk_expr`
+  cannot use the worker pool, because `-prune` and `-depth` decide the next step
+  from the entry just seen: 0.81–0.83 s for `find /usr -name '*.go'` against
+  0.21–0.31 s, at 5.7 MB resident against 4.8 MB. It buys bounded memory for
+  3.5x the clock; parallelising it needs a per-directory evaluator that can defer
+  `-prune` decisions, not a thread-pool change.
+- **Three deviations from find's output survive** and are documented in
+  `docs/SEARCH.md` §1.4: per-directory sorted order instead of readdir order,
+  `-ls`'s date column, and an expression holding both `-exec` and `-execdir`
+  running both the `-exec` way.
+- **The glob walk's memory.** 351 ms against find's 323 ms on `/usr` is parity,
+  but `find '*'` costs 68 MB against find(1)'s 4.8 MB, because the output *is*
+  the sorted candidate list. Sorting at the end from a stream is the change that
+  would close it; the expression form already streams and pays for it in clock.
+- **`--no-unicode` has no equivalent.** The engine picks the byte path per line
+  and the character path for everything else; there is no switch that forces
+  byte semantics on a non-ASCII line, and `--glob-case-insensitive`,
+  `--hyperlink-format`, `--debug`/`--trace` and ripgrep's full `--encoding`
+  label set are all absent. `docs/SEARCH.md` §1.3 lists them with the letter
+  collisions (`-L`, `-E`, `-I`).
+- **No mmap.** Files are read in 64 KiB blocks into a buffer each worker reuses;
+  mapping was measured slower on `/usr` (6.4–7.5 s against 3.7–4.8 s) and the
+  two are within noise on a cached tree.
+- **Three defects in the flag plumbing, each documented in the appendix of
+  `docs/SEARCH.md` and each a code fix rather than a docs fix.** `find --help`
+  lists nine flags the parser rejects (`--include`, `--exclude`, `--exclude-dir`,
+  `--pre`, `--pre-glob`, `--binary-files`, `-I`, `-d`, `--iglob`); bundled short
+  flags do not bundle (`-in` applies `-i` only); and `-F` with a single `-e`/`-f`
+  pattern escapes the pattern and then matches it as a literal, so
+  `-F -e 'a.b'` finds nothing.
 
 **Open questions worth measuring later.**
 
-- Where the time actually goes: read, match or walk, on a cold cache and on a tree that is
-  already in page cache.
-- Whether the literal fast path is worth a multi-byte (Two-Way or memchr-style) search for
-  needles longer than a couple of bytes.
-- `--stats` is one line today; a per-directory breakdown would make "why is this slow"
-  answerable without a profiler.
+- Where the time goes in `-o`: the match loop or the retained output.
+- Whether the literal fast path is worth a multi-byte (Two-Way or memchr-style)
+  search for needles longer than a couple of bytes.
+- Whether the expression walk can be parallelised per directory without losing
+  `-prune`/`-depth` semantics.
+- `--stats` is one line today; a per-directory breakdown would make "why is this
+  slow" answerable without a profiler.
