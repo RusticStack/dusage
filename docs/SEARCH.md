@@ -344,15 +344,25 @@ and `--engine` is `auto` (the default).
 | capture groups for `-r` | **not recorded**: `-P -r '$1'` is refused with exit 2, as it was before `-P` could match anything |
 | step budget | 1,000,000 VM instructions per call (`DEFAULT_STEP_BUDGET`), counted across every start position and every lookaround body; `Pcre::with_budget` changes it, the CLI does not |
 
-The budget is the price of allowing a backtracking engine at all, and its
-failure mode is worth knowing: `Pcre::try_find_at` returns `BudgetExceeded`
-rather than `Ok(None)`, but the `Pattern` wrapper calls the infallible
-`find_at`, which collapses exhaustion into "no match" (`src/pattern.rs`; the
-module says so at `src/pcre.rs`, "## Step budget"). So a line that burns the
-budget is silently a non-match, not an error. I could not drive a line into
-the budget with the patterns I tried through the CLI — `(a+)+$` over 60 `a`s
-answers in about 6 ms — because the unit test that proves the path
-(`budget_error_is_distinguishable`) sets a 20,000-step budget to do it.
+The budget is the price of allowing a backtracking engine at all, and exhausting
+it is an error, not a non-match: `Pcre::try_find_at` returns `BudgetExceeded`
+rather than `Ok(None)`, `Pattern::try_find_at` passes it on, and the pattern
+keeps the first overrun it saw (`Overrun` in `src/pattern.rs`) so `dusage
+search` can report it after the walk joins. The command then exits **2** with
+`pattern exceeded its step budget (N steps, limit 1000000)` on stderr and
+nothing on stdout — the answer is unknown, so printing "no match" would be a
+wrong answer with grep's exit 1. `rg -P` does the same: `PCRE2: error matching:
+match limit exceeded`, exit 2, no output.
+
+Measured on `40` `a`s followed by `b`: `dusage search -P '(a+)+$'` exits 2 after
+1,000,001 steps, and the same pattern without `-P` (the linear engine) exits 1,
+which is the real no-match. The trailing byte is what makes it burn: a pure run
+of `a`s matches at the first position and answers in microseconds, which is why
+the billion-laughs shape needs the mismatching tail. `tests/search_cli.rs`
+(`a_pattern_that_burns_the_step_budget_exits_2`) and the unit test
+`a_budget_overrun_is_reported_instead_of_read_as_no_match` lock both halves,
+alongside `budget_error_is_distinguishable` in `src/pcre.rs`, which sets a
+20,000-step budget directly.
 
 The pattern is never silently reinterpreted: every unsupported construct is a
 compile error naming the offset, with exit 2, and the error is on stderr.
@@ -813,49 +823,35 @@ These are behaviours a contributor will trip over, all verified against the
 binary and the source, and worth a follow-up issue rather than a silent fix
 here:
 
-1. **Bundled short flags do not work.** The bundling branch of `Args::parse`
-   (`src/cli.rs`) strips two characters per iteration but only the first
-   iteration carries a `-`, so a bundle is read as its first flag and the rest
-   is consumed or dropped: `-in` means `-i` (the line number disappears),
-   `-nm1` is `unknown option: -1 (in m1...)`, and `-inm1` silently applies
-   `-i` and `-m 1` but not `-n` (all measured). The README used to advertise
-   `-in`, `-ilw` and `-inm5`; it does not any more.
-2. The `find` help text calls `--size` repeatable, but `run_query` reads it with
+1. The `find` help text calls `--size` repeatable, but `run_query` reads it with
    `Args::value` and only the last occurrence counts. Measured:
-   `--size +10M --size -1K` behaves as `-1K` alone.
-3. The `search` help text says `--max-columns` truncates at N **bytes**, while
+   `find '*' . --size +10M --size -1K` lists exactly what `--size -1K` alone
+   lists, a 12 MB file included among the exclusions.
+2. The `search` help text says `--max-columns` truncates at N **bytes**, while
    the implementation cuts after N characters (§1.1). Measured on 20 `é` at
    `-M 5`: five characters, ten bytes.
-4. An expression that holds both `-exec` and `-execdir` runs both the `-exec`
-   way, because `findexpr::ExecRequest` carries the command and the terminator
-   but not which predicate asked for it (§1.4).
-5. An unrecognised `--color=WHEN` value is not an error: it falls through to the
+3. An unrecognised `--color=WHEN` value is not an error: it falls through to the
    terminal test in `color_enabled` (`src/cmd/search.rs`), so a typo like
    `--color=allways` silently means `auto` (measured, exit 0).
-6. The `Pattern` wrapper calls `Pcre::find_at`, whose `Option` shape cannot
-   distinguish "no match" from "step budget exhausted" (§2.2), so a
-   budget-burning line is a silent non-match. `try_find_at` is the shape a
-   caller that reports to a user should use.
-7. A symlink is never listed without `--follow` — not the link, not its target
+4. A symlink is never listed without `--follow` — not the link, not its target
    — while GNU find lists the link itself. This is deliberate (the walker never
    follows links outside `--follow`), but it is a visible difference from find
    for anything that pipes `-print0` into `xargs`.
-8. `find --files` and the `--json` `path` field disagree about the root prefix:
-   the text listing prints `src/main.rs` while `path` carries `./src/main.rs`.
-   Both are measured above and both are intentional, but they are easy to
-   confuse when a script switches between them.
-9. `find --help` lists nine flags it does not accept (§1.2): `--include`,
-   `--exclude`, `--exclude-dir`, `--pre`, `--pre-glob`, `--binary-files`, `-I`,
-   `-d` and `--iglob` each exit 2 (eight as `unknown predicate`, `-d` as a
-   misplaced expression). The block is a copy of the `search` option list that
-   survived the split into two scopes.
-10. **`-F` with a single `-e`/`-f` pattern is broken for any pattern holding a
-    regex metacharacter.** `alternation` escapes the pattern (`a\.b`), and
-    `Pattern::with_engine` is then told the text is still fixed, so the engine
-    searches for the escaped bytes. Measured: `-F -e 'a.b'` and `-F -f` with
-    `a.b` in the file match nothing, while `-F 'a.b'`, `-F -e 'axb'` and the
-    two-pattern form all match. `grep -F -f list` is a common idiom, so this
-    one is worth fixing before the next release.
+5. `find`'s text listing and its `--json` `path` field disagree about the root
+   prefix: the listing prints `big.txt` while `path` carries `./big.txt`. Both
+   are measured above and both are intentional, but they are easy to confuse
+   when a script switches between them.
+6. `find --help` still lists five flags it does not accept: `--pre`,
+   `--pre-glob`, `--binary-files`, `-I` and `-d` each exit 2 (four as `unknown
+   predicate`, `-d` as a misplaced expression). The block is a copy of the
+   `search` option list; the other four it used to carry (`--include`,
+   `--exclude`, `--exclude-dir`, `--iglob`) are now walk filters `find` honours.
+
+Entries that used to sit here — bundled short flags, `-exec` with `-execdir` in
+one expression, `-F` with a single `-e`/`-f` pattern holding a regex
+metacharacter, and a step-budget overrun reported as a silent non-match — have
+since been fixed, and each one's behaviour is now asserted by a test rather than
+described here.
 
 ## Sources
 

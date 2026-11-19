@@ -799,6 +799,9 @@ du_case du_hardlinks eq . size/hl '-a -b' '-a -b'
 # A zero-length file and a 1 KiB one, named as two start points, so both a file root and
 # the empty-file arithmetic are pinned.
 du_case du_zero_length eq . 'size/empty.zero size/a.txt' '-b' '-b'
+# Sizes below 1 KiB, where the two tools used to round differently: 4 files of 3..9 bytes are
+# now the same 1 block on both sides, so this replaced its catalogue entry.
+du_case du_block_rounding eq . rounding '' ''
 
 say ""
 say "== du: catalogued differences"
@@ -809,9 +812,6 @@ du_case du_allocation known:du-allocation . size '' ''
 # left is the blocks the directory inode itself allocates (8 KiB here), which dusage counts
 # as zero.
 du_case du_dir_inode known:du-dir-inode . many '' ''
-# Sizes below 1 KiB: dusage rounds each file up into its block, GNU rounds the subtree total
-# once, so 4 files of 3..9 bytes are 4 blocks here and 1 there.
-du_case du_block_rounding known:du-block-rounding . rounding '' ''
 
 say ""
 say "== -z: dusage search -z vs rg -z (zip/)"
