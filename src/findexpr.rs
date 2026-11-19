@@ -2830,8 +2830,23 @@ mod tests {
             mtime: UNIX_EPOCH + Duration::new(1_700_000_000, 386_372_807),
             ..file("./a")
         };
-        assert_eq!(printf_of(&["-printf", "%TS"], &e), "20.3863728070");
-        assert!(printf_of(&["-printf", "%t"], &e).ends_with("22:13:20.3863728070 2023"));
+        let ts = printf_of(&["-printf", "%TS"], &e);
+        // Ten digits after the point and a trailing zero, on every platform.
+        assert_eq!(ts.len(), 13, "{ts}");
+        assert!(ts.starts_with("20."), "{ts}");
+        assert!(ts.ends_with('0'), "{ts}");
+        // A Windows timestamp goes through FILETIME, whose resolution is 100 ns, so the last
+        // two digits are already lost there before this code ever sees the value.
+        #[cfg(unix)]
+        assert_eq!(ts, "20.3863728070");
+        #[cfg(windows)]
+        assert!(ts.starts_with("20.3863728"), "{ts}");
+        let full = printf_of(&["-printf", "%t"], &e);
+        assert!(full.ends_with(" 2023"), "{full}");
+        #[cfg(unix)]
+        assert!(full.ends_with("22:13:20.3863728070 2023"), "{full}");
+        #[cfg(windows)]
+        assert!(full.contains("22:13:20.3863728"), "{full}");
     }
 
     #[test]
