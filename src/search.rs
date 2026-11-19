@@ -120,6 +120,11 @@ pub struct SearchOptions {
     pub search_zip: bool,
     /// A binary file is not a match at all (`-I`, `--binary-files=without-match`).
     pub skip_binary: bool,
+    /// Records are separated by NUL instead of newline (`--null-data`), and printed the same
+    /// way: the terminator is `self.term`.
+    pub null_data: bool,
+    /// The byte that ends a record and an output line: `\n`, or NUL under `--null-data`.
+    pub term: u8,
 }
 
 /// One piece of a `-r` replacement: text to print, or a group of the match it came from.
@@ -198,6 +203,8 @@ impl SearchOptions {
             multiline: false,
             search_zip: false,
             skip_binary: false,
+            null_data: false,
+            term: b'\n',
         }
     }
 }
@@ -915,6 +922,9 @@ fn scan_file_with(
     if o.multiline {
         return scan_multiline(path, o, stats);
     }
+    if o.null_data {
+        return scan_records(path, o, stats);
+    }
     let mut f = File::open(path)?;
     stats.files_scanned += 1;
     let n = f.read(&mut *buf)?;
@@ -1093,6 +1103,78 @@ fn scan_multiline(
         binary: false,
     };
     Ok(Some(out))
+}
+
+/// Search a file whose records end in NUL instead of a newline (`--null-data`). Records are
+/// cut in memory rather than streamed: a file of records is small, and the line scanner is
+/// built around a newline.
+fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Option<FileHits>> {
+    let mut f = File::open(path)?;
+    stats.files_scanned += 1;
+    let mut data = Vec::new();
+    f.read_to_end(&mut data)?;
+    stats.bytes_scanned += data.len() as u64;
+    let mut hits: Vec<LineHit> = Vec::new();
+    let mut matches = 0u64;
+    let mut total = 0u64;
+    let mut offset = 0u64;
+    for (i, record) in data.split(|b| *b == b'\0').enumerate() {
+        let found = o.pattern.find_at(record, 0);
+        let number = (i + 1) as u64;
+        if found.is_some() != o.invert {
+            matches += 1;
+            total += o.pattern.find_all(record, MAX_PER_LINE).len() as u64;
+            let spans: Vec<(usize, usize)> = if o.invert {
+                Vec::new()
+            } else {
+                o.pattern
+                    .find_all(record, MAX_PER_LINE)
+                    .into_iter()
+                    .map(|m| (m.start, m.end))
+                    .collect()
+            };
+            if o.only_matching && !spans.is_empty() {
+                for (s, e) in spans {
+                    hits.push(LineHit {
+                        number,
+                        offset: offset + s as u64,
+                        text: record[s..e].to_vec(),
+                        matched: true,
+                        spans: vec![(0, e - s)],
+                    });
+                }
+            } else {
+                hits.push(LineHit {
+                    number,
+                    offset,
+                    text: record.to_vec(),
+                    matched: true,
+                    spans,
+                });
+            }
+        }
+        offset += record.len() as u64 + 1;
+    }
+    if matches == 0 {
+        let wants = o.files_without_matches || (o.include_zero && o.count);
+        return Ok(wants.then(|| FileHits {
+            path: path.to_string_lossy().into_owned(),
+            hits: Vec::new(),
+            matches: 0,
+            total: 0,
+            binary: false,
+        }));
+    }
+    stats.matches += matches;
+    let keep =
+        o.count || o.count_matches || o.files_with_matches || o.files_without_matches || o.quiet;
+    Ok(Some(FileHits {
+        path: path.to_string_lossy().into_owned(),
+        hits: if keep { Vec::new() } else { hits },
+        matches,
+        total,
+        binary: false,
+    }))
 }
 
 /// Every line of `data`, with the byte ranges each starts and ends at.

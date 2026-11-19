@@ -83,7 +83,8 @@ OPTIONS:
         --max-columns-preview  say so when a line was cut
     --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
     --files                with no pattern, list the files a search would read
-    -Z, --null             NUL instead of ':' after each file name (for xargs -0)
+    -Z, --null, -0         NUL instead of ':' after each file name (for xargs -0)
+        --null-data        records end in NUL instead of a newline, and so does the output
 
 A path of `-` is standard input, and with no paths a piped stdin is searched instead of `.`.
     --sort KEY             result order: path (default), none, modified, accessed, created
@@ -134,6 +135,7 @@ OPTIONS:
     --newerct DATE         changed after DATE
     --dirs                 directories only
     --files                files only
+    --empty                only empty files and directories (find -empty)
     --long                 print size, modification time and path
     --max-depth N          do not descend more than N levels below each root
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
@@ -446,6 +448,8 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--color",
     "-Z",
     "--null",
+    "-0",
+    "--null-data",
     "--stats",
     "--max-columns-preview",
     "--no-heading",
@@ -706,8 +710,25 @@ fn parse_sort(key: &str) -> Result<SortKey, Fail> {
     }
 }
 
+/// Remove `-0` from `raw`. The shared parser reads a leading `-` followed by digits as a
+/// negative number, which is the right reading for an age or a size and the wrong one for
+/// grep's NUL-after-name flag, so it is taken out before parsing.
+fn take_dash_zero(raw: &mut Vec<String>) -> bool {
+    let mut seen = false;
+    raw.retain(|t| {
+        if t == "-0" {
+            seen = true;
+            false
+        } else {
+            true
+        }
+    });
+    seen
+}
+
 fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let color_mode = take_color_flag(&mut raw);
+    let dash_zero = take_dash_zero(&mut raw);
     let unrestricted = take_unrestricted(&mut raw);
     let (value_flags, bool_flags): (&[&str], &[&str]) = if scope == Scope::Content {
         (SEARCH_VALUE_FLAGS, SEARCH_BOOL_FLAGS)
@@ -737,6 +758,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--ignore-case",
                 "--name",
                 "--full-path",
+                "--empty",
                 "--dirs",
                 "--files",
                 "--long",
@@ -957,7 +979,11 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.no_ignore = a.flag("--no-ignore") || unrestricted >= 1;
     o.text = a.flag("-a") || a.flag("--text") || unrestricted >= 3;
     o.one_filesystem = a.flag("-x") || a.flag("--one-filesystem") || a.flag("--one-file-system");
-    o.null = a.flag("-Z") || a.flag("--null");
+    o.null = dash_zero || a.flag("-Z") || a.flag("--null");
+    o.null_data = a.flag("--null-data");
+    if o.null_data {
+        o.term = 0;
+    }
     o.heading = a.flag("--heading") && !a.flag("--no-heading");
     o.max_columns_preview = a.flag("--max-columns-preview");
     o.column = a.flag("--column");
@@ -1127,7 +1153,9 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 }
             };
             let since = stamp("--newermt")?.or(stamp("--newerat")?.or(stamp("--newerct")?));
+            let empty_only = a.flag("--empty");
             o.details = json
+                || empty_only
                 || a.flag("--long")
                 || since.is_some()
                 || a.value("--size").is_some()
@@ -1175,6 +1203,19 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 }
                 if dirs_only && !c.is_dir || files_only && c.is_dir {
                     return false;
+                }
+                // `find -empty`: a file of no bytes, or a directory with no entries.
+                if empty_only {
+                    let empty = if c.is_dir {
+                        std::fs::read_dir(&c.path)
+                            .map(|mut d| d.next().is_none())
+                            .unwrap_or(false)
+                    } else {
+                        c.size == 0
+                    };
+                    if !empty {
+                        return false;
+                    }
                 }
                 if let Some(f) = &size_filter {
                     if !f.matches(c.size) {

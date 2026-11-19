@@ -1409,3 +1409,72 @@ fn absolute_date_filters() {
     assert_eq!(code(&bad), 2);
     assert!(stderr(&bad).contains("invalid date"), "{}", stderr(&bad));
 }
+
+#[test]
+fn null_data_splits_on_nul() {
+    let f = Fixture::new("nulldata");
+    let dir = f.root.join("nd");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("nul.dat"), b"aaa\0needle one\0ccc\0").unwrap();
+    fs::write(dir.join("plain.txt"), "alpha needle beta\nsecond\n").unwrap();
+
+    // A record ends at NUL, the record number counts records, and the output ends the same
+    // way, so `dusage search --null-data … | xargs -0` works.
+    let nul = dir.join("nul.dat").display().to_string();
+    let plain = dir.join("plain.txt").display().to_string();
+    let rec = run(&["search", "--null-data", "-n", "needle"], &dir);
+    assert_eq!(code(&rec), 0, "{}", stderr(&rec));
+    assert_eq!(
+        String::from_utf8_lossy(&rec.stdout),
+        format!("{nul}:2:needle one\0{plain}:1:alpha needle beta\nsecond\n\0")
+    );
+
+    // `-c` counts records, `-l` names files, both NUL-terminated.
+    let count = run(&["search", "--null-data", "-c", "needle"], &dir);
+    assert_eq!(
+        String::from_utf8_lossy(&count.stdout),
+        format!("{nul}:1\0{plain}:1\0")
+    );
+    let names = run(&["search", "--null-data", "-l", "needle"], &dir);
+    assert_eq!(
+        String::from_utf8_lossy(&names.stdout),
+        format!("{nul}\0{plain}\0")
+    );
+
+    // `-o` prints just the match, and `-Z`/`-0` still mean "NUL after the file name".
+    let only = run(&["search", "--null-data", "-o", "needle"], &dir);
+    assert_eq!(
+        String::from_utf8_lossy(&only.stdout),
+        format!("{nul}:needle\0{plain}:needle\0")
+    );
+    let zero = run(&["search", "-0", "-l", "needle"], &dir);
+    assert_eq!(zero.stdout, names.stdout);
+}
+
+#[test]
+fn empty_files_and_directories() {
+    let f = Fixture::new("empty");
+    let dir = f.root.join("emp");
+    fs::create_dir_all(dir.join("hollow")).unwrap();
+    fs::create_dir_all(dir.join("full")).unwrap();
+    fs::write(dir.join("zero.txt"), "").unwrap();
+    fs::write(dir.join("full/f.txt"), "x").unwrap();
+    fs::write(dir.join("some.txt"), "x").unwrap();
+
+    // A file of no bytes and a directory with no entries, which is `find -empty`.
+    let both = stdout(&run(&["find", "--empty", "*"], &dir));
+    assert_eq!(both.lines().count(), 2, "{both}");
+    assert!(both.contains("hollow"), "{both}");
+    assert!(both.contains("zero.txt"), "{both}");
+    assert!(!both.contains("full"), "{both}");
+
+    // The type filters narrow it further, as `find -empty -type f` does.
+    assert_eq!(
+        stdout(&run(&["find", "--empty", "--files", "*"], &dir)).trim(),
+        "zero.txt"
+    );
+    assert_eq!(
+        stdout(&run(&["find", "--empty", "--dirs", "*"], &dir)).trim(),
+        "hollow"
+    );
+}
