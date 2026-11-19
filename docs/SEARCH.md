@@ -70,6 +70,7 @@ combine. The option lists are `SEARCH_VALUE_FLAGS` / `SEARCH_BOOL_FLAGS`
 | `-Z`, `--null` | `rg --null` / `grep -Z` | A NUL instead of `:` after the file name, for `xargs -0` (`src/report.rs:336-342`, `src/report.rs:371-379`). |
 | `--no-ignore-vcs`, `--no-ignore-dot`, `--no-ignore-parent`, `--no-ignore-files` | `rg --no-ignore-vcs` and friends | Each removes one source of ignore rules: `.gitignore` and `.git/info/exclude`, `.ignore`, the rule files stacked from a root's ancestors, or all of them at once. `--no-ignore-global` is accepted and does nothing, because there is no global ignore file to read. |
 | `-r`, `--replace TEXT` | `rg -r` / `grep -r` | Prints each line with its matches replaced. `$0` is the whole match, `$1`..`$99` (or `${1}`) a capture group, `$$` a dollar; grep's `\1` spelling works too. The replacement is what gets highlighted and what `-o` prints. A reference the pattern cannot satisfy is refused with exit 2, as grep refuses an invalid back reference, where ripgrep prints nothing. Group references need the default engine: `-P` does not record groups, so a reference there is refused too. |
+| `--follow` | `rg --follow` (`rg -L`) | Follows symbolic links, walking each real directory once: the chain of real paths above a directory is compared before descending, so a link pointing back up the tree is skipped instead of recursing. `-L` is not the short form here because `-L` already means `--files-without-match`; the long spelling is the only one. A link whose target is gone is reported as an unreadable path rather than skipped silently, and a cycle is skipped without ripgrep's "File system loop found" line. |
 | `--passthru` | `rg --passthru` | Prints every line, with matches marked as hits and the rest as context, so a file with no match still prints in full while the exit status stays 1. |
 | `--sort KEY`, `--sortr KEY`, `--sort-files` | `rg --sort`, `rg --sortr`, `rg --sort-files` | `path` (the default, and what `--sort-files` means), `none` for the order the walk produced, or `modified` for oldest-first. Any other key is refused with exit 2 rather than silently ignored. `modified` costs one `stat` per result. |
 | `--hidden` | `rg --hidden` / `rg -.` | Only governs names starting with `.` (`src/search.rs:200-203`); it does not disable ignore rules. |
@@ -133,7 +134,7 @@ partial stand-in in the parser.
 | `--no-require-git` | Respects `.gitignore` even outside a git repository ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--no-require-git`). | We always respect it — nothing in `src/ignore.rs` tests for a repository — which is exactly `--no-require-git` behaviour, on by default. `.git/info/exclude` is the one rule file that *is* gated on a `.git` directory (§3). |
 
 Also missing, and worth knowing: `--null-data`, `--crlf`, `--binary`,
-`--follow`/`-L`, `-U/--multiline`, `-z/--search-zip`, `--pre`,
+`-U/--multiline`, `-z/--search-zip`, `--pre`,
 `--max-columns-preview`, `--no-heading`, `--trim`, `--line-buffered`,
 `--block-buffered`, `--engine`, `--no-unicode` and `--sort` keys other than
 `path`, `none` and `modified`.

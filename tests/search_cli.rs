@@ -958,3 +958,51 @@ fn replace_rewrites_matches() {
     assert_eq!(code(&bad), 2);
     assert!(stderr(&bad).contains("group $3"), "{}", stderr(&bad));
 }
+
+#[test]
+fn follow_walks_links_once() {
+    let f = Fixture::new("follow");
+    let dir = f.root.join("followdir");
+    fs::create_dir_all(dir.join("real/sub")).unwrap();
+    fs::write(dir.join("real/a.txt"), "needle\n").unwrap();
+    fs::write(dir.join("real/sub/b.txt"), "needle\n").unwrap();
+    let link = |target: &str, name: &str| {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, dir.join(name)).unwrap();
+        #[cfg(windows)]
+        let _ = (target, name);
+    };
+    link("real", "linkdir");
+    link("real/a.txt", "linkfile.txt");
+
+    // Without `--follow` a link is invisible, as it was before.
+    let plain = stdout(&run(&["search", "-l", "needle"], &dir));
+    assert!(!plain.contains("link"), "{plain}");
+
+    #[cfg(unix)]
+    {
+        let followed = stdout(&run(&["search", "-l", "--follow", "needle"], &dir));
+        assert!(followed.contains("linkdir/a.txt"), "{followed}");
+        assert!(followed.contains("linkfile.txt"), "{followed}");
+        assert!(followed.contains("linkdir/sub/b.txt"), "{followed}");
+        // The real tree is still walked once, not twice.
+        assert_eq!(
+            followed
+                .lines()
+                .filter(|l| l.ends_with("real/a.txt"))
+                .count(),
+            1,
+            "{followed}"
+        );
+
+        // A link pointing back up the tree must not loop forever.
+        link("..", "up");
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dusage"));
+        let out = cmd
+            .args(["search", "-l", "--follow", "needle"])
+            .arg(&dir)
+            .output()
+            .unwrap();
+        assert!(out.status.code().is_some(), "the walk terminated");
+    }
+}
