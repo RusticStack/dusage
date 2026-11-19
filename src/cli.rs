@@ -1,7 +1,7 @@
 //! Hand-rolled argument parsing and human units (`7d`, `2h`, `300M`). Owned by wave-1 lane `cli`.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Parsed command line: positionals plus `--flag` / `--name value` options.
 #[derive(Debug, Default, Clone)]
@@ -206,6 +206,69 @@ pub fn parse_age(s: &str) -> Result<Option<Duration>, String> {
         Some(n) if n >= 0.0 && !num.starts_with('-') => secs(n * per, s).map(Some),
         _ => Err(bad()),
     }
+}
+
+/// Parse an absolute date, the way `find -newermt` takes one: `2030-01-31`,
+/// `2030-01-31 08:30`, `2030-01-31T08:30:15`, or `@1700000000` for a Unix timestamp. Times
+/// are read as UTC, since a local-zone library is a dependency this tool does not have.
+pub fn parse_date(s: &str) -> Result<SystemTime, String> {
+    let t = s.trim();
+    let bad = || format!("invalid date {s:?} (use YYYY-MM-DD, YYYY-MM-DD HH:MM[:SS], or @SECONDS)");
+    if let Some(rest) = t.strip_prefix('@') {
+        let secs: u64 = rest.trim().parse().map_err(|_| bad())?;
+        return Ok(UNIX_EPOCH + Duration::from_secs(secs));
+    }
+    let date = t.split([' ', 'T']).next().unwrap_or("");
+    let mut parts = date.split('-');
+    let year: i64 = parts.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
+    let month: i64 = parts.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
+    let day: i64 = parts.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(bad());
+    }
+    let time = t[date.len()..].trim_start_matches([' ', 'T']);
+    let (mut hh, mut mm, mut ss) = (0i64, 0i64, 0i64);
+    if !time.is_empty() {
+        let mut tparts = time.split(':');
+        hh = tparts
+            .next()
+            .ok_or_else(bad)?
+            .trim()
+            .parse()
+            .map_err(|_| bad())?;
+        mm = tparts
+            .next()
+            .unwrap_or("0")
+            .trim()
+            .parse()
+            .map_err(|_| bad())?;
+        ss = tparts
+            .next()
+            .unwrap_or("0")
+            .trim()
+            .parse()
+            .map_err(|_| bad())?;
+        if !(0..24).contains(&hh) || !(0..60).contains(&mm) || !(0..61).contains(&ss) {
+            return Err(bad());
+        }
+    }
+    let secs = days_from_civil(year, month, day) * 86_400 + hh * 3600 + mm * 60 + ss;
+    Ok(if secs >= 0 {
+        UNIX_EPOCH + Duration::from_secs(secs as u64)
+    } else {
+        UNIX_EPOCH - Duration::from_secs((-secs) as u64)
+    })
+}
+
+/// Days from 1970-01-01 to `y-m-d`, by the civil-from-days inverse (no leap-year tables).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// Format an age the way `parse_age` accepts it: the largest whole unit, then the rest.

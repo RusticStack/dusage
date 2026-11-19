@@ -1284,3 +1284,128 @@ fn columns_preview_and_time_sorts() {
     assert_eq!(code(&bad), 2);
     assert!(stderr(&bad).contains("accessed"), "{}", stderr(&bad));
 }
+
+#[test]
+fn grep_compatibility_flags() {
+    let f = Fixture::new("grepcompat");
+    let dir = f.root.join("gc");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("a.c"), "alpha needle\n").unwrap();
+    fs::write(dir.join("b.h"), "needle\n").unwrap();
+    fs::write(dir.join("sub/c.c"), "needle\n").unwrap();
+    fs::write(dir.join("bin.dat"), b"bin\0needle\n").unwrap();
+
+    // `--include` narrows like `-g`, `--exclude` and `--exclude-dir` take paths away.
+    let inc = stdout(&run(
+        &["search", "-I", "-l", "--include", "*.c", "needle"],
+        &dir,
+    ));
+    // Windows separates with `\`, so match on the file names rather than the paths.
+    assert!(inc.contains("a.c") && inc.contains("c.c"), "{inc}");
+    assert_eq!(inc.lines().count(), 2, "{inc}");
+    assert!(!inc.contains("b.h"), "{inc}");
+    let exc = stdout(&run(
+        &["search", "-I", "-l", "--exclude", "*.h", "needle"],
+        &dir,
+    ));
+    assert!(!exc.contains("b.h"), "{exc}");
+    let excdir = stdout(&run(
+        &["search", "-I", "-l", "--exclude-dir", "sub", "needle"],
+        &dir,
+    ));
+    // Both files in the root stay; the one under `sub/` is gone.
+    assert_eq!(excdir.lines().count(), 2, "{excdir}");
+    assert!(excdir.contains("a.c") && excdir.contains("b.h"), "{excdir}");
+
+    // `-I` makes a NUL-carrying file no match at all, which is `--binary-files=without-match`.
+    assert!(!stdout(&run(&["search", "-l", "needle"], &dir)).is_empty());
+    let quiet_bin = stdout(&run(&["search", "-I", "-l", "needle"], &dir));
+    assert!(!quiet_bin.contains("bin.dat"), "{quiet_bin}");
+    assert_eq!(
+        stdout(&run(
+            &["search", "--binary-files", "without-match", "-l", "needle"],
+            &dir
+        )),
+        quiet_bin
+    );
+
+    // `-d skip` does not descend, so a file in a subdirectory drops out.
+    let skipped = stdout(&run(&["search", "-I", "-l", "-d", "skip", "needle"], &dir));
+    assert!(
+        skipped.contains("a.c") && skipped.contains("b.h"),
+        "{skipped}"
+    );
+    assert_eq!(skipped.lines().count(), 2, "{skipped}");
+}
+
+#[test]
+fn basic_regular_expressions() {
+    let f = Fixture::new("bre");
+    let dir = f.root.join("bre");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("t.txt"), "abc\nabbbc\na+b\n(x)\nabbc\n").unwrap();
+
+    // `+` and `( )` are literal in a basic regexp, `\+` and `\( \)` are the operators, and
+    // `-E` is the default dialect spelled out.
+    let lit_plus = stdout(&run(&["search", "-G", "-h", "a+b"], &dir));
+    assert_eq!(lit_plus, "a+b\n");
+    assert_eq!(
+        stdout(&run(&["search", "-G", "-h", r"a\+b"], &dir)),
+        "abc\nabbbc\nabbc\n"
+    );
+    assert_eq!(
+        stdout(&run(&["search", "-G", "-h", r"\(x\)"], &dir)),
+        "(x)\n"
+    );
+    assert_eq!(
+        stdout(&run(&["search", "-E", "-h", "a+b"], &dir)),
+        "abc\nabbbc\nabbc\n"
+    );
+    // `\{n\}` is BEG's bounded repetition, and it is exact.
+    assert_eq!(
+        stdout(&run(&["search", "-G", "-h", r"ab\{2\}c"], &dir)),
+        "abbc\n"
+    );
+    // `{n}` is exact in the default dialect too, which is a bug this batch fixed.
+    assert_eq!(
+        stdout(&run(&["search", "-h", "-o", "ab{2}c"], &dir)),
+        "abbc\n"
+    );
+}
+
+#[test]
+fn absolute_date_filters() {
+    let f = Fixture::new("dates");
+    let dir = f.root.join("dates");
+    fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("old.txt");
+    let new = dir.join("new.txt");
+    fs::write(&old, "x").unwrap();
+    fs::write(&new, "x").unwrap();
+    // The timestamps are set from the file handle, so the test needs no date arithmetic of
+    // its own beyond two fixed instants.
+    let set = |p: &std::path::Path, at: std::time::SystemTime| {
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    };
+    let epoch = std::time::UNIX_EPOCH;
+    set(&old, epoch + std::time::Duration::from_secs(1_500_000_000)); // 2017
+    set(&new, epoch + std::time::Duration::from_secs(1_700_000_000)); // 2023
+
+    // `--newermt` takes an absolute date, a date-time, or a Unix timestamp.
+    let newer = stdout(&run(&["find", "--newermt", "2020-01-01", "*.txt"], &dir));
+    assert_eq!(newer.trim(), "new.txt", "{newer}");
+    let stamped = stdout(&run(&["find", "--newermt", "@1600000000", "*.txt"], &dir));
+    assert_eq!(stamped.trim(), "new.txt", "{stamped}");
+    let both = stdout(&run(&["find", "--newermt", "2000-01-01", "*.txt"], &dir));
+    assert_eq!(both.lines().count(), 2, "{both}");
+
+    // A date that makes no sense is refused rather than silently matching nothing.
+    let bad = run(&["find", "--newermt", "not-a-date", "*"], &dir);
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).contains("invalid date"), "{}", stderr(&bad));
+}

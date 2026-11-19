@@ -118,6 +118,8 @@ pub struct SearchOptions {
     pub multiline: bool,
     /// Expand gzip files before searching them (`-z`).
     pub search_zip: bool,
+    /// A binary file is not a match at all (`-I`, `--binary-files=without-match`).
+    pub skip_binary: bool,
 }
 
 /// One piece of a `-r` replacement: text to print, or a group of the match it came from.
@@ -195,6 +197,7 @@ impl SearchOptions {
             follow: false,
             multiline: false,
             search_zip: false,
+            skip_binary: false,
         }
     }
 }
@@ -936,6 +939,11 @@ fn scan_file_with(
     // A file that needs transcoding is read whole: UTF-16 code units straddle the block
     // boundary, so there is nothing to stream. Everything else keeps the streaming path.
     let binary = bytes::is_binary(&buf[..n], BINARY_SCAN.min(n));
+    // `-I`/`--binary-files=without-match`: a NUL-carrying file is not even a match.
+    if binary && !o.text && o.skip_binary {
+        stats.files_binary += 1;
+        return Ok(None);
+    }
     // Only a NUL-heavy or BOM-carrying file can be UTF-16, and the binary check has already
     // looked for NULs, so plain text skips the sniff entirely.
     let encoding = o.encoding.unwrap_or_else(|| {
@@ -998,6 +1006,10 @@ fn scan_expanded(
 ) -> io::Result<Option<FileHits>> {
     stats.bytes_scanned += data.len() as u64;
     let binary = bytes::is_binary(data, BINARY_SCAN.min(data.len()));
+    if binary && !o.text && o.skip_binary {
+        stats.files_binary += 1;
+        return Ok(None);
+    }
     if binary && binary_by_name_only(o) {
         stats.files_binary += 1;
         let found = o.pattern.find_at(data, 0).is_some();
