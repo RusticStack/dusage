@@ -6,7 +6,7 @@ use crate::encodings::Encoding;
 use crate::glob::Glob;
 use crate::pattern::Pattern;
 use crate::report;
-use crate::search::{search, Scope, SearchOptions};
+use crate::search::{search, Scope, SearchOptions, SortKey};
 use std::io::Read;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -49,6 +49,7 @@ OPTIONS:
         --count-matches    print the number of individual matches per file
     -o, --only-matching    print only the matching part of each line
     -q, --quiet            print nothing; exit 0 on the first match
+        --passthru         print every line, matching or not (matched lines stay marked)
     -m, --max-count N      stop after N matching lines per file
     -A, --after-context N  print N lines after each match
     -B, --before-context N print N lines before each match
@@ -71,8 +72,15 @@ OPTIONS:
     -Z, --null             NUL instead of ':' after each file name (for xargs -0)
 
 A path of `-` is standard input, and with no paths a piped stdin is searched instead of `.`.
+    --sort KEY             result order: path (default), none, modified (oldest first)
+    --sortr KEY            the same, reversed
     --hidden               also search hidden files and directories
     --no-ignore            do not skip .gitignore/.ignore rules or cache directories
+    --no-ignore-vcs        read neither .gitignore nor .git/info/exclude
+    --no-ignore-dot        do not read .ignore files
+    --no-ignore-parent     do not read the ignore files above a root
+    --no-ignore-files      read no ignore file at all (the three switches above)
+    --no-ignore-global     accepted for compatibility; this never reads a global ignore file
     -x, --one-filesystem   stay on the starting filesystem
     --json                 machine-readable output
     --color[=WHEN]         WHEN is always, never or auto (default auto)
@@ -106,8 +114,15 @@ OPTIONS:
     --max-depth N          do not descend more than N levels below each root
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
         --iglob PATTERN    the same, matched without case
+    --sort KEY             result order: path (default), none, modified (oldest first)
+    --sortr KEY            the same, reversed
     --hidden               also look at hidden files and directories
     --no-ignore            do not skip .gitignore/.ignore rules or cache directories
+    --no-ignore-vcs        read neither .gitignore nor .git/info/exclude
+    --no-ignore-dot        do not read .ignore files
+    --no-ignore-parent     do not read the ignore files above a root
+    --no-ignore-files      read no ignore file at all (the three switches above)
+    --no-ignore-global     accepted for compatibility; this never reads a global ignore file
     -x, --one-filesystem   stay on the starting filesystem
     --json                 machine-readable output
     --color[=WHEN]         WHEN is always, never or auto (default auto)
@@ -288,6 +303,8 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--max-filesize",
     "--max-columns",
     "--encoding",
+    "--sort",
+    "--sortr",
 ];
 
 const SEARCH_BOOL_FLAGS: &[&str] = &[
@@ -326,6 +343,11 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--text",
     "--hidden",
     "--no-ignore",
+    "--no-ignore-vcs",
+    "--no-ignore-dot",
+    "--no-ignore-parent",
+    "--no-ignore-global",
+    "--no-ignore-files",
     "-x",
     "--one-filesystem",
     "--one-file-system",
@@ -335,6 +357,8 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--no-messages",
     "--include-zero",
     "--line-regexp",
+    "--passthru",
+    "--sort-files",
     "--type-list",
     "--json",
     "--color",
@@ -372,6 +396,19 @@ fn take_unrestricted(raw: &mut Vec<String>) -> u8 {
     n
 }
 
+/// `--sort KEY` / `--sortr KEY`: the order results print in.
+fn parse_sort(key: &str) -> Result<SortKey, Fail> {
+    match key {
+        "path" => Ok(SortKey::Path),
+        "none" => Ok(SortKey::None),
+        "modified" => Ok(SortKey::Modified),
+        other => Err(Fail(
+            2,
+            format!("unsupported --sort key {other:?} (path, none, modified)"),
+        )),
+    }
+}
+
 fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let color_mode = take_color_flag(&mut raw);
     let unrestricted = take_unrestricted(&mut raw);
@@ -389,6 +426,8 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--older",
                 "--newer",
                 "--max-depth",
+                "--sort",
+                "--sortr",
             ],
             &[
                 "-F",
@@ -398,6 +437,11 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--long",
                 "--hidden",
                 "--no-ignore",
+                "--no-ignore-vcs",
+                "--no-ignore-dot",
+                "--no-ignore-parent",
+                "--no-ignore-global",
+                "--no-ignore-files",
                 "-x",
                 "--one-filesystem",
                 "--one-file-system",
@@ -574,6 +618,19 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.byte_offset = a.flag("--byte-offset");
     o.include_zero = a.flag("--include-zero");
     o.quiet_errors = a.flag("--no-messages");
+    o.passthru = a.flag("--passthru");
+    // `--sort-files` is ripgrep's older spelling of `--sort path`.
+    let (sort, sort_reverse) = match (a.value("--sort"), a.value("--sortr")) {
+        (_, Some(v)) => (parse_sort(v)?, true),
+        (Some(v), None) => (parse_sort(v)?, false),
+        (None, None) => (SortKey::Path, false),
+    };
+    o.sort = sort;
+    o.sort_reverse = sort_reverse;
+    o.details |= sort == SortKey::Modified;
+    o.no_ignore_vcs = a.flag("--no-ignore-vcs") || a.flag("--no-ignore-files");
+    o.no_ignore_dot = a.flag("--no-ignore-dot") || a.flag("--no-ignore-files");
+    o.no_ignore_parent = a.flag("--no-ignore-parent") || a.flag("--no-ignore-files");
     let json = a.flag("--json");
     let color = color_enabled(color_mode.as_deref());
     // Colour, the JSON report and `--column` all need each match located inside its line.

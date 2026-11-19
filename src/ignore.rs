@@ -34,9 +34,6 @@ const BUILTIN: &[&str] = &[
     ".gradle",
 ];
 
-/// Files consulted for ignore rules, in increasing priority.
-const RULE_FILES: &[&str] = &[".gitignore", ".ignore"];
-
 /// One directory's parsed rules.
 #[derive(Debug, Clone)]
 struct Layer {
@@ -155,6 +152,12 @@ pub struct IgnoreRules {
     /// for the price of a few `Arc` clones.
     layers: Vec<Arc<Layer>>,
     globs: GlobFilter,
+    /// Read `.gitignore` and `.git/info/exclude` (`--no-ignore-vcs` clears it).
+    vcs: bool,
+    /// Read `.ignore` (`--no-ignore-dot` clears it).
+    dot: bool,
+    /// Stack the rule files of the directories above a root (`--no-ignore-parent` clears it).
+    parent: bool,
 }
 
 impl IgnoreRules {
@@ -171,7 +174,42 @@ impl IgnoreRules {
     pub fn new(builtin: bool) -> Self {
         IgnoreRules {
             builtin,
+            vcs: true,
+            dot: true,
+            parent: true,
             ..Default::default()
+        }
+    }
+
+    /// Choose which sources of ignore rules a walk reads.
+    pub fn set_sources(&mut self, vcs: bool, dot: bool, parent: bool) {
+        self.vcs = vcs;
+        self.dot = dot;
+        self.parent = parent;
+    }
+
+    /// True when a walk should stack the ignore files of a root's ancestors.
+    pub fn reads_parents(&self) -> bool {
+        self.parent
+    }
+
+    /// The rules of one directory, in priority order: `.gitignore` first, then `.ignore`,
+    /// which ranks above it because it exists to override the VCS rules.
+    fn read_own(&self, dir: &Path, rules: &mut Vec<Glob>, anchored: Option<&str>) {
+        for (name, on) in [(".gitignore", self.vcs), (".ignore", self.dot)] {
+            if on {
+                match anchored {
+                    None => read_rules(&dir.join(name), rules),
+                    Some(prefix) => read_rules_anchored(&dir.join(name), prefix, rules),
+                }
+            }
+        }
+        if self.vcs && dir.join(".git").is_dir() {
+            let exclude = dir.join(".git/info/exclude");
+            match anchored {
+                None => read_rules(&exclude, rules),
+                Some(prefix) => read_rules_anchored(&exclude, prefix, rules),
+            }
         }
     }
 
@@ -246,13 +284,7 @@ impl IgnoreRules {
     pub fn push_dir(&mut self, dir: &Path, rel: &str) -> usize {
         let mark = self.layers.len();
         let mut rules = Vec::new();
-        for name in RULE_FILES {
-            read_rules(&dir.join(name), &mut rules);
-        }
-        // A git checkout's own exclude file ranks with its `.gitignore`s.
-        if dir.join(".git").is_dir() {
-            read_rules(&dir.join(".git/info/exclude"), &mut rules);
-        }
+        self.read_own(dir, &mut rules, None);
         if !rules.is_empty() {
             self.layers.push(Arc::new(Layer {
                 base: rel.trim_end_matches('/').to_string(),
@@ -305,12 +337,7 @@ impl IgnoreRules {
         // Outermost first, so a nearer ancestor's rules win.
         for (dir, prefix) in chain.into_iter().rev() {
             let mut rules = Vec::new();
-            for name in RULE_FILES {
-                read_rules_anchored(&dir.join(name), &prefix, &mut rules);
-            }
-            if dir.join(".git").is_dir() {
-                read_rules_anchored(&dir.join(".git/info/exclude"), &prefix, &mut rules);
-            }
+            self.read_own(&dir, &mut rules, Some(&prefix));
             if !rules.is_empty() {
                 self.layers.push(Arc::new(Layer {
                     base: String::new(),

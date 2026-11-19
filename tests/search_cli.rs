@@ -54,6 +54,10 @@ fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
 fn code(o: &Output) -> i32 {
     o.status.code().unwrap_or(-1)
 }
@@ -813,4 +817,96 @@ fn column_offset_heading_and_include_zero() {
     let o = run(&["search", "-c", "--include-zero", "needle"], &f.root);
     let out = stdout(&o);
     assert!(out.contains("zero.txt:0"), "{out}");
+}
+
+#[test]
+fn passthru_prints_every_line() {
+    let f = Fixture::new("passthru");
+    let dir = f.root.join("pt");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "aaa\nneedle\nbbb\n").unwrap();
+    fs::write(dir.join("b.txt"), "zzz\n").unwrap();
+    let o = run(&["search", "--passthru", "needle"], &dir);
+    assert_eq!(code(&o), 0, "stderr: {}", stderr(&o));
+    // The matched line keeps its ':' separator and the rest come out as context ('-'),
+    // which is exactly what ripgrep prints.
+    assert_eq!(
+        stdout(&o),
+        format!(
+            "{0}/a.txt-aaa\n{0}/a.txt:needle\n{0}/a.txt-bbb\n{0}/b.txt-zzz\n",
+            dir.display()
+        )
+    );
+
+    // No match at all: every line still prints, and the exit status stays 1.
+    let o = run(&["search", "--passthru", "absent"], &dir);
+    assert_eq!(code(&o), 1);
+    assert_eq!(stdout(&o).lines().count(), 4, "{}", stdout(&o));
+}
+
+#[test]
+fn sort_orders_results() {
+    let f = Fixture::new("sort");
+    let dir = f.root.join("sortdir");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "needle\n").unwrap();
+    fs::write(dir.join("b.txt"), "needle\n").unwrap();
+    let first = |s: String| -> String { s.lines().next().unwrap_or_default().to_string() };
+    let plain = first(stdout(&run(&["find", "*.txt"], &dir)));
+    assert!(plain.ends_with("a.txt"), "{plain}");
+    let rev = first(stdout(&run(&["find", "*.txt", "--sortr", "path"], &dir)));
+    assert!(rev.ends_with("b.txt"), "{rev}");
+
+    // `modified` goes oldest first, and `--sortr` brings the newest to the front.
+    let older = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    let ft = fs::File::options()
+        .write(true)
+        .open(dir.join("b.txt"))
+        .unwrap();
+    ft.set_modified(older).unwrap();
+    let by_time = first(stdout(&run(
+        &["search", "-l", "--sort", "modified", "needle"],
+        &dir,
+    )));
+    assert!(by_time.ends_with("b.txt"), "{by_time}");
+    let newest = first(stdout(&run(
+        &["search", "-l", "--sortr", "modified", "needle"],
+        &dir,
+    )));
+    assert!(newest.ends_with("a.txt"), "{newest}");
+
+    let bad = run(&["find", "*.txt", "--sort", "size"], &dir);
+    assert_eq!(code(&bad), 2, "an unknown key is refused");
+    assert!(
+        stderr(&bad).contains("unsupported --sort key"),
+        "{}",
+        stderr(&bad)
+    );
+}
+
+#[test]
+fn ignore_sources_can_be_switched_off() {
+    let f = Fixture::new("nosources");
+    let dir = f.root.join("ignored");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(".gitignore"), "bygit.txt\n").unwrap();
+    fs::write(dir.join(".ignore"), "bydot.txt\n").unwrap();
+    fs::write(dir.join("bygit.txt"), "needle\n").unwrap();
+    fs::write(dir.join("bydot.txt"), "needle\n").unwrap();
+    fs::write(dir.join("kept.txt"), "needle\n").unwrap();
+
+    let base = stdout(&run(&["search", "-l", "needle"], &dir));
+    assert!(
+        base.contains("kept.txt") && !base.contains("bygit"),
+        "{base}"
+    );
+
+    // `--no-ignore-vcs` takes only the `.gitignore` layer away, and `--no-ignore-dot` only
+    // the `.ignore` one.
+    let vcs = stdout(&run(&["search", "-l", "--no-ignore-vcs", "needle"], &dir));
+    assert!(vcs.contains("bygit.txt") && !vcs.contains("bydot"), "{vcs}");
+    let dot = stdout(&run(&["search", "-l", "--no-ignore-dot", "needle"], &dir));
+    assert!(dot.contains("bydot.txt") && !dot.contains("bygit"), "{dot}");
+    let none = stdout(&run(&["search", "-l", "--no-ignore-files", "needle"], &dir));
+    assert_eq!(none.lines().count(), 3, "{none}");
 }

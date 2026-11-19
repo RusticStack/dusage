@@ -96,6 +96,30 @@ pub struct SearchOptions {
     pub include_zero: bool,
     /// Do not report paths that could not be read (`--no-messages`).
     pub quiet_errors: bool,
+    /// Print every line, matching or not (`--passthru`).
+    pub passthru: bool,
+    /// The order results print in, and whether it is reversed (`--sort`, `--sortr`).
+    pub sort: SortKey,
+    pub sort_reverse: bool,
+    /// Leave the VCS rule files (`.gitignore`, `.git/info/exclude`) unread.
+    pub no_ignore_vcs: bool,
+    /// Leave `.ignore` unread.
+    pub no_ignore_dot: bool,
+    /// Do not stack the rule files of a root's parent directories.
+    pub no_ignore_parent: bool,
+}
+
+/// How a report orders its results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortKey {
+    /// Lexicographic by path relative to the root: the default, and what makes two runs of
+    /// the same search print the same thing.
+    #[default]
+    Path,
+    /// Leave the order the walk and the workers produced (`--sort none`).
+    None,
+    /// Oldest modification time first (`--sort modified`).
+    Modified,
 }
 
 impl SearchOptions {
@@ -136,6 +160,12 @@ impl SearchOptions {
             byte_offset: false,
             include_zero: false,
             quiet_errors: false,
+            passthru: false,
+            sort: SortKey::Path,
+            sort_reverse: false,
+            no_ignore_vcs: false,
+            no_ignore_dot: false,
+            no_ignore_parent: false,
         }
     }
 }
@@ -246,6 +276,7 @@ struct JobOut {
 
 fn walk_rules(o: &SearchOptions) -> Arc<IgnoreRules> {
     let mut rules = IgnoreRules::new(!o.no_ignore);
+    rules.set_sources(!o.no_ignore_vcs, !o.no_ignore_dot, !o.no_ignore_parent);
     rules
         .add_globs_with_case(&o.globs, &o.iglobs)
         .and_then(|()| rules.add_filters(&o.type_globs))
@@ -392,7 +423,7 @@ fn root_jobs(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Vec<WalkJob>,
                 continue;
             }
             Ok(_) => {
-                let ancestors = if o.no_ignore {
+                let ancestors = if o.no_ignore || o.no_ignore_parent {
                     walk_rules(o)
                 } else {
                     let mut r = (*walk_rules(o)).clone();
@@ -446,8 +477,61 @@ fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
     if o.scope == Scope::Content {
         all.retain(|c| !c.is_dir);
     }
-    all.sort_by(|a, b| a.rel.cmp(&b.rel).then_with(|| a.path.cmp(&b.path)));
+    sort_paths(&mut all, o);
     (all, stats)
+}
+
+/// Order the walk's results, and reverse them when `--sortr` asked.
+fn sort_paths(v: &mut Vec<Candidate>, o: &SearchOptions) {
+    match o.sort {
+        SortKey::None => {}
+        SortKey::Path => v.sort_by(|a, b| a.rel.cmp(&b.rel).then_with(|| a.path.cmp(&b.path))),
+        SortKey::Modified => {
+            // The walk only stats entries when it must, so an explicit time sort reads the
+            // mtime of each result once instead of once per comparison.
+            let mut keyed: Vec<(SystemTime, Candidate)> = std::mem::take(v)
+                .into_iter()
+                .map(|c| {
+                    let t = c.modified.unwrap_or_else(|| modified_of(&c.path));
+                    (t, c)
+                })
+                .collect();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.rel.cmp(&b.1.rel)));
+            v.extend(keyed.into_iter().map(|(_, c)| c));
+        }
+    }
+    if o.sort_reverse {
+        v.reverse();
+    }
+}
+
+/// Order the matched files, and reverse them when `--sortr` asked. `--sort modified` pays one
+/// stat per matched file, which is why it is not the default.
+fn sort_hits(v: &mut Vec<FileHits>, o: &SearchOptions) {
+    match o.sort {
+        SortKey::None => {}
+        SortKey::Path => v.sort_by(|a, b| a.path.cmp(&b.path)),
+        SortKey::Modified => {
+            let mut keyed: Vec<(SystemTime, FileHits)> = std::mem::take(v)
+                .into_iter()
+                .map(|f| {
+                    let t = modified_of(Path::new(&f.path));
+                    (t, f)
+                })
+                .collect();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.path.cmp(&b.1.path)));
+            v.extend(keyed.into_iter().map(|(_, f)| f));
+        }
+    }
+    if o.sort_reverse {
+        v.reverse();
+    }
+}
+
+fn modified_of(path: &Path) -> SystemTime {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::UNIX_EPOCH)
 }
 
 /// True for the modes whose answer for a binary file is just "it matches" or "it does not".
@@ -608,7 +692,7 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
     let (mut found, agg) = shared.into_inner().unwrap_or_else(|e| e.into_inner());
     // Results come back in whatever order the workers finished; the report is sorted so two
     // runs of the same search print the same thing.
-    found.sort_by(|a, b| a.path.cmp(&b.path));
+    sort_hits(&mut found, o);
     merge_stats(&mut stats, &agg);
     for got in found {
         if o.files_without_matches {
@@ -618,8 +702,9 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
             continue;
         }
         if got.matches == 0 {
+            // `--passthru` keeps a file the walk found nothing in but printed anyway, and
             // `-c --include-zero` prints the zero; nothing else does.
-            if o.include_zero && o.count {
+            if (o.passthru && !got.hits.is_empty()) || (o.include_zero && o.count) {
                 report.files.push(got);
             }
             continue;
@@ -925,6 +1010,7 @@ impl<'a> Scanner<'a> {
             || self.o.before > 0
             || self.o.after > 0
             || self.o.only_matching
+            || self.o.passthru
             || self.o.max_count.is_some()
             || self.stopped
         {
@@ -1097,10 +1183,15 @@ fn finished(
 ) -> io::Result<Option<FileHits>> {
     sc.flush();
     if sc.matches == 0 {
-        let wants_zero = o.files_without_matches || (o.include_zero && o.count);
+        // `--passthru` prints the file anyway, so its lines are kept even with no match.
+        let wants_zero = o.files_without_matches || (o.include_zero && o.count) || (o.passthru);
         let hit = wants_zero.then(|| FileHits {
             path: path.to_string_lossy().into_owned(),
-            hits: Vec::new(),
+            hits: if o.passthru {
+                std::mem::take(&mut sc.hits)
+            } else {
+                Vec::new()
+            },
             matches: 0,
             total: 0,
             binary,
@@ -1160,6 +1251,19 @@ fn handle_line(
     let text = strip_cr(line);
     let found = o.pattern.find_at(text, 0);
     if found.is_some() == o.invert {
+        // `--passthru` prints the whole file, so a line the pattern did not select still goes
+        // out, as plain context rather than a hit.
+        if want_lines && o.passthru {
+            hits.push(LineHit {
+                number: no,
+                offset,
+                text: text.to_vec(),
+                matched: false,
+                spans: Vec::new(),
+            });
+            *last_emitted = no;
+            return false;
+        }
         // A context line after a match, while the window lasts.
         if want_lines && *remaining_after > 0 {
             hits.push(LineHit {
