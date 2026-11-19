@@ -561,3 +561,80 @@ fn lookaround_backreferences_and_unicode_classes() {
     assert_eq!(code(&o), 0, "regex -i folds non-ASCII");
     assert!(stdout(&o).contains("café"), "{}", stdout(&o));
 }
+
+#[test]
+fn pattern_files_and_bundled_short_flags() {
+    let f = Fixture::new("patfile");
+    let pats = f.root.join("pats.txt");
+    fs::write(&pats, "needle\r\nTitle\n\n").unwrap();
+
+    // Two patterns, a CRLF line and a blank line: the blank one is not an empty alternative.
+    let o = run(&["search", "-n", "-f", pats.to_str().unwrap()], &f.root);
+    let out = stdout(&o);
+    assert!(out.contains("main.rs:2"), "{out}");
+    assert!(out.contains("README.md:1"), "{out}");
+    assert_eq!(code(&o), 0);
+
+    // `-f` and `-e` add up, the way they do in grep.
+    let o = run(
+        &["search", "-c", "-f", pats.to_str().unwrap(), "-e", "helper"],
+        &f.root,
+    );
+    let out = stdout(&o);
+    assert!(out.contains("util.rs:1"), "{out}");
+
+    // `-F` makes every pattern in the file a literal.
+    let wild = f.root.join("wild.txt");
+    fs::write(&wild, "need.le\n").unwrap();
+    let o = run(&["search", "-f", wild.to_str().unwrap()], &f.root);
+    assert_eq!(code(&o), 0, "a '.' is a wildcard here");
+    let o = run(&["search", "-F", "-f", wild.to_str().unwrap()], &f.root);
+    assert_eq!(code(&o), 1, "-F is a literal, so 'need.le' never matches");
+
+    // A pattern file with nothing in it is an error, not a silent empty pattern.
+    let empty = f.root.join("empty.txt");
+    fs::write(&empty, "\n\n").unwrap();
+    let o = run(&["search", "-f", empty.to_str().unwrap()], &f.root);
+    assert_eq!(code(&o), 2, "{}", stdout(&o));
+
+    // Bundled short flags mean the same as the separate ones.
+    let bundled = run(&["search", "-inc", "needle"], &f.root);
+    let separate = run(&["search", "-i", "-n", "-c", "needle"], &f.root);
+    assert_eq!(code(&bundled), 0, "{}", stdout(&bundled));
+    assert_eq!(stdout(&bundled), stdout(&separate));
+    // A value flag may end a bundle and take the rest of it as its value.
+    let o = run(&["search", "-inm1", "needle", "--no-ignore"], &f.root);
+    let out = stdout(&o);
+    assert_eq!(
+        out.lines().filter(|l| l.contains("it.rs")).count(),
+        1,
+        "-m1 stops at one line per file, and it.rs holds two: {out}"
+    );
+}
+
+#[test]
+fn pattern_file_on_stdin_cannot_also_be_the_haystack() {
+    let f = Fixture::new("stdinboth");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dusage"))
+        .args(["search", "-f", "-"])
+        .arg(&f.root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write as _;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"needle\n")
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "with a path there is no clash, and the pattern file may come from stdin"
+    );
+    assert!(String::from_utf8_lossy(&o.stdout).contains("needle"));
+}

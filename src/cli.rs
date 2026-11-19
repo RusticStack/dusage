@@ -47,6 +47,38 @@ impl Args {
                 a.positionals.push(tok);
                 continue;
             }
+            // A bundle of short flags: `-in`, `-ilw`, and `-inm5` where the last one takes a
+            // value. Anything with a value flag not at the end is rejected by the expansion.
+            if !tok.starts_with("--") && tok.len() > 2 && !value_flags.contains(&&tok[..2]) {
+                let mut rest = tok.as_str();
+                while let Some(head) = rest.get(..2) {
+                    let short = &rest[1..2];
+                    let flag = format!("-{short}");
+                    if bool_flags.contains(&flag.as_str()) {
+                        if !a.bools.contains(&flag) {
+                            a.bools.push(flag);
+                        }
+                        rest = &rest[2..];
+                        if rest.is_empty() {
+                            break;
+                        }
+                        continue;
+                    }
+                    if value_flags.contains(&flag.as_str()) {
+                        let v = match rest.get(2..) {
+                            Some(v) if !v.is_empty() => v.to_string(),
+                            _ => it
+                                .next()
+                                .ok_or_else(|| format!("option {flag} needs a value"))?,
+                        };
+                        a.values.entry(flag).or_default().push(v);
+                        rest = "";
+                        break;
+                    }
+                    return Err(format!("unknown option: -{short} (in {head}...)"));
+                }
+                continue;
+            }
             let (name, inline) = match tok.split_once('=') {
                 Some((n, v)) if n.starts_with("--") => (n.to_string(), Some(v.to_string())),
                 // An attached short value: `-C2`, `-m5`, `-g*.rs`, `-tjs`.
