@@ -129,6 +129,23 @@ pub struct SearchOptions {
     pub null_data: bool,
     /// The byte that ends a record and an output line: `\n`, or NUL under `--null-data`.
     pub term: u8,
+    /// Print every match on its own `path:line:column:text` row (`--vimgrep`).
+    pub vimgrep: bool,
+    /// Drop the leading whitespace of each printed line (`--trim`), and measure
+    /// `--max-columns` against what is left.
+    pub trim: bool,
+    /// Stop reading a file at the first line that does not match once one has
+    /// (`--stop-on-nonmatch`).
+    pub stop_on_nonmatch: bool,
+    /// The byte printed wherever a path holds a separator (`--path-separator`).
+    pub path_separator: Option<u8>,
+    /// Between the fields of a matching line (`--field-match-separator`), `:` by default.
+    pub field_match_sep: Vec<u8>,
+    /// Between the fields of a context line (`--field-context-separator`), `-` by default.
+    pub field_context_sep: Vec<u8>,
+    /// Between context groups (`--context-separator`), `--` by default; `None` prints
+    /// nothing at all (`--no-context-separator`).
+    pub context_sep: Option<Vec<u8>>,
 }
 
 /// One piece of a `-r` replacement: text to print, or a group of the match it came from.
@@ -211,6 +228,13 @@ impl SearchOptions {
             pre_globs: Vec::new(),
             null_data: false,
             term: b'\n',
+            vimgrep: false,
+            trim: false,
+            stop_on_nonmatch: false,
+            path_separator: None,
+            field_match_sep: b":".to_vec(),
+            field_context_sep: b"-".to_vec(),
+            context_sep: Some(b"--".to_vec()),
         }
     }
 }
@@ -227,6 +251,9 @@ pub struct LineHit {
     pub matched: bool,
     /// Byte spans inside `text` for `-o` and colouring; empty on context lines.
     pub spans: Vec<(usize, usize)>,
+    /// Where `text` starts within its line: 0 for a whole line, the match's offset for `-o`.
+    /// `--column` and `--vimgrep` count a column from here.
+    pub text_start: usize,
 }
 
 /// Everything found in one file.
@@ -1084,7 +1111,7 @@ fn scan_multiline(
         }));
     }
     stats.matches += found.len() as u64;
-    let hits = if o.passthru {
+    let mut hits = if o.passthru {
         every_line(&data, &found)
     } else if o.only_matching {
         found
@@ -1095,6 +1122,7 @@ fn scan_multiline(
                 text: data[m.start..m.end].to_vec(),
                 matched: true,
                 spans: vec![(0, m.end - m.start)],
+                text_start: m.start - line_start(&data, m.start),
             })
             .collect()
     } else if o.count || o.files_with_matches || o.files_without_matches || o.quiet {
@@ -1108,6 +1136,7 @@ fn scan_multiline(
     } else {
         hits.iter().filter(|h| h.matched).count() as u64
     };
+    present(&mut hits, o);
     let out = FileHits {
         path: name(),
         hits,
@@ -1190,6 +1219,7 @@ fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result
                         text: record[s..e].to_vec(),
                         matched: true,
                         spans: vec![(0, e - s)],
+                        text_start: s,
                     });
                 }
             } else {
@@ -1199,6 +1229,7 @@ fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result
                     text: record.to_vec(),
                     matched: true,
                     spans,
+                    text_start: 0,
                 });
             }
         }
@@ -1217,6 +1248,9 @@ fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result
     stats.matches += matches;
     let keep =
         o.count || o.count_matches || o.files_with_matches || o.files_without_matches || o.quiet;
+    if !keep {
+        present(&mut hits, o);
+    }
     Ok(Some(FileHits {
         path: path.to_string_lossy().into_owned(),
         hits: if keep { Vec::new() } else { hits },
@@ -1245,6 +1279,14 @@ fn line_spans(data: &[u8]) -> Vec<(usize, usize)> {
 
 fn line_number(data: &[u8], at: usize) -> u64 {
     bytes::count_byte(&data[..at.min(data.len())], b'\n') as u64 + 1
+}
+
+/// The offset at which the line holding `at` starts.
+fn line_start(data: &[u8], at: usize) -> usize {
+    match data[..at.min(data.len())].iter().rposition(|b| *b == b'\n') {
+        Some(p) => p + 1,
+        None => 0,
+    }
 }
 
 /// The lines the matches cover, once each, with each line's own share of every match on it.
@@ -1279,6 +1321,7 @@ fn matched_lines(data: &[u8], found: &[Match]) -> Vec<LineHit> {
                 text: strip_cr(&data[s..e]).to_vec(),
                 matched: true,
                 spans,
+                text_start: 0,
             });
         }
         next = next.max(last + 1);
@@ -1305,6 +1348,7 @@ fn every_line(data: &[u8], found: &[Match]) -> Vec<LineHit> {
                 text: strip_cr(&data[s..e]).to_vec(),
                 matched: !spans.is_empty(),
                 spans,
+                text_start: 0,
             }
         })
         .collect()
@@ -1320,6 +1364,7 @@ fn plain_lines(data: &[u8]) -> Vec<LineHit> {
             text: strip_cr(&data[s..e]).to_vec(),
             matched: false,
             spans: Vec::new(),
+            text_start: 0,
         })
         .collect()
 }
@@ -1457,6 +1502,7 @@ impl<'a> Scanner<'a> {
             // The replacement rewrites the line, which this path does not do.
             || self.o.replace.is_some()
             || self.o.max_count.is_some()
+            || self.o.stop_on_nonmatch
             || self.stopped
         {
             return false;
@@ -1565,6 +1611,7 @@ impl<'a> Scanner<'a> {
                     text,
                     matched: true,
                     spans,
+                    text_start: 0,
                 });
             }
             if self.matches >= self.limit {
@@ -1613,9 +1660,16 @@ impl<'a> Scanner<'a> {
         self.line = buf;
     }
 
-    /// Run the matcher over one line; true means the file is finished (`-m`).
+    /// Run the matcher over one line; true means the file is finished (`-m`, or a line
+    /// `--stop-on-nonmatch` ends the file at).
     fn emit(&mut self, line: &[u8], offset: u64) -> bool {
-        handle_line(
+        // `--stop-on-nonmatch` ends a file at the first line the pattern does not select once
+        // it has selected one. That line still goes out while its `-A` window lasts, which is
+        // ripgrep's answer too.
+        let stop_here = self.o.stop_on_nonmatch
+            && self.matches > 0
+            && self.o.pattern.find_at(strip_cr(line), 0).is_some() == self.o.invert;
+        let done = handle_line(
             line,
             self.line_no,
             offset,
@@ -1628,7 +1682,8 @@ impl<'a> Scanner<'a> {
             &mut self.last_emitted,
             self.want_lines,
             self.limit,
-        )
+        );
+        done || stop_here
     }
 }
 
@@ -1641,6 +1696,7 @@ fn finished(
     binary: bool,
 ) -> io::Result<Option<FileHits>> {
     sc.flush();
+    present(&mut sc.hits, o);
     if sc.matches == 0 {
         // `--passthru` prints the file anyway, so its lines are kept even with no match.
         let wants_zero = o.files_without_matches || (o.include_zero && o.count) || (o.passthru);
@@ -1659,7 +1715,38 @@ fn finished(
         return Ok(hit);
     }
     stats.matches += sc.matches;
-    for h in &mut sc.hits {
+    let hits = std::mem::take(&mut sc.hits);
+    let out = FileHits {
+        path: path.to_string_lossy().into_owned(),
+        hits,
+        matches: sc.matches,
+        total: sc.total,
+        binary,
+    };
+    sc.recycle();
+    Ok(Some(out))
+}
+
+/// The lines as they print: `--trim` drops the leading whitespace and `--max-columns` cuts
+/// what is left, with the spans shifted so colouring and the columns still line up.
+fn present(hits: &mut [LineHit], o: &SearchOptions) {
+    for h in hits {
+        if o.trim {
+            let cut = h
+                .text
+                .iter()
+                .take_while(|b| b.is_ascii_whitespace())
+                .count();
+            if cut > 0 {
+                h.text.drain(..cut);
+                h.text_start += cut;
+                h.spans.retain_mut(|(s, e)| {
+                    *s = s.saturating_sub(cut);
+                    *e = e.saturating_sub(cut);
+                    *e > *s
+                });
+            }
+        }
         if o.max_columns > 0 && h.text.len() > o.max_columns {
             // Columns are characters, as in ripgrep, so a cut never lands inside a code
             // point; a line that is not UTF-8 is cut by bytes.
@@ -1682,16 +1769,6 @@ fn finished(
             }
         }
     }
-    let hits = std::mem::take(&mut sc.hits);
-    let out = FileHits {
-        path: path.to_string_lossy().into_owned(),
-        hits,
-        matches: sc.matches,
-        total: sc.total,
-        binary,
-    };
-    sc.recycle();
-    Ok(Some(out))
 }
 
 /// Fold one file's counters into an aggregate.
@@ -1731,6 +1808,7 @@ fn handle_line(
                 text: text.to_vec(),
                 matched: false,
                 spans: Vec::new(),
+                text_start: 0,
             });
             *last_emitted = no;
             return false;
@@ -1743,6 +1821,7 @@ fn handle_line(
                 text: text.to_vec(),
                 matched: false,
                 spans: Vec::new(),
+                text_start: 0,
             });
             *last_emitted = no;
             *remaining_after -= 1;
@@ -1779,6 +1858,7 @@ fn handle_line(
                 text: t,
                 matched: false,
                 spans: Vec::new(),
+                text_start: 0,
             });
             *last_emitted = n;
         }
@@ -1803,6 +1883,7 @@ fn handle_line(
                     text: out,
                     matched: true,
                     spans: vec![(0, len)],
+                    text_start: m.start,
                 });
                 *last_emitted = no;
             }
@@ -1814,6 +1895,7 @@ fn handle_line(
                 text,
                 matched: true,
                 spans,
+                text_start: 0,
             });
             *last_emitted = no;
         }
@@ -1829,6 +1911,7 @@ fn handle_line(
                 text: text[s..e].to_vec(),
                 matched: true,
                 spans: vec![(0, e - s)],
+                text_start: s,
             });
             *last_emitted = no;
         }
@@ -1839,6 +1922,7 @@ fn handle_line(
             text: text.to_vec(),
             matched: true,
             spans,
+            text_start: 0,
         });
         *last_emitted = no;
     }

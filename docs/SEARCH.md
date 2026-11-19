@@ -38,7 +38,7 @@ combine. The option lists are `SEARCH_VALUE_FLAGS` / `SEARCH_BOOL_FLAGS`
 | `<pattern>` positional, `-e`, `--regexp`, `-f`, `--file` | `grep PATTERN`, `rg PATTERN`, `rg -e`, `grep -f` / `rg -f` | `-e` takes the next argument, so a pattern starting with `-` can be passed, and it **may repeat**: every pattern is an alternative (`src/cmd/search.rs`, `alternation`). `-f PATH` adds the patterns in a file, one per line, blank lines skipped and CRLF accepted, and repeats; `-f -` reads them from standard input, which cannot also be the haystack. Short flags bundle, so `-in` is `-i -n` and `-inm5` ends in a value flag (`src/cli.rs`, `Args::parse`). |
 | `-F`, `--fixed-strings` | `grep -F` / `rg -F` | Forces literal matching. A regex the engine can prove is a literal already takes the byte fast path without `-F` (`src/pattern.rs:52-76`). |
 | `-s`, `--case-sensitive`, `-S`, `--smart-case` | `rg -s`, `rg -S` | The last case mode wins, as in ripgrep. Smart case folds only when the pattern holds no uppercase letter. |
-| `--column`, `--byte-offset`, `--heading` | `rg --column`, `rg -b`, `rg --heading` | Prefix order is ripgrep's: line, column, byte offset, then the text. `--heading` prints the file name once and a blank line between files, and does nothing when only one file is in play. |
+| `--column`, `--byte-offset`, `--heading`, `--no-heading` | `rg --column`, `rg -b`, `rg --heading`, `rg --no-heading` | Prefix order is ripgrep's: line, column, byte offset, then the text. `--heading` prints the file name once and a blank line between files, and does nothing when only one file is in play; `--no-heading` is its opposite, and the last of the two spellings wins (the shared parser keeps a set, so `take_heading` reads the order). `--column` with `-o` prints the match's own column (`--column -o foo` on `alpha foo bar foo` gives `7` and `15`), which is rg's answer too. |
 | `--type-add`, `--type-clear` | `rg --type-add`, `rg --type-clear` | A type is now a set of globs in a table the flags can edit: `--type-add 'web:*.html,*.css'` defines one, naming an existing type adds to it, and `--type-clear` forgets one so it can be redefined. `--type-list` prints the table as edited. |
 | `-T`, `--type-not`, `--type-list` | `rg -T`, `rg --type-list` | `-T` turns every extension of a type into an exclusion (`src/ignore.rs`, `push_filter` splits a negated pattern out of the narrowing set). |
 | `--iglob`, `-u`/`--unrestricted` | `rg --iglob`, `rg -u` | `--iglob` is `-g` without case and an override like `-g`. `-u` drops the ignore rules, `-uu` also takes hidden paths, `-uuu` also searches binary files. |
@@ -70,7 +70,7 @@ combine. The option lists are `SEARCH_VALUE_FLAGS` / `SEARCH_BOOL_FLAGS`
 | `-t NAME`, `--type` | `rg -t` | A fixed list of file types mapped to extension globs in `ext_globs` (`src/cmd/search.rs:122-151`): rust, python, js, ts, c, cpp, go, java, ruby, md, json, toml, yaml, sh, html, css, xml, txt, log, lock, each with one or two aliases. Repeatable. **Different from `-g`**: type filters narrow results and leave the ignore rules in force (`src/ignore.rs:69-82`, `src/ignore.rs:133-140`). No `--type-list`, no `--type-add`, no `--type-not`. |
 | `--max-depth N` | `find -maxdepth` | Entries directly under a root are depth 0, and a directory at depth *d* is descended while `d < N` (`src/search.rs:227-229`). So our `N` equals `find -maxdepth N+1`; measured on a three-level tree, `--max-depth 0` lists the root's children and `find -maxdepth 1` lists the same entries. |
 | `--max-filesize SIZE` | `rg --max-filesize` | Applied during the walk from the size the enumerator already returned (`src/search.rs:231-235`), so an oversized file is never opened. Sizes accept `K/M/G/T`, binary multiples (`src/cli.rs:104-136`). A file named explicitly on the command line bypasses it, because explicit roots are taken as given (`src/search.rs:296-307`). |
-| `--max-columns N` | `rg -M`, `--max-columns` | Truncates printed lines at N *bytes*, after matching, and clips the colour spans to the cut (`src/search.rs:591-601`). No "N matches hidden" note like rg's. |
+| `-M N`, `--max-columns N` | `rg -M`, `--max-columns` | Truncates printed lines at N *bytes*, after matching, and clips the colour spans to the cut (`present`, `src/search.rs`). `-M` is the short spelling, rg's own. No "N matches hidden" note like rg's, and no `[Omitted long matching line]` either: truncating the line is what this tool does where rg drops it. With `--trim`, the length is measured after the leading whitespace is gone, as rg measures it. |
 | `--encoding NAME` | `rg -E`, `--encoding` | `auto` (default), `utf-8`, `utf-16le`, `utf-16be`, `latin1`. Search always runs on UTF-8 bytes, so a forced encoding or a detected UTF-16 file is transcoded first (`src/search.rs:449-458`, `src/encodings.rs:1-13`). Auto-detection answers only UTF-8, UTF-16LE or UTF-16BE — Latin-1 is never guessed, it must be asked for (`src/encodings.rs:72-112`). An unknown name is exit 2. |
 | `-Z`, `--null` | `rg --null` / `grep -Z` | A NUL instead of `:` after the file name, for `xargs -0` (`src/report.rs:336-342`, `src/report.rs:371-379`). |
 | `--no-ignore-vcs`, `--no-ignore-dot`, `--no-ignore-parent`, `--no-ignore-files` | `rg --no-ignore-vcs` and friends | Each removes one source of ignore rules: `.gitignore` and `.git/info/exclude`, `.ignore`, the rule files stacked from a root's ancestors, or all of them at once. `--no-ignore-global` is accepted and does nothing, because there is no global ignore file to read. |
@@ -83,7 +83,16 @@ combine. The option lists are `SEARCH_VALUE_FLAGS` / `SEARCH_BOOL_FLAGS`
 | `--passthru` | `rg --passthru` | Prints every line, with matches marked as hits and the rest as context, so a file with no match still prints in full while the exit status stays 1. |
 | `--sort KEY`, `--sortr KEY`, `--sort-files` | `rg --sort`, `rg --sortr`, `rg --sort-files` | `path` (the default, and what `--sort-files` means), `none` for the order the walk produced, or `modified`, `accessed`, `created` for oldest-first by that time. Any other key is refused with exit 2 rather than silently ignored. A time sort costs one `stat` per result. |
 | `--max-columns-preview` | `rg --max-columns-preview` | Marks the line `--max-columns` cut with `[... omitted end of long line]`. The cut itself counts characters, not bytes, so it never lands inside a code point. |
-| `--no-heading`, `--crlf`, `--binary`, `--line-buffered`, `--block-buffered` | the same flags in rg | Accepted and do nothing, because each already describes what happens here: there is no heading unless `--heading` asks, `$` already matches before a CRLF's `\r` (§3), a binary file is already reported by name rather than printed, and the output buffer is the caller's. They exist so a script written for ripgrep runs unchanged. |
+| `--binary`, `--line-buffered`, `--block-buffered` | the same flags in rg | Accepted and do nothing, because each already describes what happens here: a binary file is already reported by name rather than printed, and the output buffer is the caller's. They exist so a script written for ripgrep runs unchanged. |
+| `--vimgrep` | `rg --vimgrep` | `-n --column` with one row per match instead of one per line: `path:line:column:text`, the whole line repeated for every match on it (`--vimgrep foo` on `alpha foo bar foo` prints that line twice, at column 7 and 15, as rg does), and a context row `path-line-text` with no column. It turns the file name on by itself even for a single file, as rg does. `render_search` and `Row::write` (`src/report.rs`) build the rows from each line's match spans. |
+| `--trim` | `rg --trim` | Drops the leading whitespace of each printed line; `--max-columns` then measures what is left, so an indented line that is only long because of its indentation survives. The column still counts from the start of the untrimmed line, which is rg's answer. `present` (`src/search.rs`) applies it to the streaming, `-U` and `--null-data` paths alike, shifting the spans so colouring and `-o` still line up. |
+| `--path-separator SEP` | `rg --path-separator` | One byte, printed wherever a path holds `/` or `\`; anything longer is exit 2, which is rg's rule. It applies to every path `search` prints — match rows, `--vimgrep`, `--heading`, `-l`/`-L`, `-c` and the binary notice. `find` keeps its own relative paths. |
+| `--field-match-separator SEP`, `--field-context-separator SEP` | the same flags in rg | Between the fields of a matching line and of a context line: `:` and `-` by default, any string including the empty one. `--vimgrep` rows use them too, as rg's do. |
+| `--context-separator SEP`, `--group-separator SEP`, `--no-context-separator` | `rg --context-separator`, `rg --no-context-separator`; `grep --group-separator` | The line between non-adjacent context groups, `--` by default. `--group-separator` is grep's spelling, accepted for the same switch (rg 14.1 rejects it: `rg --group-separator` is an unrecognized flag). `--no-context-separator` prints nothing between groups while an empty separator prints a blank line, and those are rg's two answers as well. The separator is only printed when a context window was asked for. |
+| `--stop-on-nonmatch` | `rg --stop-on-nonmatch` | Ends a file at the first line after a match that does not match, which is what bounds an `-A` window; that line still prints while the after-context lasts, and a file whose first lines do not match is unaffected. Measured against rg 14.1 on `a / HIT one / b / c / d / e / f / g / HIT two / h` with `-n -A5`: both print `2:HIT one` and `3-b` and stop, so the second match never appears. The line-at-a-time scanner is used whenever the flag is set. |
+| `--engine auto\|default\|pcre2` | `rg --engine` | `auto` (the default) is the Pike VM plus the existing fallback to the backtracking engine for lookaround and backreferences; `default` refuses that fallback, so such a pattern is exit 2 with a message naming `-P/--pcre2`; `pcre2` is `-P`. Any other value is exit 2 (`unrecognized regex engine`), matching `rg --engine bogo`. |
+| `--crlf` | `rg --crlf` | Makes the `\r\n` terminator explicit: `$` matches before the `\r`, and the `\r` is never printed. This scanner already reads it that way everywhere (§3), so the flag changes nothing here — where ripgrep does the opposite, treating a `\r` as content until the flag is given, and then still printing it back (`rg --crlf '^needle$' dos.txt \| od -c` gives `n e e d l e \r \n`; ours gives `n e e d l e \n`). |
+| `--mmap`, `--no-mmap` | `rg --mmap`, `rg --no-mmap` | Accepted and ignored. There is no mapping path to switch on: every file is read in 64 KiB blocks, which is what keeps a 550 MB file at 3.3 MB resident (`docs/BENCHMARKS.md`), and mapping measured worse for this reader. Neither spelling errors and neither changes a byte of output. |
 | `--hidden` | `rg --hidden` / `rg -.` | Only governs names starting with `.` (`src/search.rs:200-203`); it does not disable ignore rules. |
 | `--no-ignore` | `rg --no-ignore` | Disables both the built-in cache list and `.gitignore`/`.ignore`/`.git/info/exclude` (`src/search.rs:206`, `src/search.rs:273`). Hidden files are still skipped, exactly as in rg, where `--hidden` is a separate flag ([rg(1)](https://man.archlinux.org/man/rg.1.en), `-u/--unrestricted`). |
 | `-x`, `--one-filesystem` | `rg --one-file-system`, `find -xdev` | **Not grep's `-x`** (`--line-regexp`) and not rg's `-x` either — ripgrep also spells line-regexp `-x` ([rg(1)](https://man.archlinux.org/man/rg.1.en), `-x, --line-regexp`). We have no line-regexp mode. Stays on the root's device (`src/search.rs:216-222`); measured on `/dev`, where `/dev/shm` is a separate tmpfs, `-x` drops the five entries under the mount point. |
@@ -146,10 +155,11 @@ partial stand-in in the parser.
 | `-l` vs `--files-without-match` | rg spells the negative form `--files-without-match` and reserves `-L` for `--follow` ([rg(1)](https://man.archlinux.org/man/rg.1.en)). | We spell it `-L`. That is a direct letter collision: a script written for rg that passes `-L` to follow symlinks gets a list of files with no matches instead. |
 | `--no-require-git` | Respects `.gitignore` even outside a git repository ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--no-require-git`). | We always respect it — nothing in `src/ignore.rs` tests for a repository — which is exactly `--no-require-git` behaviour, on by default. `.git/info/exclude` is the one rule file that *is* gated on a `.git` directory (§3). |
 
-Also missing, and worth knowing: `--crlf`, `--binary`,
-`--max-columns-preview`, `--no-heading`, `--trim`, `--line-buffered`,
-`--block-buffered`, `--engine`, `--no-unicode` and `--sort` keys other than
-`path`, `none` and `modified`.
+Also missing, and worth knowing: `--no-unicode` and `--sort` keys other than
+`path`, `none`, `modified`, `accessed` and `created`. The output flags a script
+is most likely to pass — `--vimgrep`, `--trim`, `--crlf`, `--path-separator`,
+the field and context separators, `-M`, `--engine` and the `--mmap` pair — are
+in the table above; the ones that are accepted and do nothing say so.
 
 Two things that *are* supported and easy to miss. `-e` may repeat, and every
 pattern is an alternative; with `-F` each one is escaped before they are joined,
@@ -548,8 +558,13 @@ not be read (`src/report.rs:277`). Directory rows always carry `"size": 0`
 `search`: `path:line:text` per match, `path:line-text` for context lines, `--`
 between non-adjacent groups **only when a context window was requested**, and
 `Binary file <path> matches` for a binary file with a match unless `-a`
-(`src/report.rs:326-398`). With `-Z` the separator after the path becomes a NUL
-and the line number keeps its own colon. `find`: one relative path per line, or
+(`render_search`, `src/report.rs`). With `-Z` the separator after the path
+becomes a NUL and the line number keeps its own colon. `--vimgrep` prints one
+row per match with the match's column; `--field-match-separator`,
+`--field-context-separator`, `--context-separator` and `--no-context-separator`
+replace the three punctuation characters above; `--trim` drops the leading
+whitespace of the text; `--path-separator` rewrites the separators inside the
+path. `find`: one relative path per line, or
 `size  time  path` with a trailing `/` for directories in `--long` mode
 (`src/report.rs:463-482`); `-Z` swaps the newline for a NUL.
 
@@ -624,8 +639,9 @@ MD5. `-q` bypasses the pool and scans sequentially so it can stop early
 ### 5.4 What is not optimised
 
 - **No mmap.** Every file is read with `File::open` plus `read` into a 64 KiB
-  heap buffer allocated per file (`src/search.rs:441`); there is no `MAP_PRIVATE`
-  path and no `--mmap`.
+  heap buffer (`src/search.rs`); there is no `MAP_PRIVATE` path. `--mmap` and
+  `--no-mmap` are accepted for ripgrep compatibility, never error, and change
+  nothing.
 - **No incremental line reuse.** Each line is matched from offset 0
   (`handle_line` calls `find_at(text, 0)`, `src/search.rs:626`), and `carry`
   holds only the partial line that spans a read boundary

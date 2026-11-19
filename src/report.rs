@@ -3,7 +3,7 @@
 //! Formatting helpers here are deliberately independent of `cli.rs`.
 
 use crate::model::{ScanResult, Totals};
-use crate::search::{SearchOptions, SearchReport};
+use crate::search::{LineHit, SearchOptions, SearchReport};
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -322,7 +322,87 @@ fn write_match_line(
     out.write_all(&text[at..])
 }
 
-/// Text output for `dusage search`: `path:line:text`, `-o`, `-c`, `-l` and context groups.
+/// The bytes of a printed path, with `--path-separator` rewriting every separator in it.
+fn write_path(out: &mut dyn Write, path: &str, o: &SearchOptions) -> io::Result<()> {
+    match o.path_separator {
+        None => out.write_all(path.as_bytes()),
+        Some(sep) => {
+            let mut buf = path.as_bytes().to_vec();
+            for b in &mut buf {
+                if *b == b'/' || *b == b'\\' {
+                    *b = sep;
+                }
+            }
+            out.write_all(&buf)
+        }
+    }
+}
+
+/// The frame every output row is printed in: the separators, the terminator, and whether a
+/// file name belongs on the row.
+struct Row<'a> {
+    o: &'a SearchOptions,
+    color: bool,
+    named: bool,
+    end: &'a [u8],
+}
+
+impl Row<'_> {
+    /// One row: `[path] [line] [column] [byte offset] text`, each field closed by `sep`.
+    /// `span` is the match this row is about (`--vimgrep` gives a row per match), and `marks`
+    /// are the ranges to paint inside the text.
+    fn write(
+        &self,
+        out: &mut dyn Write,
+        path: &str,
+        h: &LineHit,
+        sep: &[u8],
+        span: Option<(usize, usize)>,
+        marks: &[(usize, usize)],
+    ) -> io::Result<()> {
+        let o = self.o;
+        if self.named {
+            if self.color {
+                out.write_all(color::PATH.as_bytes())?;
+            }
+            write_path(out, path, o)?;
+            if self.color {
+                out.write_all(color::RESET.as_bytes())?;
+            }
+            out.write_all(if o.null { b"\0" } else { sep })?;
+        }
+        if o.line_numbers {
+            if self.color {
+                out.write_all(color::LINE.as_bytes())?;
+                write!(out, "{}", h.number)?;
+                out.write_all(color::RESET.as_bytes())?;
+            } else {
+                write!(out, "{}", h.number)?;
+            }
+            out.write_all(sep)?;
+        }
+        // A line with no located match (an inverted one) has no column to print at all.
+        if (o.column || o.vimgrep) && span.is_some() {
+            let (s, _) = span.unwrap_or_default();
+            write!(out, "{}", h.text_start + s + 1)?;
+            out.write_all(sep)?;
+        }
+        if o.byte_offset {
+            // A vimgrep row reports where its own match starts; every other row the line.
+            let at = match span {
+                Some((s, _)) if o.vimgrep => h.offset + s as u64,
+                _ => h.offset,
+            };
+            write!(out, "{at}")?;
+            out.write_all(sep)?;
+        }
+        write_match_line(out, &h.text, marks, self.color)?;
+        out.write_all(self.end)
+    }
+}
+
+/// Text output for `dusage search`: `path:line:text`, `-o`, `-c`, `-l`, context groups and
+/// the `--vimgrep` rows.
 pub fn render_search(
     r: &SearchReport,
     o: &SearchOptions,
@@ -335,94 +415,89 @@ pub fn render_search(
     // `--null-data` ends every printed record with NUL, which is what makes the output safe
     // to pipe into `xargs -0`.
     let end: &[u8] = if o.term == b'\n' { b"\n" } else { &[o.term] };
+    let row = Row {
+        o,
+        color,
+        named: many && !o.heading,
+        end,
+    };
     let mut printed = false;
     let mut printed_heading = false;
     for f in &r.files {
         if o.files_with_matches || o.files_without_matches {
-            if o.null {
-                write!(out, "{}\0", f.path)?;
-            } else {
-                write!(out, "{}", f.path)?;
-                out.write_all(end)?;
-            }
+            write_path(out, &f.path, o)?;
+            out.write_all(if o.null { b"\0" } else { end })?;
             continue;
         }
         if o.count || o.count_matches {
             let n = if o.count_matches { f.total } else { f.matches };
             if many {
-                let sep = if o.null { '\0' } else { ':' };
-                write!(out, "{}{sep}{}", f.path, n)?;
-            } else {
-                write!(out, "{}", n)?;
+                write_path(out, &f.path, o)?;
+                out.write_all(if o.null { b"\0" } else { &o.field_match_sep })?;
             }
+            write!(out, "{n}")?;
             out.write_all(end)?;
             continue;
         }
         if f.binary && !o.text {
-            writeln!(out, "Binary file {} matches", f.path)?;
+            out.write_all(b"Binary file ")?;
+            write_path(out, &f.path, o)?;
+            out.write_all(b" matches")?;
+            out.write_all(end)?;
             continue;
         }
         // `--heading` puts the file name on its own line and drops it from the lines below.
-        // Without a name to print — one file, no `-H` — it is the same as no heading at all.
-        if o.heading && many {
+        // Without a name to print — one file, no `-H` — it is the same as no heading at all,
+        // and `--vimgrep` carries the path on every row instead.
+        if o.heading && many && !o.vimgrep {
             if printed_heading {
                 writeln!(out)?;
             }
             if color {
-                writeln!(out, "{}{}{}", color::PATH, f.path, color::RESET)?;
-            } else {
-                writeln!(out, "{}", f.path)?;
+                out.write_all(color::PATH.as_bytes())?;
             }
+            write_path(out, &f.path, o)?;
+            if color {
+                out.write_all(color::RESET.as_bytes())?;
+            }
+            out.write_all(end)?;
             printed_heading = true;
         }
-        // grep and ripgrep print a `--` only between context groups; a plain match list has
-        // no separator at all.
+        // grep and ripgrep separate context groups and nothing else; a plain match list has no
+        // separator at all, and `--no-context-separator` prints none between groups either.
         let grouped = o.before > 0 || o.after > 0;
         let mut last: Option<u64> = None;
         for h in &f.hits {
             let consecutive = last.is_some_and(|l| h.number == l + 1);
             if grouped && printed && (last.is_none() || !consecutive) {
-                writeln!(out, "--")?;
+                if let Some(sep) = &o.context_sep {
+                    out.write_all(sep)?;
+                    out.write_all(end)?;
+                }
             }
             printed = true;
             last = Some(h.number);
-            let colon = if h.matched { ':' } else { '-' };
-            let named = many && !o.heading;
-            if named {
-                if color {
-                    write!(out, "{}{}{}", color::PATH, f.path, color::RESET)?;
-                } else {
-                    write!(out, "{}", f.path)?;
-                }
-                if o.null {
-                    write!(out, "\0")?;
-                } else {
-                    write!(out, "{colon}")?;
-                }
-            }
-            if o.line_numbers {
-                if color {
-                    write!(out, "{}{}{}{colon}", color::LINE, h.number, color::RESET)?;
-                } else {
-                    write!(out, "{}", h.number)?;
-                    write!(out, "{colon}")?;
-                }
-            }
-            // The column of the first match, then the byte offset of the line itself, in the
-            // order ripgrep prints them.
-            if o.column {
-                let col = h.spans.first().map_or(1, |(s, _)| s + 1);
-                write!(out, "{col}{colon}")?;
-            }
-            if o.byte_offset {
-                write!(out, "{}{colon}", h.offset)?;
-            }
-            if h.matched {
-                write_match_line(out, &h.text, &h.spans, color)?;
+            let sep: &[u8] = if h.matched {
+                &o.field_match_sep
             } else {
-                out.write_all(&h.text)?;
+                &o.field_context_sep
+            };
+            // `--vimgrep` is `-n --column` with one row per match, so several matches on one
+            // line print that line several times, each with its own column.
+            if o.vimgrep && !h.spans.is_empty() {
+                for span in &h.spans {
+                    row.write(
+                        out,
+                        &f.path,
+                        h,
+                        sep,
+                        Some(*span),
+                        std::slice::from_ref(span),
+                    )?;
+                }
+            } else {
+                row.write(out, &f.path, h, sep, h.spans.first().copied(), &h.spans)?;
             }
-            out.write_all(end)?;
         }
     }
     Ok(())
@@ -935,6 +1010,7 @@ mod tests {
                         text: b"a needle".to_vec(),
                         matched: true,
                         spans: vec![(2, 8)],
+                        text_start: 0,
                     },
                     LineHit {
                         number: 5,
@@ -942,6 +1018,7 @@ mod tests {
                         text: b"another needle".to_vec(),
                         matched: true,
                         spans: vec![(8, 14)],
+                        text_start: 0,
                     },
                 ],
                 matches: 2,

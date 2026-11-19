@@ -28,6 +28,7 @@ OPTIONS:
     -E, --extended-regexp  the default dialect, accepted for grep compatibility
     -G, --basic-regexp     read the pattern as a POSIX basic regular expression
     -P, --pcre2            force the backtracking engine (lookaround, backreferences)
+        --engine ENGINE    auto (default), default (no lookaround) or pcre2
     -i, --ignore-case      case-insensitive (ASCII folding)
     -s, --case-sensitive   case-sensitive, overriding an earlier -i
     -S, --smart-case       ignore case unless the pattern holds an uppercase letter
@@ -38,7 +39,18 @@ OPTIONS:
     -n, --line-number      print line numbers
         --column           print the column of the first match on each line
         --byte-offset      print the byte offset of each line within its file
+        --vimgrep          print every match on its own path:line:column:text row
         --heading          print the file name on its own line above its matches
+        --no-heading       the opposite of --heading, and the last one given wins
+        --trim             drop leading whitespace from printed lines
+        --path-separator SEP   print SEP where a path has a separator (one byte)
+        --field-match-separator SEP
+                           between the fields of a matching line (default ':')
+        --field-context-separator SEP
+                           between the fields of a context line (default '-')
+        --context-separator SEP
+                           between context groups (default '--'); --group-separator is
+                           grep's spelling of it, --no-context-separator prints none
         --line-regexp      match only whole lines
     -H, --with-filename    always print the file name
     -h, --no-filename      never print the file name
@@ -59,6 +71,8 @@ OPTIONS:
         --passthru         print every line, matching or not (matched lines stay marked)
     -m, --max-count N      stop after N matching lines per file
     -A, --after-context N  print N lines after each match
+        --stop-on-nonmatch stop reading a file at the first line after a match that does
+                           not match, which bounds the -A window
     -B, --before-context N print N lines before each match
     -C, --context N        print N lines of context around each match (same as -A N -B N)
     -a, --text             search binary files instead of reporting them
@@ -81,9 +95,11 @@ OPTIONS:
                            -uuu also searches binary files
     --max-depth N          do not descend more than N levels below each root
     --max-filesize SIZE    skip files larger than SIZE (e.g. 10M)
-    --max-columns N        truncate printed lines at N bytes
+    -M, --max-columns N    truncate printed lines at N bytes
         --max-columns-preview  say so when a line was cut
     --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
+    --crlf                 read \r\n as the line terminator: '$' matches before the \r
+                           and the \r is not printed (already the behaviour here)
     --files                with no pattern, list the files a search would read
     -Z, --null, -0         NUL instead of ':' after each file name (for xargs -0)
         --null-data        records end in NUL instead of a newline, and so does the output
@@ -99,6 +115,8 @@ A path of `-` is standard input, and with no paths a piped stdin is searched ins
     --no-ignore-parent     do not read the ignore files above a root
     --no-ignore-files      read no ignore file at all (the three switches above)
     --no-ignore-global     accepted for compatibility; this never reads a global ignore file
+    --mmap, --no-mmap      accepted and ignored: this reads in blocks, and mapping the file
+                           was measured slower (docs/BENCHMARKS.md)
     --follow               follow symbolic links, walking each real directory once
                            (ripgrep spells this -L; here -L means --files-without-match)
     -x, --one-filesystem   stay on the starting filesystem
@@ -192,6 +210,24 @@ fn take_color_flag(raw: &mut Vec<String>) -> Option<String> {
         }
         i += 1;
     }
+    mode
+}
+
+/// `--heading` and `--no-heading` are one switch and the last spelling wins, which the
+/// shared parser cannot say: it keeps a set. Both are taken out here and read in order.
+fn take_heading(raw: &mut Vec<String>) -> Option<bool> {
+    let mut mode = None;
+    raw.retain(|t| match t.as_str() {
+        "--heading" => {
+            mode = Some(true);
+            false
+        }
+        "--no-heading" => {
+            mode = Some(false);
+            false
+        }
+        _ => true,
+    });
     mode
 }
 
@@ -372,8 +408,15 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--threads",
     "--max-depth",
     "--max-filesize",
+    "-M",
     "--max-columns",
     "--encoding",
+    "--path-separator",
+    "--field-match-separator",
+    "--field-context-separator",
+    "--context-separator",
+    "--group-separator",
+    "--engine",
     "--include",
     "--exclude",
     "--exclude-dir",
@@ -433,7 +476,13 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--one-file-system",
     "--column",
     "--byte-offset",
+    "--vimgrep",
     "--heading",
+    "--trim",
+    "--stop-on-nonmatch",
+    "--no-context-separator",
+    "--mmap",
+    "--no-mmap",
     "--no-messages",
     "--include-zero",
     "--line-regexp",
@@ -734,6 +783,7 @@ fn take_dash_zero(raw: &mut Vec<String>) -> bool {
 
 fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let color_mode = take_color_flag(&mut raw);
+    let heading = take_heading(&mut raw);
     let dash_zero = take_dash_zero(&mut raw);
     let unrestricted = take_unrestricted(&mut raw);
     let (value_flags, bool_flags): (&[&str], &[&str]) = if scope == Scope::Content {
@@ -965,16 +1015,41 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     if a.flag("-S") || a.flag("--smart-case") {
         ignore_case = !pattern_text.chars().any(|c| c.is_uppercase());
     }
+    // `--engine` picks the matcher: `auto` keeps the Pike VM and falls back to the
+    // backtracking one when the pattern needs it, `default` refuses that fallback, and
+    // `pcre2` is `-P`.
+    let engine = a.value("--engine").unwrap_or("auto");
+    let pcre = match engine {
+        "auto" => a.flag("-P") || a.flag("--pcre2"),
+        "default" => false,
+        "pcre2" => true,
+        other => {
+            return Err(Fail(
+                2,
+                format!("unrecognized regex engine {other:?} (auto, default, pcre2)"),
+            ))
+        }
+    };
     let mut o = SearchOptions::new(
         Pattern::with_engine(
             &pattern_text,
             scope == Scope::Paths || fixed,
             ignore_case,
             a.flag("-w") || a.flag("--word-regexp"),
-            a.flag("-P") || a.flag("--pcre2"),
+            pcre,
         )?,
         roots,
     );
+    if engine == "default" && scope == Scope::Content && o.pattern.is_pcre() {
+        return Err(Fail(
+            2,
+            format!(
+                "{}: lookaround and backreferences need the backtracking engine; pass \
+                 -P/--pcre2 or --engine pcre2",
+                o.pattern.source()
+            ),
+        ));
+    }
     o.scope = scope;
     o.globs = globs.clone();
     o.iglobs = iglobs.clone();
@@ -990,10 +1065,37 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     if o.null_data {
         o.term = 0;
     }
-    o.heading = a.flag("--heading") && !a.flag("--no-heading");
+    o.heading = heading.unwrap_or(false);
     o.max_columns_preview = a.flag("--max-columns-preview");
     o.column = a.flag("--column");
     o.byte_offset = a.flag("--byte-offset");
+    o.vimgrep = a.flag("--vimgrep");
+    o.trim = a.flag("--trim");
+    o.stop_on_nonmatch = a.flag("--stop-on-nonmatch");
+    if let Some(sep) = a.value("--path-separator") {
+        let bytes = sep.as_bytes();
+        if bytes.len() != 1 {
+            return Err(Fail(
+                2,
+                format!("--path-separator wants exactly one byte, not {sep:?}"),
+            ));
+        }
+        o.path_separator = Some(bytes[0]);
+    }
+    if let Some(sep) = a.value("--field-match-separator") {
+        o.field_match_sep = sep.as_bytes().to_vec();
+    }
+    if let Some(sep) = a.value("--field-context-separator") {
+        o.field_context_sep = sep.as_bytes().to_vec();
+    }
+    if a.flag("--no-context-separator") {
+        o.context_sep = None;
+    } else if let Some(sep) = a
+        .value("--context-separator")
+        .or(a.value("--group-separator"))
+    {
+        o.context_sep = Some(sep.as_bytes().to_vec());
+    }
     o.include_zero = a.flag("--include-zero");
     o.quiet_errors = a.flag("--no-messages");
     o.passthru = a.flag("--passthru");
@@ -1036,7 +1138,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let json = a.flag("--json");
     let color = color_enabled(color_mode.as_deref());
     // Colour, the JSON report and `--column` all need each match located inside its line.
-    o.paint = color || json || o.column;
+    o.paint = color || json || o.column || o.vimgrep;
     if let Some(v) = a.value("-j").or(a.value("--threads")) {
         o.threads = cli::parse_threads(v)?;
     }
@@ -1056,7 +1158,8 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let report = match scope {
         Scope::Content => {
             o.invert = a.flag("-v") || a.flag("--invert-match");
-            o.line_numbers = a.flag("-n") || a.flag("--line-number");
+            // `--vimgrep` is `-n --column` with a row per match, so `-n` comes with it.
+            o.line_numbers = a.flag("-n") || a.flag("--line-number") || o.vimgrep;
             o.with_filename = if a.flag("-H") || a.flag("--with-filename") {
                 Some(true)
             } else if a.flag("-h") || a.flag("--no-filename") {
@@ -1071,7 +1174,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             o.count_matches = a.flag("--count-matches");
             o.quiet = a.flag("-q") || a.flag("--quiet");
             o.text = a.flag("-a") || a.flag("--text");
-            o.max_columns = unsigned("--max-columns")?.unwrap_or(0);
+            o.max_columns = unsigned("-M")?.or(unsigned("--max-columns")?).unwrap_or(0);
             if let Some(name) = a.value("--encoding") {
                 if !name.eq_ignore_ascii_case("auto") {
                     let e = Encoding::from_name(name).ok_or_else(|| {
@@ -1282,8 +1385,11 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     };
 
     // grep prints the file name whenever more than one file is in play, which a directory or
-    // a second root guarantees; `-h` and `-H` have already had their say above.
-    if o.with_filename.is_none() && (o.roots.iter().any(|p| p.is_dir()) || o.roots.len() > 1) {
+    // a second root guarantees, and `--vimgrep` has a field for the path even on one file;
+    // `-h` and `-H` have already had their say above.
+    if o.with_filename.is_none()
+        && (o.vimgrep || o.roots.iter().any(|p| p.is_dir()) || o.roots.len() > 1)
+    {
         o.with_filename = Some(true);
     }
     let errs = report.stats.errors.total();
