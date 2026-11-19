@@ -64,3 +64,79 @@ cat mixed-100k.lz4 one-byte.lz4 > concatenated.lz4
 `-BD` in the LZ4 CLI means *block dependency*, not "uncompressed": a frame with stored
 blocks is what the CLI writes when the data does not compress, which is why
 `uncompressed.lz4` comes from the SHA-256 stream.
+
+## `xz/` — xz / LZMA2 decoder (`src/archive_xz.rs`)
+
+Every `.xz` here is committed beside the plaintext it must expand to, so
+`src/archive_xz.rs` runs its tests from `include_bytes!` alone — no `xz` binary,
+no shell, on Windows CI as much as on Linux.
+
+The plaintexts come from this script, run from `tests/fixtures/xz`. It is
+deterministic (a bash loop and a Park–Miller LCG), so re-running it reproduces
+the same bytes; xz encoder output across versions is not guaranteed to be
+byte-identical, which is why the `.xz` files are committed rather than built.
+
+```sh
+cd tests/fixtures/xz
+
+i=0
+while [ "$i" -lt 4000 ]; do
+  printf 'line %05d\tvalue=%08x\tneedle %d: the quick brown fox jumps over the lazy dog; pack my box with five dozen liquor jugs\n' \
+    "$i" $(( (i * 2654435761) % 4294967296 )) "$(( i % 97 ))"
+  i=$((i + 1))
+done > mixed.full
+head -c 307200 mixed.full > mixed.txt   # 300 KiB, cut mid-line on purpose
+rm mixed.full
+
+awk 'BEGIN{s=1; for(i=0;i<65536;i++){ s=(s*48271)%2147483647; printf "%c", s%256 }}' > incompressible.bin
+printf 'alpha stream: the first of two concatenated xz streams\nneedle alpha\n' > alpha.txt
+printf 'beta stream: the second of two concatenated xz streams, with a longer tail\nneedle beta\nand one more line so the two differ in length\n' > beta.txt
+: > empty.txt
+printf 'x' > one_byte.txt
+```
+
+Then the streams themselves (xz 5.4.5):
+
+```sh
+xz -c -T1 mixed.txt                                  > mixed.xz           # default preset, check=crc64
+xz -c -T1 --check=crc32 mixed.txt                    > mixed_crc32.xz
+xz -c -T1 --check=crc64 mixed.txt                    > mixed_crc64.xz
+xz -c -T1 --check=sha256 mixed.txt                   > mixed_sha256.xz
+xz -c -T1 -0 mixed.txt                               > mixed_0.xz
+xz -c -T1 -9e mixed.txt                              > mixed_9e.xz
+xz -c -T1 --lzma2=dict=64KiB mixed.txt               > mixed_dict64k.xz
+xz -c -T1 --block-size=65536 mixed.txt               > mixed_blocks.xz     # five blocks
+xz -c -T2 --block-size=65536 mixed.txt               > mixed_mt.xz         # sizes in the block headers
+xz -c -T1 empty.txt                                  > empty.xz
+xz -c -T1 one_byte.txt                               > one_byte.xz
+xz -c -T1 --lzma2=mode=normal incompressible.bin     > incompressible.xz   # uncompressed chunks
+xz -c -T1 alpha.txt                                  > alpha.xz
+xz -c -T1 beta.txt                                   > beta.xz
+cat alpha.xz beta.xz                                 > concat.xz
+{ cat alpha.xz; printf '\0\0\0\0'; cat beta.xz; }    > concat_padded.xz    # four bytes of stream padding
+```
+
+## Pairs
+
+| stream | expands to |
+| --- | --- |
+| `empty.xz` | `empty.txt` (nothing) |
+| `one_byte.xz` | `one_byte.txt` |
+| `mixed.xz`, `mixed_crc32.xz`, `mixed_crc64.xz`, `mixed_sha256.xz`, `mixed_0.xz`, `mixed_9e.xz`, `mixed_dict64k.xz`, `mixed_blocks.xz`, `mixed_mt.xz` | `mixed.txt` |
+| `incompressible.xz` | `incompressible.bin` |
+| `alpha.xz` | `alpha.txt` |
+| `beta.xz` | `beta.txt` |
+| `concat.xz`, `concat_padded.xz` | `alpha.txt` followed by `beta.txt` |
+
+`incompressible.xz` is the only fixture whose LZMA2 stream uses uncompressed
+chunks (controls `0x01` and `0x02`); everything else is range-coded.
+
+## Checksums of the plaintexts
+
+```text
+fb8aea3e304bc3ad9da556a17ba02fcbf2ac0beb84f642ef71627a032272864e  mixed.txt
+d2c90d5fb81ad96e7c0886c53ac6da53c0629833c85358de5004ad8dfbcd6026  incompressible.bin
+bdaa9c7d37aa67c7451578cb1287f414c18e7d5150608185e79cf70beeedaf0d  alpha.txt
+0d5e8ceba89e71a6387e3b5e9b6330c1a81c45853c99b2dca8448fc8b263a447  beta.txt
+2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881  one_byte.txt
+```
