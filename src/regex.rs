@@ -2075,7 +2075,9 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let mut max: Option<u32> = None;
+        let mut has_comma = false;
         if self.peek() == Some(b',') {
+            has_comma = true;
             self.at += 1;
             let mut digits = String::new();
             while let Some(c) = self.peek() {
@@ -2102,6 +2104,10 @@ impl<'a> Parser<'a> {
         let min: u32 = min
             .parse()
             .map_err(|_| self.err_at("bad repetition bound", save))?;
+        // `{n}` is exactly n, not "n or more": only a comma makes the upper bound open.
+        if !has_comma {
+            max = Some(min);
+        }
         if min > MAX_REPEAT || max.is_some_and(|m| m > MAX_REPEAT) {
             return Err(self.err_at("repetition bound above 1000", save));
         }
@@ -3496,6 +3502,35 @@ mod tests {
                 assert_eq!(re.is_match(hay), reference(pat, hay), "{pat:?} on {hay:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_repeat_tests {
+    use super::*;
+
+    fn spans(pat: &str, hay: &str) -> Vec<(usize, usize)> {
+        let re = Regex::new(pat).unwrap();
+        let mut out = Vec::new();
+        let mut at = 0;
+        while let Some(m) = re.find_at(hay.as_bytes(), at) {
+            out.push((m.start, m.end));
+            at = if m.end > m.start { m.end } else { m.end + 1 };
+            if at > hay.len() {
+                break;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_exact_repeat_stops_at_the_bound() {
+        assert_eq!(spans("a{2}", "aaa"), vec![(0, 2)]);
+        assert_eq!(spans("ab{2}c", "abbbc"), vec![]);
+        assert_eq!(spans("ab{2}c", "abbc"), vec![(0, 4)]);
+        // Leftmost-first: the longest allowed at 0 wins, and the search resumes past it.
+        assert_eq!(spans("a{2,3}", "aaaa"), vec![(0, 3)]);
+        assert_eq!(spans("a{2,}", "aaaa"), vec![(0, 4)]);
     }
 }
 

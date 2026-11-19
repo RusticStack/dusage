@@ -1284,3 +1284,84 @@ fn columns_preview_and_time_sorts() {
     assert_eq!(code(&bad), 2);
     assert!(stderr(&bad).contains("accessed"), "{}", stderr(&bad));
 }
+
+#[test]
+fn grep_compatibility_flags() {
+    let f = Fixture::new("grepcompat");
+    let dir = f.root.join("gc");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("a.c"), "alpha needle\n").unwrap();
+    fs::write(dir.join("b.h"), "needle\n").unwrap();
+    fs::write(dir.join("sub/c.c"), "needle\n").unwrap();
+    fs::write(dir.join("bin.dat"), b"bin\0needle\n").unwrap();
+
+    // `--include` narrows like `-g`, `--exclude` and `--exclude-dir` take paths away.
+    let inc = stdout(&run(
+        &["search", "-I", "-l", "--include", "*.c", "needle"],
+        &dir,
+    ));
+    assert!(inc.contains("a.c") && inc.contains("sub/c.c"), "{inc}");
+    assert!(!inc.contains("b.h"), "{inc}");
+    let exc = stdout(&run(
+        &["search", "-I", "-l", "--exclude", "*.h", "needle"],
+        &dir,
+    ));
+    assert!(!exc.contains("b.h"), "{exc}");
+    let excdir = stdout(&run(
+        &["search", "-I", "-l", "--exclude-dir", "sub", "needle"],
+        &dir,
+    ));
+    assert!(!excdir.contains("sub/c.c"), "{excdir}");
+
+    // `-I` makes a NUL-carrying file no match at all, which is `--binary-files=without-match`.
+    assert!(!stdout(&run(&["search", "-l", "needle"], &dir)).is_empty());
+    let quiet_bin = stdout(&run(&["search", "-I", "-l", "needle"], &dir));
+    assert!(!quiet_bin.contains("bin.dat"), "{quiet_bin}");
+    assert_eq!(
+        stdout(&run(
+            &["search", "--binary-files", "without-match", "-l", "needle"],
+            &dir
+        )),
+        quiet_bin
+    );
+
+    // `-d skip` does not descend, so a file in a subdirectory drops out.
+    let skipped = stdout(&run(&["search", "-I", "-l", "-d", "skip", "needle"], &dir));
+    assert!(!skipped.contains("sub/c.c"), "{skipped}");
+    assert!(skipped.contains("a.c"), "{skipped}");
+}
+
+#[test]
+fn basic_regular_expressions() {
+    let f = Fixture::new("bre");
+    let dir = f.root.join("bre");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("t.txt"), "abc\nabbbc\na+b\n(x)\nabbc\n").unwrap();
+
+    // `+` and `( )` are literal in a basic regexp, `\+` and `\( \)` are the operators, and
+    // `-E` is the default dialect spelled out.
+    let lit_plus = stdout(&run(&["search", "-G", "-h", "a+b"], &dir));
+    assert_eq!(lit_plus, "a+b\n");
+    assert_eq!(
+        stdout(&run(&["search", "-G", "-h", r"a\+b"], &dir)),
+        "abc\nabbbc\nabbc\n"
+    );
+    assert_eq!(
+        stdout(&run(&["search", "-G", "-h", r"\(x\)"], &dir)),
+        "(x)\n"
+    );
+    assert_eq!(
+        stdout(&run(&["search", "-E", "-h", "a+b"], &dir)),
+        "abc\nabbbc\nabbc\n"
+    );
+    // `\{n\}` is BEG's bounded repetition, and it is exact.
+    assert_eq!(
+        stdout(&run(&["search", "-G", "-h", r"ab\{2\}c"], &dir)),
+        "abbc\n"
+    );
+    // `{n}` is exact in the default dialect too, which is a bug this batch fixed.
+    assert_eq!(
+        stdout(&run(&["search", "-h", "-o", "ab{2}c"], &dir)),
+        "abbc\n"
+    );
+}

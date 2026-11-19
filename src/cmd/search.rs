@@ -25,6 +25,8 @@ PATTERN SYNTAX (regular expressions):
 
 OPTIONS:
     -F, --fixed-strings    treat the pattern as literal text
+    -E, --extended-regexp  the default dialect, accepted for grep compatibility
+    -G, --basic-regexp     read the pattern as a POSIX basic regular expression
     -P, --pcre2            force the backtracking engine (lookaround, backreferences)
     -i, --ignore-case      case-insensitive (ASCII folding)
     -s, --case-sensitive   case-sensitive, overriding an earlier -i
@@ -62,6 +64,12 @@ OPTIONS:
     -a, --text             search binary files instead of reporting them
     -j, --threads N        worker threads (default: one per core, 4 to 16)
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
+        --include PATTERN  grep's spelling of a narrowing glob; repeatable
+        --exclude PATTERN  grep's spelling of an exclusion glob; repeatable
+        --exclude-dir PATTERN  exclude directories by this glob; repeatable
+        --binary-files T    binary, text or without-match: what a NUL-carrying file is
+    -I                     the same as --binary-files without-match
+    -d, --directories A    recurse (default) or skip: whether to descend into directories
         --iglob PATTERN    the same, matched without case
     -t, --type NAME        include files of a type: rust, python, js, ts, c, cpp, go, java,
                            ruby, markdown, json, toml, yaml, sh, html, css, xml, txt, log, lock
@@ -126,6 +134,12 @@ OPTIONS:
     --long                 print size, modification time and path
     --max-depth N          do not descend more than N levels below each root
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
+        --include PATTERN  grep's spelling of a narrowing glob; repeatable
+        --exclude PATTERN  grep's spelling of an exclusion glob; repeatable
+        --exclude-dir PATTERN  exclude directories by this glob; repeatable
+        --binary-files T    binary, text or without-match: what a NUL-carrying file is
+    -I                     the same as --binary-files without-match
+    -d, --directories A    recurse (default) or skip: whether to descend into directories
         --iglob PATTERN    the same, matched without case
     --sort KEY             result order: path (default), none, modified, accessed, created
                            (each oldest first)
@@ -351,6 +365,12 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--max-filesize",
     "--max-columns",
     "--encoding",
+    "--include",
+    "--exclude",
+    "--exclude-dir",
+    "--binary-files",
+    "-d",
+    "--directories",
     "--sort",
     "--sortr",
 ];
@@ -406,6 +426,11 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--no-messages",
     "--include-zero",
     "--line-regexp",
+    "-E",
+    "--extended-regexp",
+    "-G",
+    "--basic-regexp",
+    "-I",
     "--passthru",
     "--sort-files",
     "-U",
@@ -454,6 +479,75 @@ fn take_unrestricted(raw: &mut Vec<String>) -> u8 {
         i += 1;
     }
     n
+}
+
+/// Rewrite a POSIX basic regular expression into the extended one this engine reads.
+/// In BRE the operators are the backslashed spellings — `\(`, `\{`, `\+`, `\?`, `\|` —
+/// and the bare `( ) { } + ? |` are literal, so the two dialects are the same grammar with
+/// the punctuation swapped. A character class is copied out untouched, and an escape of
+/// anything else means the same thing in both.
+fn bre_to_ere(pattern: &str) -> String {
+    let bytes = pattern.as_bytes();
+    let mut out = String::with_capacity(pattern.len() + 8);
+    let mut i = 0;
+    let mut in_class = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_class {
+            out.push(c as char);
+            if c == b'\\' {
+                if let Some(next) = bytes.get(i + 1) {
+                    out.push(*next as char);
+                    i += 1;
+                }
+            } else if c == b']' {
+                in_class = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'[' => {
+                in_class = true;
+                out.push('[');
+                // A leading `]` or `^]` is a member, not the end.
+                if bytes.get(i + 1) == Some(&b'^') {
+                    out.push('^');
+                    i += 1;
+                }
+                if bytes.get(i + 1) == Some(&b']') {
+                    out.push(']');
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'\\' => match bytes.get(i + 1) {
+                Some(&n) if matches!(n, b'(' | b')' | b'{' | b'}' | b'+' | b'?' | b'|') => {
+                    out.push(n as char);
+                    i += 2;
+                }
+                Some(&n) => {
+                    out.push('\\');
+                    out.push(n as char);
+                    i += 2;
+                }
+                None => {
+                    out.push('\\');
+                    i += 1;
+                }
+            },
+            b'(' | b')' | b'{' | b'}' | b'+' | b'?' | b'|' => {
+                out.push('\\');
+                out.push(c as char);
+                i += 1;
+            }
+            _ => {
+                out.push(c as char);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// True when a pattern asks for a newline byte: a real one, or an unescaped `\n` escape.
@@ -692,6 +786,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     if a.flag("-V") || a.flag("--version") {
         return write_out(&format!("dusage {}\n", env!("CARGO_PKG_VERSION")));
     }
+    let basic = a.flag("-G") || a.flag("--basic-regexp");
     let mut multi_pattern = false;
     let mut given: Vec<String> = a.values("-e").to_vec();
     given.extend(a.values("--regexp").iter().cloned());
@@ -704,14 +799,24 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     }
     let (pattern_text, paths) = if !from_flags {
         match a.positionals().split_first() {
-            Some((p, rest)) => (p.clone(), rest.to_vec()),
+            Some((p, rest)) => {
+                let text = if basic { bre_to_ere(p) } else { p.clone() };
+                (text, rest.to_vec())
+            }
             None => return Err("missing <pattern>".to_string().into()),
         }
     } else {
         if given.is_empty() {
             return Err("no patterns in the pattern file".to_string().into());
         }
-        // `-e` and `-f` may repeat: every pattern is an alternative, as in grep and rg.
+        // `-e` and `-f` may repeat: every pattern is an alternative, as in grep and rg. A
+        // basic-regexp pattern is translated before they are joined, so the `|` that joins
+        // them stays an operator.
+        if basic {
+            for p in given.iter_mut() {
+                *p = bre_to_ere(p);
+            }
+        }
         let fixed = a.flag("-F") || a.flag("--fixed-strings");
         // Several literals become one escaped regex, so the fixed-string path is off.
         multi_pattern = given.len() > 1;
@@ -775,8 +880,16 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     // `-g` is an override filter (ripgrep semantics: it also switches ignore rules off);
     // `-t` and `--ext` only narrow the results.
     let mut globs: Vec<String> = Vec::new();
-    for g in ["-g", "--glob"] {
+    for g in ["-g", "--glob", "--include"] {
         globs.extend(a.values(g).iter().cloned());
+    }
+    // grep's exclusions are the negated form of the same glob, and `--exclude-dir` adds the
+    // trailing slash that makes a pattern only match a directory.
+    for g in a.values("--exclude").iter() {
+        globs.push(format!("!{g}"));
+    }
+    for g in a.values("--exclude-dir").iter() {
+        globs.push(format!("!{g}/"));
     }
     let mut type_globs: Vec<String> = Vec::new();
     for t in a.values("-t").iter().chain(a.values("--type").iter()) {
@@ -863,6 +976,21 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.no_ignore_dot = a.flag("--no-ignore-dot") || a.flag("--no-ignore-files");
     o.no_ignore_parent = a.flag("--no-ignore-parent") || a.flag("--no-ignore-files");
     o.follow = a.flag("--follow");
+    let binary_files = a.value("--binary-files").map(|v| v.to_ascii_lowercase());
+    match binary_files.as_deref() {
+        Some("text") => o.text = true,
+        Some("without-match") => o.skip_binary = true,
+        Some("binary") | None => {}
+        Some(other) => {
+            return Err(Fail(
+                2,
+                format!("unknown --binary-files {other:?} (binary, text, without-match)"),
+            ))
+        }
+    }
+    if a.flag("-I") {
+        o.skip_binary = true;
+    }
     o.multiline = a.flag("-U") || a.flag("--multiline");
     o.search_zip = a.flag("-z") || a.flag("--search-zip");
     let json = a.flag("--json");
@@ -873,6 +1001,18 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         o.threads = cli::parse_threads(v)?;
     }
     o.max_depth = unsigned("--max-depth")?;
+    match a.value("-d").or(a.value("--directories")) {
+        None | Some("recurse") => {}
+        // grep's `-d skip` does not descend: the files directly inside a root still count.
+        Some("skip") => o.max_depth = Some(o.max_depth.map_or(1, |d| d.min(1))),
+        Some("read") => {
+            return Err(Fail(
+                2,
+                "-d read is not supported: dusage reads files, never directories".to_string(),
+            ))
+        }
+        Some(other) => return Err(Fail(2, format!("unknown -d {other:?} (recurse, skip)"))),
+    }
     let report = match scope {
         Scope::Content => {
             o.invert = a.flag("-v") || a.flag("--invert-match");

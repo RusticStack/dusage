@@ -407,6 +407,12 @@ content_case multiline_count eq rg plain . 'needle\n' '-U -c' '-U -c' ''
 content_case type_add eq rg plain . needle '--type-add web:*.md -t web -l' '--type-add web:*.md -t web -l' ''
 content_case type_extend known:type-plus rg plain . needle '--type-add rust:+*.md -t rust -l' '--type-add rust:+*.md -t rust -l' ''
 content_case type_clear eq rg plain . needle '--type-clear rust -t rust -l' '--type-clear rust -t rust -l' ''
+content_case bre_literal_plus eq grep plain . 'nee+dle' '-G' '' -rG
+content_case bre_operator_plus eq grep plain . 'nee\+dle' '-G' '' -rG
+content_case bre_group eq grep plain . '\(nee\)dle' '-G' '' -rG
+content_case grep_include eq grep plain . needle '--include *.txt -l' '' '-rl --include=*.txt'
+content_case grep_exclude_dirs eq rg plain . needle '--exclude-dir sub -l' '--glob !sub -l' ''
+content_case exact_repeat eq 3 plain . 'needle{1}' '-o' '-o' -roE
 content_case quit_matched eq 3 plain . needle -q -q -rqE
 content_case quit_absent eq 3 plain . zzzz-absent -q -q -rqE
 content_case ctx_after eq 3 plain sub needle '-A 1' -A1 '-rE -A 1'
