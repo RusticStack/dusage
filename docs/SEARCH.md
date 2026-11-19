@@ -132,17 +132,72 @@ flag lists in `src/cmd/search.rs`).
 | `--no-ignore` | no find equivalent | Without it, the built-in cache list and the ignore files apply to `find` too. |
 | `-x`, `--one-filesystem` | `find -xdev` | Device comparison per directory (`src/search.rs:216-222`). |
 | `-Z`, `--null` | `find -print0` | NUL after each path instead of a newline (`src/report.rs:474-476`). |
-| `--json` | no find equivalent | `{"paths":[…],"count":N}` — see §4.3. |
-| `--color[=WHEN]` | `ls --color`-ish | Colours the printed path only. |
+| `--json` | no find equivalent | `{"paths":[…],"count":N}` — see §4.3. Refused with exit 2 when an expression is given, because the actions, not the report, decide what is printed. |
+| `--color[=WHEN]` | `ls --color`-ish | Colours the printed path only, in both forms. |
 | `--help`, `-V`, `--version` | — | `find -h` is rejected as an unknown option here, unlike grep, where `-h` is `--no-filename`. |
 
-Absent relative to GNU find, and likely to matter: the expression language
-(`-a`, `-o`, `!`, parentheses), `-exec`/`-execdir` (which would run arbitrary
-commands, against this tool's read-only rule), `-printf`, `-prune`, `-regex`,
-`-user`, `-perm`, `-links`, `-depth` and `-type` (we have `--dirs`/`--files`
-instead). `-name`, `-path`, `-iname`, `-mindepth`, `-maxdepth`, `-newermt`,
-`-newerat`, `-newerct`, `-empty`, `-size`, `-newer` and `-mtime` all have a
-spelling here.
+#### The expression form
+
+A run is an expression only when one of its arguments is expression syntax: a
+token that starts with `-` and is not one of our own flags, or a bare `!`, `(`
+or `)`. The positionals before that token are the starting points and everything
+from it on is the expression, which is find's own order — `dusage find . -name
+"*.rs" -o -type d` is the find command line. With no expression token in sight
+the glob form above runs exactly as it did. Our own flags are recognised
+wherever they appear (`--allow-exec` would otherwise have to precede the action
+that needs it), except inside a `-exec` command, where every token belongs to
+the command. The split is `split_find_args` in `src/cmd/search.rs`.
+
+The language, evaluator and `printf` renderer are `src/findexpr.rs`; the walk
+that feeds them is `search::walk_expr` in `src/search.rs`, which is sequential
+by nature, unlike the glob form's parallel walk: `-prune` decides the next step
+from what the expression said about the entry just seen, and `-depth` reverses
+the order the entries come out in.
+
+| Expression | Equivalent / notes |
+|---|---|
+| `-name GLOB`, `-iname`, `-path`, `-ipath`, `-wholename`, `-iwholename` | find's own globs, matched against the name or the whole path *as printed* (the starting point included). `-iname` folds ASCII letters only. |
+| `-regex RE`, `-iregex` | Compiled by this crate's regex engine (`src/regex.rs`), wrapped as `\A(?:…)\z`. The dialect is not Emacs': bare `( ) | + ? {n,m}` are operators and `\(` is a literal paren, so a pattern written for find may need its punctuation rewritten. `-regextype` is accepted and validated against findutils' names but does not change the dialect. |
+| `-type f\|d\|l`, `-xtype` | `-type b`, `-c`, `-p` and `-s` are refused at parse time: the enumerator's entry kind from `d_type`/`lstat` cannot be trusted for special files without opening them. `%y` and `-ls` do report `p`, `s`, `c` and `b` where the platform's `lstat` can tell. |
+| `-size n[cwbkMG]`, `-empty` | find's rounding: the size is divided by the unit and rounded up, and `+n`/`-n` compare that count. `-empty` costs one `read_dir` per directory, so the walk only answers it when the expression holds the token. |
+| `-mtime`, `-atime`, `-ctime`, `-mmin`, `-amin`, `-cmin` | find's two roundings, reproduced and covered by the module's own tests: day tests count whole days down (`-mtime n` is `n*86400 <= age < (n+1)*86400`), minute tests round up. |
+| `-newer`, `-anewer`, `-cnewer`, `-newerXY`, `-newermt` | A reference file or an absolute date, read as UTC. |
+| `-perm`, `-user`, `-group`, `-uid`, `-gid`, `-nouser`, `-nogroup`, `-links`, `-inum`, `-samefile`, `-fstype`, `-used` | Octal `-perm` only (`u+w` is refused); names resolve through `/etc/passwd` and `/etc/group`, read once per run and cached (`PasswdIds` in `src/cmd/search.rs`). `-fstype` answers from `/proc/self/mountinfo`. On Windows there is no passwd table, so `-nouser`/`-nogroup` are true for every entry, `%u`/`%g` print numbers, and `-links`, `-uid`, `-perm` answer from zeros. |
+| `-a`/`-and`, `-o`/`-or`, `!`/`-not`, `(`, `)` | find's precedence: `!` tightest, then implicit-and, then `-o`. |
+| `-maxdepth N`, `-mindepth N`, `-depth`, `-xdev`/`-mount`, `-follow`, `-noleaf` | Global options of the expression. Our flags of the same meaning (`--max-depth`, `--mindepth`, `-x`, `--follow`) are applied *before* the expression, so an option written in the expression wins; see the help text. `-prune` is a no-op under `-depth`, as in find. |
+| `-print`, `-print0` | Through the same path printer the glob form uses, so `--color` reaches it and the terminator is the one asked for. |
+| `-printf FORMAT` | `%p %f %h %P %s %b %k %y %m %M %i %n %d %l %u %g %t %a %c`, and `%TY %Tm %Td %TH %TM %TS`, `\n`-style escapes and `%%`; times are UTC because a time-zone database is a dependency this tool does not have. |
+| `-ls` | find's column layout: inode, 1K blocks, mode, links, user, group, size, time and path. The date column is this tool's `YYYY-MM-DD HH:MM:SS` rather than find's `Nov 19 12:34`. |
+| `-exec CMD … ;`, `-exec CMD {} +` | **The one write path in this tool.** Without `--allow-exec` both are refused as a whole, before any output, with exit 2 and a message naming the flag; `-delete` is refused whatever the flag says. With it the command runs directly and never through a shell, every `{}` in every argument is replaced by the entry's path, and a trailing `{} +` collects the paths into one invocation when the walk ends. The command's exit status is the predicate's value, so `-exec false {} ;` matches nothing and exits 1. |
+| `-prune`, `-quit` | `-prune` stops the descent into the directory that matched it; `-quit` ends the run at once. Exit status stays 0 when something was printed or the expression was true for some entry, 1 when neither, 2 on an error. |
+| `-delete`, `-ok`, `-okdir`, `-daystart`, `-fprintf`, `-fls`, the comma operator, `-newerXY` with `Y = B` | Refused at parse time with a message naming the token. |
+
+The options that describe the walk carry into the expression unchanged: `--hidden`,
+`--no-ignore` and its friends, `--ignore-file`, `-g`/`--glob`, `-t`/`--type`, `--ext`,
+`--max-depth`, `--mindepth`, `-x`, `--follow` and `--allow-exec`; `--files`, `--dirs` and
+`--empty` become the matching test. The ones that describe the glob itself are refused with
+exit 2 and a message naming the expression spelling — `-F`, `-i`, `--name`, `--full-path`,
+`--size`, `--older`, `--newer`, `--newermt`, `--newerat`, `--newerct`, `-Z`, `--long`,
+`--sort`, `--sortr` and `--json` — because ignoring them would print what they did not ask
+for.
+
+`-execdir` runs the command in the entry's own directory with its path as
+`./name`, and its `+` form runs once per directory; measured against findutils
+4.9.0 on a three-directory fixture, both tools print the same three batches.
+The two predicates are told apart by counting them in the expression, which is a
+workaround for a hole in the interface: `findexpr::ExecRequest` carries the
+command and the terminator, not which predicate asked for it, so an expression
+that holds **both** `-exec` and `-execdir` runs both the `-exec` way.
+
+Two semantics could not be reproduced. The one above is the first: an
+expression mixing `-exec` with `-execdir`. The second is **output order**: it is
+sorted per directory rather than kernel order, because the rest of this tool
+promises two runs of one walk print the same thing; find prints in readdir
+order.
+
+Still absent relative to GNU find: `-ok`/`-okdir`, `-delete`, `-daystart`, the
+comma operator, `-fprintf`/`-fls`, symbolic `-perm` modes, `-newerXY` with
+`Y = B`, and a `-regextype` that changes the dialect.
 
 ### 1.3 ripgrep flags we do not have
 

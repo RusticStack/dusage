@@ -7,12 +7,13 @@
 
 use crate::bytes;
 use crate::encodings::{self, Encoding};
+use crate::findexpr::{self, Ctx, Expr, Kind, Sink};
 use crate::ignore::IgnoreRules;
 use crate::model::ErrorCounts;
 use crate::native::enumerate;
 use crate::par_for_each;
 use crate::pattern::{Match, Pattern};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -377,6 +378,38 @@ fn walk_rules(o: &SearchOptions) -> Arc<IgnoreRules> {
     Arc::new(rules)
 }
 
+/// The rule stack one root starts from: the shared layers, plus the ignore files of its
+/// parent directories unless those are switched off.
+fn root_rules(o: &SearchOptions, root: &Path) -> Arc<IgnoreRules> {
+    if o.no_ignore || o.no_ignore_parent {
+        return walk_rules(o);
+    }
+    let mut rules = (*walk_rules(o)).clone();
+    rules.push_ancestors(root);
+    Arc::new(rules)
+}
+
+/// Whether a walk may report one entry: the hidden and ignore rules, then the `-g` globs.
+/// Both walks answer it here, so `find <glob>` and `find <path> <expression>` agree about
+/// which paths exist for them.
+fn allow(rules: &IgnoreRules, o: &SearchOptions, rel: &str, name: &str, is_dir: bool) -> bool {
+    if !o.hidden && name.starts_with('.') {
+        // A positive glob re-includes a dotfile it names, as rg does; directories still
+        // need `--hidden` so the walk never wanders into `.git`.
+        let named = !is_dir && rules.glob_named(rel);
+        if !named {
+            return false;
+        }
+    }
+    // A positive glob switches the ignore files off (`-g '*.log'` finds a file a
+    // `.gitignore` hides), exactly as ripgrep does; exclusions always apply.
+    let globs_win = rules.whitelisted() || o.no_ignore;
+    if !globs_win && rules.is_ignored(rel, is_dir) {
+        return false;
+    }
+    rules.glob_allows(rel, is_dir)
+}
+
 /// Read one directory: apply the hidden, ignore, glob, depth and filesystem filters, and
 /// return the entries that survive together with the subdirectories to visit next.
 fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
@@ -428,23 +461,7 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
             out.stats.entries_ignored += 1;
             continue;
         }
-        if !o.hidden && name.starts_with('.') {
-            // A positive glob re-includes a dotfile it names, as rg does; directories still
-            // need `--hidden` so the walk never wanders into `.git`.
-            let named = !is_dir && rules.glob_named(&child_rel);
-            if !named {
-                out.stats.entries_ignored += 1;
-                continue;
-            }
-        }
-        // A positive glob switches the ignore files off (`-g '*.log'` finds a file a
-        // `.gitignore` hides), exactly as ripgrep does; exclusions always apply.
-        let globs_win = rules.whitelisted() || o.no_ignore;
-        if !globs_win && rules.is_ignored(&child_rel, is_dir) {
-            out.stats.entries_ignored += 1;
-            continue;
-        }
-        if !rules.glob_allows(&child_rel, is_dir) {
+        if !allow(&rules, o, &child_rel, &name, is_dir) {
             out.stats.entries_ignored += 1;
             continue;
         }
@@ -553,13 +570,7 @@ fn root_jobs(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Vec<WalkJob>,
                 continue;
             }
             Ok(_) => {
-                let ancestors = if o.no_ignore || o.no_ignore_parent {
-                    walk_rules(o)
-                } else {
-                    let mut r = (*walk_rules(o)).clone();
-                    r.push_ancestors(root);
-                    Arc::new(r)
-                };
+                let ancestors = root_rules(o, root);
                 let dev = if o.one_filesystem {
                     enumerate::dev_of(root).unwrap_or(root_dev)
                 } else {
@@ -645,6 +656,488 @@ fn sort_paths(v: &mut Vec<Candidate>, o: &SearchOptions) {
     if o.sort_reverse {
         v.reverse();
     }
+}
+
+/// What an expression walk produced, for the front end's exit status.
+#[derive(Debug, Default)]
+pub struct ExprOutcome {
+    /// Entries whose expression evaluated true.
+    pub matched: u64,
+    pub stats: Stats,
+}
+
+/// One entry's facts, in the shape [`findexpr::Entry`] wants them. The platforms differ in
+/// which of them exist, so they are filled in one place per platform below.
+struct Facts {
+    path: PathBuf,
+    kind: Kind,
+    size: u64,
+    blocks: u64,
+    mtime: SystemTime,
+    atime: SystemTime,
+    ctime: SystemTime,
+    links: u64,
+    inode: u64,
+    dev: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    /// A symlink's target, and what the target is.
+    target: Option<String>,
+    target_kind: Option<Kind>,
+}
+
+impl Facts {
+    fn of(path: &Path) -> io::Result<Facts> {
+        let md = std::fs::symlink_metadata(path)?;
+        let mut f = Facts {
+            path: path.to_path_buf(),
+            kind: kind_of(&md),
+            ..fields(&md)
+        };
+        if f.kind == Kind::Symlink {
+            f.target = std::fs::read_link(path)
+                .ok()
+                .map(|t| t.to_string_lossy().into_owned());
+            f.target_kind = std::fs::metadata(path).ok().map(|md| kind_of(&md));
+        }
+        Ok(f)
+    }
+
+    /// The entry described by its target instead of the link, which is what `-follow` turns
+    /// a symlink into; the link's own name and target stay for `%l` and `-xtype`.
+    fn followed(self, target: &Path) -> Facts {
+        let Ok(md) = std::fs::metadata(target) else {
+            return self;
+        };
+        let kind = match kind_of(&md) {
+            Kind::Other => self.kind,
+            k => k,
+        };
+        Facts {
+            path: self.path,
+            kind,
+            target: self.target,
+            target_kind: self.target_kind.or(Some(kind)),
+            ..fields(&md)
+        }
+    }
+}
+
+/// The `lstat` fields both platforms have some of. `path` and `kind` are placeholders here:
+/// every caller fills them in from the metadata it already parsed.
+#[cfg(unix)]
+fn fields(md: &std::fs::Metadata) -> Facts {
+    use std::os::unix::fs::MetadataExt;
+    Facts {
+        path: PathBuf::new(),
+        kind: Kind::Other,
+        size: md.size(),
+        blocks: md.blocks(),
+        mtime: stamp(md.mtime()),
+        atime: stamp(md.atime()),
+        ctime: stamp(md.ctime()),
+        links: md.nlink(),
+        inode: md.ino(),
+        dev: md.dev(),
+        mode: md.mode(),
+        uid: md.uid(),
+        gid: md.gid(),
+        target: None,
+        target_kind: None,
+    }
+}
+
+#[cfg(not(unix))]
+fn fields(md: &std::fs::Metadata) -> Facts {
+    use std::os::windows::fs::MetadataExt;
+    Facts {
+        path: PathBuf::new(),
+        kind: Kind::Other,
+        size: md.file_size(),
+        // Windows has no `st_blocks`, and find's `%b` is a POSIX idea; 0 says "unknown".
+        blocks: 0,
+        mtime: tick(md.last_write_time()),
+        atime: tick(md.last_access_time()),
+        ctime: tick(md.creation_time()),
+        // No link count, inode, mode bits or owner the walk can read without opening the
+        // file, so `-links`, `-perm`, `-uid`, `-user` answer from zeros (see SEARCH.md).
+        links: 0,
+        inode: 0,
+        dev: 0,
+        mode: 0,
+        uid: 0,
+        gid: 0,
+        target: None,
+        target_kind: None,
+    }
+}
+
+/// What kind of entry this is, from the `lstat` the walk already has.
+#[cfg(unix)]
+fn kind_of(md: &std::fs::Metadata) -> Kind {
+    use std::os::unix::fs::FileTypeExt;
+    let t = md.file_type();
+    if t.is_dir() {
+        Kind::Dir
+    } else if t.is_symlink() {
+        Kind::Symlink
+    } else if t.is_file() {
+        Kind::File
+    } else if t.is_fifo() {
+        Kind::Fifo
+    } else if t.is_socket() {
+        Kind::Socket
+    } else if t.is_char_device() {
+        Kind::Char
+    } else if t.is_block_device() {
+        Kind::Block
+    } else {
+        Kind::Other
+    }
+}
+
+#[cfg(not(unix))]
+fn kind_of(md: &std::fs::Metadata) -> Kind {
+    let t = md.file_type();
+    if t.is_symlink() {
+        Kind::Symlink
+    } else if t.is_dir() {
+        Kind::Dir
+    } else if t.is_file() {
+        Kind::File
+    } else {
+        // Nothing reports a fifo, socket or device node here, and the walk never opens a
+        // file to find out.
+        Kind::Other
+    }
+}
+
+#[cfg(unix)]
+fn stamp(secs: i64) -> SystemTime {
+    if secs >= 0 {
+        std::time::UNIX_EPOCH + Duration::from_secs(secs as u64)
+    } else {
+        std::time::UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs())
+    }
+}
+
+/// A FILETIME is 100 ns ticks since 1601-01-01, 11644473600 s before the Unix epoch.
+#[cfg(not(unix))]
+fn tick(ticks: u64) -> SystemTime {
+    const EPOCH_DIFF: u64 = 11_644_473_600;
+    let secs = ticks / 10_000_000;
+    let nanos = (ticks % 10_000_000) * 100;
+    match secs.checked_sub(EPOCH_DIFF) {
+        Some(s) => std::time::UNIX_EPOCH + Duration::new(s, nanos as u32),
+        None => std::time::UNIX_EPOCH,
+    }
+}
+
+/// A walk driven by a parsed `find` expression.
+///
+/// Unlike [`walk`] this one is sequential by nature: `-prune` decides the next step from
+/// what the expression said about the entry just seen, and `-depth` reverses the order the
+/// entries come out in, so there is no list to sort and nothing to hand to the workers.
+struct ExprWalk<'a> {
+    o: &'a SearchOptions,
+    expr: &'a Expr,
+    ctx: &'a Ctx<'a>,
+    sink: &'a mut dyn Sink,
+    /// Compute `-empty` per entry: one `read_dir` per directory, so only when asked.
+    want_empty: bool,
+    out: ExprOutcome,
+    /// Filesystem type names by device, for `-fstype` (`ext4`, `ntfs`, ...).
+    fs_names: HashMap<u64, String>,
+    stop: bool,
+}
+
+/// Walk every root under a parsed expression, evaluating it entry by entry as find does:
+/// pre-order, or after the contents under `-depth`, and never below a `-prune`.
+///
+/// An expression that cannot be evaluated here is the only thing that comes back as `Err`;
+/// per-entry I/O failures go to [`ExprOutcome::stats`] and the walk continues.
+pub fn walk_expr(
+    o: &SearchOptions,
+    expr: &Expr,
+    ctx: &Ctx,
+    want_empty: bool,
+    sink: &mut dyn Sink,
+) -> Result<ExprOutcome, String> {
+    let mut w = ExprWalk {
+        o,
+        expr,
+        ctx,
+        sink,
+        want_empty,
+        out: ExprOutcome::default(),
+        fs_names: filesystem_types(),
+        stop: false,
+    };
+    for root in &o.roots {
+        let rules = root_rules(o, root);
+        w.root(root, &rules)?;
+        if w.stop {
+            break;
+        }
+    }
+    Ok(w.out)
+}
+
+impl ExprWalk<'_> {
+    fn follow(&self) -> bool {
+        self.o.follow || self.expr.settings().follow
+    }
+
+    fn one_filesystem(&self) -> bool {
+        self.o.one_filesystem || self.expr.settings().one_filesystem
+    }
+
+    /// The starting point itself: find evaluates it too, at depth 0.
+    fn root(&mut self, root: &Path, rules: &Arc<IgnoreRules>) -> Result<(), String> {
+        let mut facts = match Facts::of(root) {
+            Ok(f) => f,
+            Err(e) => {
+                self.out.stats.errors.record(&e);
+                return Ok(());
+            }
+        };
+        if self.follow() && facts.kind == Kind::Symlink {
+            facts = facts.followed(root);
+        }
+        let settings = self.expr.settings();
+        let mut descend = facts.kind == Kind::Dir;
+        // `-depth` reports a directory after its contents, the starting point included.
+        let visit_now = !settings.depth_first;
+        if visit_now && settings.mindepth.is_none_or(|m| m == 0) {
+            descend &= self.visit(&facts, "", 0)?;
+        }
+        if descend && settings.maxdepth != Some(0) {
+            let mut chain = vec![real_path(root)];
+            self.dir(root, "", 0, rules, facts.dev, &mut chain)?;
+        }
+        if !visit_now && settings.mindepth.is_none_or(|m| m == 0) {
+            self.visit(&facts, "", 0)?;
+        }
+        Ok(())
+    }
+
+    /// Read one directory and evaluate what it holds, `depth` being this directory's own.
+    fn dir(
+        &mut self,
+        dir: &Path,
+        rel: &str,
+        depth: usize,
+        rules: &Arc<IgnoreRules>,
+        root_dev: u64,
+        chain: &mut Vec<PathBuf>,
+    ) -> Result<(), String> {
+        if self.stop {
+            return Ok(());
+        }
+        let mut own = (**rules).clone();
+        if !self.o.no_ignore {
+            own.push_dir(dir, rel);
+        }
+        let rules = Arc::new(own);
+        let mut ents = Vec::new();
+        if let Err(e) = enumerate::list(dir, &mut ents, &mut self.out.stats.errors) {
+            if e.kind() != io::ErrorKind::NotFound {
+                self.out.stats.errors.record(&e);
+            }
+            return Ok(());
+        }
+        self.out.stats.dirs_walked += 1;
+        // find prints a directory in the order the kernel returns it; sorting keeps two runs
+        // of the same walk comparable, which is what the rest of this tool promises.
+        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        let depth = depth + 1;
+        let settings = self.expr.settings();
+        let mindepth = settings.mindepth.unwrap_or(0) as usize;
+        let depth_first = settings.depth_first;
+        for e in &ents {
+            if self.stop {
+                break;
+            }
+            if settings.maxdepth.is_some_and(|m| depth as u64 > m) {
+                continue;
+            }
+            let name = e.name.to_string_lossy().into_owned();
+            let child_rel = join_rel(rel, &name);
+            let child = dir.join(&e.name);
+            // A symlink is an entry of its own, as it is for find; it is only ever walked
+            // with `-follow`, and then as the directory it points at.
+            let mut is_dir = e.is_dir() && !e.is_reparse();
+            if e.is_reparse() && self.follow() {
+                match std::fs::metadata(&child) {
+                    Ok(md) => is_dir = md.is_dir(),
+                    Err(err) => {
+                        self.out.stats.errors.record(&err);
+                        continue;
+                    }
+                }
+            }
+            if !allow(&rules, self.o, &child_rel, &name, is_dir) {
+                self.out.stats.entries_ignored += 1;
+                continue;
+            }
+            let mut facts = match Facts::of(&child) {
+                Ok(f) => f,
+                Err(err) => {
+                    self.out.stats.errors.record(&err);
+                    continue;
+                }
+            };
+            if self.follow() && facts.kind == Kind::Symlink {
+                facts = facts.followed(&child);
+            }
+            // `-maxdepth` bounds what is walked as well as what is reported: the entry at
+            // the limit is still evaluated, but its directory is never read.
+            let mut descend =
+                facts.kind == Kind::Dir && settings.maxdepth.is_none_or(|m| (depth as u64) < m);
+            if descend && self.one_filesystem() && facts.dev != root_dev {
+                self.out.stats.entries_ignored += 1;
+                descend = false;
+            }
+            // `-depth` reports a directory after its contents, so the descent comes first.
+            if descend && depth_first {
+                self.descend(&child, &child_rel, depth, &rules, root_dev, chain)?;
+            }
+            if depth >= mindepth {
+                descend &= self.visit(&facts, &child_rel, depth)?;
+            }
+            if descend && !depth_first {
+                self.descend(&child, &child_rel, depth, &rules, root_dev, chain)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn descend(
+        &mut self,
+        child: &Path,
+        child_rel: &str,
+        depth: usize,
+        rules: &Arc<IgnoreRules>,
+        root_dev: u64,
+        chain: &mut Vec<PathBuf>,
+    ) -> Result<(), String> {
+        match self.enter(child, chain) {
+            Some(real) => {
+                chain.push(real);
+                self.dir(child, child_rel, depth, rules, root_dev, chain)?;
+                chain.pop();
+            }
+            None => self.out.stats.entries_ignored += 1,
+        }
+        Ok(())
+    }
+
+    /// The canonical path to push while descending, or `None` when `--follow` has already
+    /// walked it: a link pointing back up the tree must not be entered twice.
+    fn enter(&self, dir: &Path, chain: &[PathBuf]) -> Option<PathBuf> {
+        if !self.follow() {
+            return Some(PathBuf::new());
+        }
+        let real = real_path(dir);
+        (!chain.contains(&real)).then_some(real)
+    }
+
+    /// Evaluate one entry and hand its actions to the sink. `Ok(false)` means `-prune` fired
+    /// on a directory, which the caller turns into "do not descend".
+    fn visit(&mut self, facts: &Facts, sub: &str, depth: usize) -> Result<bool, String> {
+        let path = facts.path.to_string_lossy().into_owned();
+        let name = facts
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        let below = sub_path(sub);
+        let empty = self.want_empty
+            && match facts.kind {
+                Kind::File => facts.size == 0,
+                Kind::Dir => std::fs::read_dir(&facts.path).is_ok_and(|mut d| d.next().is_none()),
+                _ => false,
+            };
+        let entry = findexpr::Entry {
+            size: facts.size,
+            blocks: facts.blocks,
+            mtime: facts.mtime,
+            atime: facts.atime,
+            ctime: facts.ctime,
+            links: facts.links,
+            inode: facts.inode,
+            dev: facts.dev,
+            mode: facts.mode,
+            uid: facts.uid,
+            gid: facts.gid,
+            depth,
+            empty,
+            fs: self.fs_names.get(&facts.dev).map(String::as_str),
+            target: facts.target.as_deref(),
+            target_kind: facts.target_kind,
+            ..findexpr::Entry::new(&path, &name, &below, facts.kind)
+        };
+        let verdict = self.expr.eval(&entry, self.ctx, &mut *self.sink)?;
+        if verdict.selected {
+            self.out.matched += 1;
+        }
+        if verdict.quit {
+            self.stop = true;
+        }
+        Ok(!verdict.prune)
+    }
+}
+
+/// The path below the starting point with the platform's separators, which is what `%P`
+/// prints: the walk keeps `/` internally because the ignore rules are matched that way.
+fn sub_path(rel: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
+        rel.to_string()
+    } else {
+        rel.replace('/', std::path::MAIN_SEPARATOR_STR)
+    }
+}
+
+/// The real path of a directory, for the `--follow` cycle check: the path itself when it
+/// cannot be resolved, so the check fails closed rather than skipping the entry.
+fn real_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Filesystem type names by device, best effort, for `-fstype`. Linux records which type is
+/// mounted where in `/proc/self/mountinfo`; Windows leaves every name unknown.
+#[cfg(unix)]
+fn filesystem_types() -> HashMap<u64, String> {
+    let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for line in text.lines() {
+        // device mount-point options [optional...] `-` fstype source super-options
+        let mut parts = line.split(' ');
+        let dev = parts.nth(2).and_then(|d| {
+            let (major, minor) = d.split_once(':')?;
+            Some(makedev(major.parse().ok()?, minor.parse().ok()?))
+        });
+        let Some(dev) = dev else { continue };
+        let name = parts.skip_while(|f| *f != "-").nth(1);
+        if let Some(name) = name {
+            out.insert(dev, name.to_string());
+        }
+    }
+    out
+}
+
+/// glibc's `makedev`, which is the number `st_dev` holds for the same device.
+#[cfg(unix)]
+fn makedev(major: u64, minor: u64) -> u64 {
+    (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12) | ((major & !0xfff) << 32)
+}
+
+#[cfg(not(unix))]
+fn filesystem_types() -> HashMap<u64, String> {
+    HashMap::new()
 }
 
 /// Order the matched files, and reverse them when `--sortr` asked. `--sort modified` pays one
