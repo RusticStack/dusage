@@ -1,10 +1,12 @@
 //! Subcommand entry points shared by the `dusage` and `fastdel` binaries.
 //!
 //! `dusage` is one binary with subcommands — `scan` (the disk-usage report), `search`
-//! (grep), `find` (path search), `prune` (the fastdel engine) and `big` (largest files) —
-//! and it still accepts the original `<root> [min_big] [threads] [top_n]` form, which is
-//! equivalent to `scan`. `fastdel` is the `prune` subcommand under its own name.
+//! (grep), `find` (path search), `prune` (the fastdel engine), `big` (largest files) and
+//! `du` (per-directory totals) — and it still accepts the original
+//! `<root> [min_big] [threads] [top_n]` form, which is equivalent to `scan`. `fastdel` is
+//! the `prune` subcommand under its own name.
 
+pub mod du;
 pub mod prune;
 pub mod scan;
 pub mod search;
@@ -41,9 +43,10 @@ USAGE:
     dusage search <pattern> [paths...] [OPTIONS]           file contents (grep/rg)
     dusage find <glob> [paths...] [OPTIONS]                file names and paths
     dusage prune <root> --age AGE [OPTIONS]                delete old entries (fastdel)
+    dusage du [PATH...] [OPTIONS]                          du-compatible per-directory totals
 
 Each subcommand has its own help: `dusage search --help`, `dusage find --help`,
-`dusage scan --help`, `dusage prune --help`.
+`dusage scan --help`, `dusage prune --help`, `dusage du --help`.
 
 Run 'dusage --help' for the full list, or 'dusage <subcommand> --help'.";
 
@@ -74,6 +77,10 @@ pub fn dispatch(mut raw: Vec<String>) -> Result<(), Fail> {
         "big" => {
             raw.remove(0);
             scan::run(raw, scan::Mode::Big)
+        }
+        "du" => {
+            raw.remove(0);
+            du::run(raw)
         }
         "-h" | "--help" | "help" => {
             // The full help: the subcommand map, then the options of the default command.
