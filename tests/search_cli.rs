@@ -1300,7 +1300,9 @@ fn grep_compatibility_flags() {
         &["search", "-I", "-l", "--include", "*.c", "needle"],
         &dir,
     ));
-    assert!(inc.contains("a.c") && inc.contains("sub/c.c"), "{inc}");
+    // Windows separates with `\`, so match on the file names rather than the paths.
+    assert!(inc.contains("a.c") && inc.contains("c.c"), "{inc}");
+    assert_eq!(inc.lines().count(), 2, "{inc}");
     assert!(!inc.contains("b.h"), "{inc}");
     let exc = stdout(&run(
         &["search", "-I", "-l", "--exclude", "*.h", "needle"],
@@ -1311,7 +1313,9 @@ fn grep_compatibility_flags() {
         &["search", "-I", "-l", "--exclude-dir", "sub", "needle"],
         &dir,
     ));
-    assert!(!excdir.contains("sub/c.c"), "{excdir}");
+    // Both files in the root stay; the one under `sub/` is gone.
+    assert_eq!(excdir.lines().count(), 2, "{excdir}");
+    assert!(excdir.contains("a.c") && excdir.contains("b.h"), "{excdir}");
 
     // `-I` makes a NUL-carrying file no match at all, which is `--binary-files=without-match`.
     assert!(!stdout(&run(&["search", "-l", "needle"], &dir)).is_empty());
@@ -1327,8 +1331,8 @@ fn grep_compatibility_flags() {
 
     // `-d skip` does not descend, so a file in a subdirectory drops out.
     let skipped = stdout(&run(&["search", "-I", "-l", "-d", "skip", "needle"], &dir));
-    assert!(!skipped.contains("sub/c.c"), "{skipped}");
-    assert!(skipped.contains("a.c"), "{skipped}");
+    assert!(skipped.contains("a.c") && skipped.contains("b.h"), "{skipped}");
+    assert_eq!(skipped.lines().count(), 2, "{skipped}");
 }
 
 #[test]

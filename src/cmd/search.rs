@@ -129,6 +129,9 @@ OPTIONS:
     --size +10M            at least 10M; -10M at most; 10M within 5%; repeatable
     --older 7d             last modified more than 7d ago
     --newer 7d             last modified less than 7d ago
+    --newermt DATE         modified after DATE (YYYY-MM-DD[ HH:MM[:SS]], or @SECONDS, UTC)
+    --newerat DATE         accessed after DATE
+    --newerct DATE         changed after DATE
     --dirs                 directories only
     --files                files only
     --long                 print size, modification time and path
@@ -719,6 +722,9 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--size",
                 "--older",
                 "--newer",
+                "--newermt",
+                "--newerat",
+                "--newerct",
                 "--max-depth",
                 "--mindepth",
                 "--sort",
@@ -1105,8 +1111,25 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             let full_path = a.flag("--full-path");
             let mindepth = unsigned("--mindepth")?.unwrap_or(0);
             o.pattern = Pattern::new(&pattern_text, true, false, false)?;
+            let stamp = |flag: &str| -> Result<Option<(SystemTime, u8)>, Fail> {
+                match a.value(flag) {
+                    None => Ok(None),
+                    Some(v) => {
+                        let t = cli::parse_date(v).map_err(Fail::from)?;
+                        // 0 = modified, 1 = accessed, 2 = changed, read in the retain below.
+                        let which = match flag {
+                            "--newerat" => 1,
+                            "--newerct" => 2,
+                            _ => 0,
+                        };
+                        Ok(Some((t, which)))
+                    }
+                }
+            };
+            let since = stamp("--newermt")?.or(stamp("--newerat")?.or(stamp("--newerct")?));
             o.details = json
                 || a.flag("--long")
+                || since.is_some()
                 || a.value("--size").is_some()
                 || a.value("--older").is_some()
                 || a.value("--newer").is_some();
@@ -1155,6 +1178,18 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 }
                 if let Some(f) = &size_filter {
                     if !f.matches(c.size) {
+                        return false;
+                    }
+                }
+                if let Some((t, which)) = since {
+                    let got = match which {
+                        1 => std::fs::metadata(&c.path).and_then(|m| m.accessed()),
+                        2 => std::fs::metadata(&c.path).and_then(|m| m.created()),
+                        _ => c.modified.ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::Other, "no mtime")
+                        }),
+                    };
+                    if !got.is_ok_and(|g| g > t) {
                         return false;
                     }
                 }
