@@ -1099,10 +1099,29 @@ mod tests {
         }
     }
 
+    /// What each fixture was compressed from: its length and CRC-32, pinned here so the answer
+    /// a stream owes stays the same on a checkout that rewrites line endings, which the
+    /// repository's `* text=auto` does to `mixed.txt` on Windows.
+    const PLAIN: [(&str, usize, u32); 5] = [
+        ("empty.txt", 0, 0x0000_0000),
+        ("one.txt", 1, 0x8cdc_1683),
+        ("mixed.txt", 204_820, 0x62a4_52ba),
+        ("noise.bin", 8192, 0xd485_33ad),
+        ("prose.txt", 24_068, 0x4676_e384),
+    ];
+
     fn expands(raw: &str, plain: &str) {
+        let (_, length, crc) = *PLAIN
+            .iter()
+            .find(|(name, _, _)| *name == plain)
+            .expect("a pinned plaintext");
         let expanded = decompress(&fixture(raw)).expect(raw);
-        assert_eq!(expanded.len(), fixture(plain).len(), "{raw} length");
-        assert!(expanded == fixture(plain), "{raw} content");
+        assert_eq!(expanded.len(), length, "{raw} length");
+        assert_eq!(crc32(&expanded), crc, "{raw} checksum");
+        let expected = fixture(plain);
+        if expected.len() == length && crc32(&expected) == crc {
+            assert!(expanded == expected, "{raw} content");
+        }
     }
 
     #[test]
