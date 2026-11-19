@@ -21,7 +21,9 @@
 //! (?<name> ... )  (?P<name> ... )   named capturing groups
 //! (?= ... )  (?! ... )       lookahead, positive and negative
 //! (?<= ... )  (?<! ... )     lookbehind, positive and negative
-//! \1 .. \9  \k<name>         backreferences; a fold of the captured bytes under (?i)
+//! \1 .. \9  \k<name>  (?P=name)   backreferences; a fold of the captured bytes under (?i)
+//! (?> ... )  a*+  a++  a?+  a{n,m}+   atomic group and possessive quantifiers
+//! (?# ... )                  a comment
 //! [abc]  [^abc]  [a-z]       byte classes, ranges, negation
 //! [[:alpha:]] [^[:space:]]   POSIX bracket expressions inside a class
 //! \d \D \w \W \s \S          ASCII digit / word / space classes and their negations
@@ -32,9 +34,12 @@
 //! ```
 //!
 //! Everything else is rejected at compile time with a message naming the offset: Unicode
-//! properties (`\p{..}`), atomic groups (`(?>..)`), conditionals, subroutine calls,
-//! possessives (`a*+`), comments (`(?#..)`), Python named backreferences (`(?P=name)`) and
+//! properties (`\p{..}`), conditionals, subroutine calls, branch reset groups, and
 //! `\Z`, `\G`, `\K`, `\R`, `\X`.
+//!
+//! An atomic group runs its body anchored at the current position, keeps the first match it
+//! finds and never offers the outer search a shorter one. A possessive quantifier is exactly
+//! that around the ordinary greedy or lazy loop, which is how PCRE defines it.
 //!
 //! # Semantics
 //!
@@ -313,6 +318,9 @@ enum Node {
     Assert(Assert),
     Group(Box<Node>, usize),
     Look(LookKind, Box<Node>),
+    /// A body that commits to its own first match: the outer search cannot backtrack into it.
+    /// This is `(?>...)`, and it is also how a possessive quantifier is expressed.
+    Atomic(Box<Node>),
     BackRef(usize, bool),
 }
 
@@ -357,7 +365,7 @@ fn width(n: &Node) -> (u64, Option<u64>) {
             };
             (min, max)
         }
-        Node::Group(body, _) => width(body),
+        Node::Group(body, _) | Node::Atomic(body) => width(body),
         Node::BackRef(..) => (0, None),
     }
 }
@@ -368,6 +376,7 @@ fn first_set(n: &Node) -> (ByteSet, bool) {
         Node::Empty | Node::Assert(_) | Node::Look(..) | Node::BackRef(..) => {
             (ByteSet::empty(), true)
         }
+        Node::Atomic(body) => first_set(body),
         Node::Set(s) => (*s, false),
         Node::Concat(parts) => {
             let mut acc = ByteSet::empty();
@@ -417,6 +426,9 @@ enum Inst {
     Progress(usize, usize, usize),
     Assert(Assert),
     Look(LookSpec),
+    /// Run a body program anchored here and continue at its own end, with no alternative
+    /// left to the outer backtracking: `(?>...)` and the possessive quantifiers.
+    Atomic(usize),
     /// Match the bytes captured by `group`, folding ASCII when the pattern asked for it.
     BackRef {
         group: usize,
@@ -528,6 +540,13 @@ impl Compiler {
                     max,
                 }));
             }
+            Node::Atomic(body) => {
+                let sub = self.progs.len();
+                self.progs.push(Vec::new());
+                self.emit(sub, body)?;
+                self.progs[sub].push(Inst::Match);
+                self.progs[prog].push(Inst::Atomic(sub));
+            }
             Node::BackRef(group, fold) => self.progs[prog].push(Inst::BackRef {
                 group: *group,
                 fold: *fold,
@@ -628,12 +647,14 @@ impl Parser<'_> {
             self.at += 1;
             false
         } else {
-            if self.peek() == Some(b'+') {
-                return Err(self.err_at("possessive quantifiers are not supported", self.at));
-            }
             true
         };
-        Ok(Node::Repeat(Box::new(atom), min, max, greedy))
+        let repeat = Node::Repeat(Box::new(atom), min, max, greedy);
+        if self.peek() == Some(b'+') {
+            self.at += 1;
+            return Ok(Node::Atomic(Box::new(repeat)));
+        }
+        Ok(repeat)
     }
 
     /// `{n}`, `{n,}` or `{n,m}`; `Ok(None)` when the brace is not a quantifier (a literal).
@@ -826,10 +847,29 @@ impl Parser<'_> {
                         _ => Err(self.err_at("named group needs a name", name_at)),
                     }
                 }
-                Some(b'=') => Err(self.err_at(
-                    "Python-style named backreferences are not supported; use \\k<name>",
-                    self.at,
-                )),
+                Some(b'=') => {
+                    let name_at = self.at + 3;
+                    let mut at = name_at;
+                    while let Some(c) = self.src.get(at) {
+                        if c.is_ascii_alphanumeric() || *c == b'_' {
+                            at += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if self.src.get(at) != Some(&b')') {
+                        return Err(self.err_at("(?P=name) is not terminated by ')'", name_at));
+                    }
+                    let name = String::from_utf8_lossy(&self.src[name_at..at]).into_owned();
+                    let Some(&g) = self.names.get(&name) else {
+                        return Err(self.err_at(
+                            &format!("backreference to undefined group {name:?}"),
+                            name_at,
+                        ));
+                    };
+                    self.at = at + 1;
+                    Ok(Node::BackRef(g, self.flags.case_insensitive))
+                }
                 _ => Err(self.err_at("unknown (?P group", self.at)),
             },
             Some(b'i') | Some(b'm') | Some(b's') | Some(b'-') => {
@@ -842,8 +882,22 @@ impl Parser<'_> {
                     Ok(Node::Empty)
                 }
             }
-            Some(b'#') => Err(self.err_at("comments (?#...) are not supported", self.at)),
-            Some(b'>') => Err(self.err_at("atomic groups (?>...) are not supported", self.at)),
+            Some(b'#') => {
+                self.at += 2;
+                while let Some(c) = self.src.get(self.at).copied() {
+                    self.at += 1;
+                    if c == b')' {
+                        return Ok(Node::Empty);
+                    }
+                }
+                Err(self.err_at("unterminated (?#...) comment", self.at))
+            }
+            Some(b'>') => {
+                self.at += 2;
+                let body = self.parse_alternation()?;
+                self.expect_close(open)?;
+                Ok(Node::Atomic(Box::new(body)))
+            }
             Some(b'|') => {
                 Err(self.err_at("branch reset groups (?|...) are not supported", self.at))
             }
@@ -1521,6 +1575,17 @@ impl Machine<'_> {
                         return RunResult::Budget;
                     }
                 },
+                Inst::Atomic(sub) => match self.run(sub, sp, lim, None) {
+                    RunResult::Match(end) => {
+                        sp = end;
+                        pc += 1;
+                    }
+                    RunResult::NoMatch => next = false,
+                    RunResult::Budget => {
+                        self.rewind(base);
+                        return RunResult::Budget;
+                    }
+                },
                 Inst::BackRef { group, fold } => {
                     match (self.starts[group], self.ends[group]) {
                         (Some(s), Some(e)) if e >= s => {
@@ -1871,6 +1936,60 @@ mod tests {
     }
 
     #[test]
+    fn atomic_groups_commit_to_their_first_match() {
+        // `a|ab` prefers `a`, so the atomic group commits to it and `c` has nothing to
+        // consume; the ordinary group backtracks into `ab` and matches.
+        none(r"(?>a|ab)c", "abc");
+        assert_eq!(m(r"(a|ab)c", "abc"), Some((0, 3)));
+        // A possessive star cannot give a byte back, so the trailing `a` is unreachable.
+        none(r"a*+a", "aaa");
+        assert_eq!(m(r"a*a", "aaa"), Some((0, 3)));
+        // A possessive run leaves nothing for the digit that follows it, and the search
+        // cannot recover by retrying later: every start runs out the same way.
+        none(r"\d++\d", "123");
+        assert_eq!(m(r"\d++x\d", "123x4"), Some((0, 5)));
+        assert_eq!(m(r"a?+b", "ab"), Some((0, 2)));
+        assert_eq!(m(r"a{2,3}+a", "aaa"), None);
+        assert_eq!(m(r"a{2,3}+a", "aaaa"), Some((0, 4)));
+    }
+
+    #[test]
+    fn atomic_groups_keep_captures() {
+        // The capture made inside the committed body stays visible to a backreference.
+        assert_eq!(m(r"(?>(a+))b\1", "aaabaaa"), Some((0, 7)));
+        none(r"(?>(a+))b\1", "aaab");
+        assert_eq!(m(r"(?>(a+))c", "aaab"), None);
+    }
+
+    #[test]
+    fn atomic_groups_stop_a_catastrophe() {
+        // `(a+)+$` against a non-matching tail is exponential without the atomic commit;
+        // with one it is linear, so a small budget is enough.
+        let re = Pcre::with_budget(r"(?>(a+))+$", 100_000).unwrap();
+        assert_eq!(re.try_find(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"), Ok(None));
+    }
+
+    #[test]
+    fn comments_are_ignored() {
+        assert_eq!(m("a(?#this is a comment)b", "ab"), Some((0, 2)));
+        assert_eq!(
+            m("(?#whole pattern is a comment)", "anything"),
+            Some((0, 0))
+        );
+        assert_eq!(m("a(?#)b", "ab"), Some((0, 2)));
+        assert!(err("a(?#unterminated").contains("comment"));
+    }
+
+    #[test]
+    fn python_named_backreferences() {
+        assert_eq!(m(r"(?P<w>\w+) (?P=w)", "go go"), Some((0, 5)));
+        none(r"(?P<w>\w+) (?P=w)", "go up");
+        assert_eq!(m(r"(?i)(?P<w>ab) (?P=w)", "ab AB"), Some((0, 5)));
+        assert!(err(r"(?P=nope)x").contains("undefined group"));
+        assert!(err(r"(?P<w>a)(?P=w").contains("terminated"));
+    }
+
+    #[test]
     fn budget_error_is_distinguishable() {
         let re = Pcre::with_budget("(a+)+$", 20_000).unwrap();
         let hay = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaab";
@@ -1931,11 +2050,7 @@ mod tests {
 
     #[test]
     fn unsupported_constructs_are_rejected_with_a_reason() {
-        assert!(err("(?>a)").contains("atomic groups"));
         assert!(err("(?|a|b)").contains("branch reset"));
-        assert!(err("(?#note)a").contains("comments"));
-        assert!(err("(?P=name)").contains("Python-style"));
-        assert!(err(r"a*+").contains("possessive"));
         assert!(err(r"\Z").contains("use \\z"));
         assert!(err(r"\G").contains("not supported"));
         assert!(err(r"(?R)").contains("subroutine"));
