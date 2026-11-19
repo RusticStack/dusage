@@ -1911,7 +1911,14 @@ fn the_global_excludes_file_is_read_and_can_be_switched_off() {
     fs::create_dir_all(home.join(".config/git")).unwrap();
     fs::write(home.join(".config/git/ignore"), "tests/\n").unwrap();
     let home_s = home.to_str().unwrap();
-    let env = [("HOME", home_s), ("USERPROFILE", home_s)];
+    let config_s = home.join(".config").to_str().unwrap().to_string();
+    // `XDG_CONFIG_HOME` wins over the home directory when it is set, and a CI runner sets
+    // it, so the test points both at the same tree.
+    let env = [
+        ("HOME", home_s),
+        ("USERPROFILE", home_s),
+        ("XDG_CONFIG_HOME", config_s.as_str()),
+    ];
     let o = run_with_env(&["search", "-n", "needle"], &f.root, &env);
     assert_eq!(code(&o), 0, "{}", stderr(&o));
     assert!(!stdout(&o).contains("it.rs"), "{}", stdout(&o));
