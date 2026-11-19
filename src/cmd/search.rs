@@ -48,6 +48,8 @@ OPTIONS:
         --include-zero     with -c, also print files that matched nothing
         --count-matches    print the number of individual matches per file
     -o, --only-matching    print only the matching part of each line
+    -U, --multiline        let a match span lines: the file is searched whole
+        --multiline-dotall with -U, also let '.' match a newline
     -r, --replace TEXT     print each line with its matches replaced by TEXT;
                            $0 is the whole match, $1..$9 its groups, $$ a literal $
     -q, --quiet            print nothing; exit 0 on the first match
@@ -368,6 +370,9 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--line-regexp",
     "--passthru",
     "--sort-files",
+    "-U",
+    "--multiline",
+    "--multiline-dotall",
     "--type-list",
     "--json",
     "--color",
@@ -403,6 +408,25 @@ fn take_unrestricted(raw: &mut Vec<String>) -> u8 {
         i += 1;
     }
     n
+}
+
+/// True when a pattern asks for a newline byte: a real one, or an unescaped `\n` escape.
+fn holds_newline(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => return true,
+            b'\\' => {
+                if bytes.get(i + 1) == Some(&b'n') {
+                    return true;
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 /// Split a `-r` template into literals and group references. `$0`, `$1`..`$99` and `${1}`
@@ -636,13 +660,26 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     if pattern_text.is_empty() {
         return Err("empty pattern".to_string().into());
     }
+    // A pattern that spells a newline cannot match through a line-at-a-time scanner, so it
+    // is refused the way ripgrep refuses it rather than quietly finding nothing.
+    if !(a.flag("-U") || a.flag("--multiline")) && holds_newline(&pattern_text) {
+        return Err(Fail(
+            2,
+            "the pattern contains a newline; pass -U/--multiline to search across lines"
+                .to_string(),
+        ));
+    }
     // `--line-regexp` asks for the whole line, which is an anchor pair around whatever the
     // pattern is: an alternation has to be grouped so the anchors cover all of it.
-    let pattern_text = if a.flag("--line-regexp") {
+    let mut pattern_text = if a.flag("--line-regexp") {
         format!("^(?:{pattern_text})$")
     } else {
         pattern_text
     };
+    // `--multiline-dotall` widens `.` to a newline, which is the `(?s)` inline flag.
+    if a.flag("--multiline-dotall") {
+        pattern_text = format!("(?s){pattern_text}");
+    }
     // `-` is standard input, as in grep and rg.
     let stdin_wanted = paths.iter().any(|p| p == "-");
     let piped = scope == Scope::Content && !std::io::stdin().is_terminal();
@@ -765,6 +802,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.no_ignore_dot = a.flag("--no-ignore-dot") || a.flag("--no-ignore-files");
     o.no_ignore_parent = a.flag("--no-ignore-parent") || a.flag("--no-ignore-files");
     o.follow = a.flag("--follow");
+    o.multiline = a.flag("-U") || a.flag("--multiline");
     let json = a.flag("--json");
     let color = color_enabled(color_mode.as_deref());
     // Colour, the JSON report and `--column` all need each match located inside its line.
@@ -824,6 +862,18 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             };
             if let Some(v) = a.value("--max-filesize") {
                 o.max_file_size = Some(parse_size(v)?);
+            }
+            // Multiline search answers questions the line pipeline cannot: an inverted match
+            // or a context window around a match that is itself several lines long.
+            if o.multiline {
+                if o.invert {
+                    return Err("-U cannot be combined with -v/--invert-match"
+                        .to_string()
+                        .into());
+                }
+                if o.before > 0 || o.after > 0 {
+                    return Err("-U cannot be combined with -A/-B/-C".to_string().into());
+                }
             }
             if read_stdin {
                 let mut data = Vec::new();

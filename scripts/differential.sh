@@ -399,6 +399,11 @@ content_case replace_literal eq rg plain . 'needle' '-r X' '-r X' ''
 content_case replace_group eq rg plain . 'need(le)' '-r X$1' '-r X$1' ''
 content_case replace_whole_match eq rg plain . 'needle' '-r A${0}B' '-r A${0}B' ''
 content_case replace_only_matching eq rg plain . 'need(le)' '-o -r G$1' '-o -r G$1' ''
+# `-U` is ripgrep's multiline flag: grep has no equivalent, so these compare with rg only.
+content_case multiline_lines eq rg plain . 'alpha needle\nsecond' '-U -n' '-U -n' ''
+content_case multiline_match_only eq rg plain . 'alpha needle\nsecond' '-U -o' '-U -o' ''
+content_case multiline_no_flag eq rg plain . 'alpha needle\nsecond' '-n' '-n' ''
+content_case multiline_count eq rg plain . 'needle\n' '-U -c' '-U -c' ''
 content_case quit_matched eq 3 plain . needle -q -q -rqE
 content_case quit_absent eq 3 plain . zzzz-absent -q -q -rqE
 content_case ctx_after eq 3 plain sub needle '-A 1' -A1 '-rE -A 1'
