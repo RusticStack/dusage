@@ -58,9 +58,18 @@ pub struct GlobFilter {
 
 impl GlobFilter {
     pub fn new(globs: &[String]) -> Result<Self, String> {
+        GlobFilter::with_case(globs, &[])
+    }
+
+    /// Build from case-sensitive globs plus case-insensitive ones (`--iglob`).
+    pub fn with_case(globs: &[String], iglobs: &[String]) -> Result<Self, String> {
         let mut f = GlobFilter::default();
-        for g in globs {
-            let compiled = Glob::new(g)?;
+        let patterns = globs
+            .iter()
+            .map(|g| (g, false))
+            .chain(iglobs.iter().map(|g| (g, true)));
+        for (pattern, ci) in patterns {
+            let compiled = Glob::new_with(pattern, ci)?;
             if compiled.negated {
                 f.exclude.push(compiled);
             } else {
@@ -77,7 +86,13 @@ impl GlobFilter {
     /// Add restrict-only patterns (`-t`, `--ext`).
     pub fn push_filter(&mut self, globs: &[String]) -> Result<(), String> {
         for g in globs {
-            self.filter.push(Glob::new(g)?);
+            let compiled = Glob::new(g)?;
+            // A negated `-T`/`--ext` pattern excludes rather than narrows.
+            if compiled.negated {
+                self.exclude.push(compiled);
+            } else {
+                self.filter.push(compiled);
+            }
         }
         Ok(())
     }
@@ -163,6 +178,16 @@ impl IgnoreRules {
     /// Add command-line `--glob` patterns (`!` negates).
     pub fn add_globs(&mut self, globs: &[String]) -> Result<(), String> {
         self.globs = GlobFilter::new(globs)?;
+        Ok(())
+    }
+
+    /// The same with `--iglob` patterns added, which match without case.
+    pub fn add_globs_with_case(
+        &mut self,
+        globs: &[String],
+        iglobs: &[String],
+    ) -> Result<(), String> {
+        self.globs = GlobFilter::with_case(globs, iglobs)?;
         Ok(())
     }
 

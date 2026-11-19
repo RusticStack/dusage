@@ -65,6 +65,8 @@ pub struct SearchOptions {
     pub hidden: bool,
     pub no_ignore: bool,
     pub globs: Vec<String>,
+    /// `--iglob` patterns: like `globs`, matched without case.
+    pub iglobs: Vec<String>,
     /// `-t`/`--ext` patterns: they filter results but leave the ignore rules in force.
     pub type_globs: Vec<String>,
     pub max_depth: Option<usize>,
@@ -84,6 +86,16 @@ pub struct SearchOptions {
     pub details: bool,
     /// Colour will be used, so match spans have to be located per line.
     pub paint: bool,
+    /// Print the file name on its own line above its matches (`--heading`).
+    pub heading: bool,
+    /// Print the column of the first match on each line (`--column`).
+    pub column: bool,
+    /// Print the byte offset of each line within its file (`--byte-offset`).
+    pub byte_offset: bool,
+    /// With `-c`, also print the files that matched nothing (`--include-zero`).
+    pub include_zero: bool,
+    /// Do not report paths that could not be read (`--no-messages`).
+    pub quiet_errors: bool,
 }
 
 impl SearchOptions {
@@ -107,6 +119,7 @@ impl SearchOptions {
             hidden: false,
             no_ignore: false,
             globs: Vec::new(),
+            iglobs: Vec::new(),
             type_globs: Vec::new(),
             max_depth: None,
             max_file_size: None,
@@ -118,6 +131,11 @@ impl SearchOptions {
             null: false,
             details: false,
             paint: false,
+            heading: false,
+            column: false,
+            byte_offset: false,
+            include_zero: false,
+            quiet_errors: false,
         }
     }
 }
@@ -125,6 +143,8 @@ impl SearchOptions {
 /// One emitted line: a match, or a line of context around one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineHit {
+    /// Byte offset of this line's first byte within the file.
+    pub offset: u64,
     pub number: u64,
     /// Line bytes without the newline (a trailing `\r` is removed for `\r\n` files).
     pub text: Vec<u8>,
@@ -227,7 +247,7 @@ struct JobOut {
 fn walk_rules(o: &SearchOptions) -> Arc<IgnoreRules> {
     let mut rules = IgnoreRules::new(!o.no_ignore);
     rules
-        .add_globs(&o.globs)
+        .add_globs_with_case(&o.globs, &o.iglobs)
         .and_then(|()| rules.add_filters(&o.type_globs))
         .expect("glob dot-rule validation");
     Arc::new(rules)
@@ -446,7 +466,7 @@ fn binary_by_name_only(o: &SearchOptions) -> bool {
 fn binary_hit(path: &Path, o: &SearchOptions, stats: &mut Stats, found: bool) -> Option<FileHits> {
     if found {
         stats.matches += 1;
-    } else if !o.files_without_matches {
+    } else if !(o.files_without_matches || (o.include_zero && o.count)) {
         return None;
     }
     Some(FileHits {
@@ -598,6 +618,10 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
             continue;
         }
         if got.matches == 0 {
+            // `-c --include-zero` prints the zero; nothing else does.
+            if o.include_zero && o.count {
+                report.files.push(got);
+            }
             continue;
         }
         stats.files_matched += 1;
@@ -789,6 +813,10 @@ struct Scanner<'a> {
     line: Vec<u8>,
     /// Individual matches over the whole file (a line can hold several).
     total: u64,
+    /// Byte offset of the current chunk within the file, and of the first byte the carry is
+    /// holding.
+    pos: u64,
+    carry_pos: u64,
 }
 
 impl<'a> Scanner<'a> {
@@ -816,6 +844,8 @@ impl<'a> Scanner<'a> {
             stopped: false,
             line: lines.line,
             total: 0,
+            pos: 0,
+            carry_pos: 0,
         }
     }
 
@@ -840,6 +870,12 @@ impl<'a> Scanner<'a> {
         if self.stopped || self.matches >= self.limit {
             return;
         }
+        self.feed_chunk(chunk);
+        self.pos += chunk.len() as u64;
+    }
+
+    fn feed_chunk(&mut self, chunk: &[u8]) {
+        let base = self.pos;
         if self.block_scan(chunk) {
             return;
         }
@@ -849,14 +885,14 @@ impl<'a> Scanner<'a> {
             // A line that sits entirely inside this block is matched in place; only a line
             // continued from the previous block needs the buffer.
             let stop = if self.carry.is_empty() {
-                self.emit(&chunk[start..pos])
+                self.emit(&chunk[start..pos], base + start as u64)
             } else {
                 let mut buf = std::mem::take(&mut self.line);
                 buf.clear();
                 buf.extend_from_slice(&self.carry);
                 buf.extend_from_slice(&chunk[start..pos]);
                 self.carry.clear();
-                let stop = self.emit(&buf);
+                let stop = self.emit(&buf, base + start as u64);
                 self.line = buf;
                 stop
             };
@@ -870,6 +906,9 @@ impl<'a> Scanner<'a> {
             }
         }
         if start < chunk.len() {
+            if self.carry.is_empty() {
+                self.carry_pos = base + start as u64;
+            }
             self.carry.extend_from_slice(&chunk[start..]);
             self.flush_overlong();
         }
@@ -899,6 +938,7 @@ impl<'a> Scanner<'a> {
         if !self.carry.is_empty() {
             let Some(nl) = bytes::find_byte(chunk, b'\n', 0) else {
                 self.carry.extend_from_slice(chunk);
+                self.flush_overlong();
                 return true;
             };
             let mut buf = std::mem::take(&mut self.line);
@@ -907,7 +947,7 @@ impl<'a> Scanner<'a> {
             buf.extend_from_slice(&chunk[..nl]);
             self.carry.clear();
             self.line_no += 1;
-            let stop = self.emit(&buf);
+            let stop = self.emit(&buf, self.carry_pos);
             self.line = buf;
             if stop || self.matches >= self.limit {
                 self.stopped = stop;
@@ -965,6 +1005,7 @@ impl<'a> Scanner<'a> {
             }
             if self.want_lines {
                 let text = line.to_vec();
+                let offset = self.pos + ls as u64;
                 let mut spans: Vec<(usize, usize)> = Vec::new();
                 if self.o.paint {
                     let mut at = 0;
@@ -975,6 +1016,7 @@ impl<'a> Scanner<'a> {
                 }
                 self.hits.push(LineHit {
                     number: line_no,
+                    offset,
                     text,
                     matched: true,
                     spans,
@@ -989,6 +1031,9 @@ impl<'a> Scanner<'a> {
         }
         // The block ends right before a newline, so it holds one line more than its newlines.
         self.line_no = base + bytes::count_byte(body, b'\n') as u64 + 1;
+        if from + end + 1 < chunk.len() && self.carry.is_empty() {
+            self.carry_pos = self.pos + (from + end + 1) as u64;
+        }
         self.carry.extend_from_slice(&chunk[from + end + 1..]);
         true
     }
@@ -1005,7 +1050,7 @@ impl<'a> Scanner<'a> {
         self.carry.clear();
         self.line_no += 1;
         let buf = std::mem::take(&mut self.line);
-        self.emit(&buf);
+        self.emit(&buf, self.carry_pos);
         self.line = buf;
     }
 
@@ -1019,15 +1064,16 @@ impl<'a> Scanner<'a> {
         self.carry.clear();
         self.line_no += 1;
         let buf = std::mem::take(&mut self.line);
-        self.emit(&buf);
+        self.emit(&buf, self.carry_pos);
         self.line = buf;
     }
 
     /// Run the matcher over one line; true means the file is finished (`-m`).
-    fn emit(&mut self, line: &[u8]) -> bool {
+    fn emit(&mut self, line: &[u8], offset: u64) -> bool {
         handle_line(
             line,
             self.line_no,
+            offset,
             self.o,
             &mut self.history,
             &mut self.hits,
@@ -1051,7 +1097,8 @@ fn finished(
 ) -> io::Result<Option<FileHits>> {
     sc.flush();
     if sc.matches == 0 {
-        let hit = o.files_without_matches.then(|| FileHits {
+        let wants_zero = o.files_without_matches || (o.include_zero && o.count);
+        let hit = wants_zero.then(|| FileHits {
             path: path.to_string_lossy().into_owned(),
             hits: Vec::new(),
             matches: 0,
@@ -1099,6 +1146,7 @@ fn merge_stats(into: &mut Stats, from: &Stats) {
 fn handle_line(
     line: &[u8],
     no: u64,
+    offset: u64,
     o: &SearchOptions,
     history: &mut VecDeque<(u64, Vec<u8>)>,
     hits: &mut Vec<LineHit>,
@@ -1116,6 +1164,7 @@ fn handle_line(
         if want_lines && *remaining_after > 0 {
             hits.push(LineHit {
                 number: no,
+                offset,
                 text: text.to_vec(),
                 matched: false,
                 spans: Vec::new(),
@@ -1149,6 +1198,9 @@ fn handle_line(
         for (n, t) in keep {
             hits.push(LineHit {
                 number: n,
+                // Context lines above the block keep their text but not their position, which
+                // only `-A`/`-B` reach and neither prints an offset for.
+                offset,
                 text: t,
                 matched: false,
                 spans: Vec::new(),
@@ -1170,6 +1222,7 @@ fn handle_line(
         for (s, e) in spans {
             hits.push(LineHit {
                 number: no,
+                offset: offset + s as u64,
                 text: text[s..e].to_vec(),
                 matched: true,
                 spans: vec![(0, e - s)],
@@ -1179,6 +1232,7 @@ fn handle_line(
     } else {
         hits.push(LineHit {
             number: no,
+            offset,
             text: text.to_vec(),
             matched: true,
             spans,
