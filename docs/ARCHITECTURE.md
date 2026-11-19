@@ -18,6 +18,11 @@ src/search.rs         search engine: tree walk, candidate filters, content scann
 src/pattern.rs        what a pattern is: literal or regex, case and word rules
 src/regex.rs          regex engine: lazy DFA over a Thompson NFA, Pike VM fallback
 src/glob.rs           gitignore-style glob matcher
+src/findexpr.rs       GNU find's expression language: parser, evaluator, printf, exec requests
+src/archive.rs        gzip/DEFLATE expansion and the CRC-32 it checks
+src/archive_bz2.rs    bzip2 expansion          src/archive_lz4.rs   LZ4 frame expansion
+src/archive_xz.rs     xz/LZMA2 expansion       src/archive_zstd.rs  zstd frame expansion
+src/archive_brotli.rs brotli expansion (plus archive_brotli_dict.rs, the static dictionary)
 src/ignore.rs         ignore layers (builtin caches, .gitignore, .ignore) and -g filters
 src/bytes.rs          byte primitives: memmem, ASCII/Unicode folding, word boundaries
 src/encodings.rs      UTF-8/UTF-16/Latin-1 detection and transcoding
@@ -25,7 +30,9 @@ src/preset.rs         prune presets: built in plus the config file
 src/cmd/mod.rs        subcommand dispatch and the Fail(exit code, message) type
 src/cmd/scan.rs       scan / big
 src/cmd/search.rs     search / find, their help text
+src/cmd/du.rs         du: per-directory totals
 src/cmd/prune.rs      prune / fastdel, its help text
+src/model.rs          cross-platform surface: Kind (file..block), Stat, Totals, ErrorCounts
 src/win/sys.rs        shared FFI decls + open()/wide_verbatim()/check()
 src/win/enumerate.rs  batched enumeration, readdir fallback, reparse/file_id/stream helpers
 src/win/delete.rs     handle-based delete, never follows reparse points
@@ -33,7 +40,7 @@ src/win/usn.rs        USN journal + file-reference resolution
 src/win/mft.rs        raw MFT reader
 src/win/watch.rs      change feed for --watch (USN journal)
 src/unix/sys.rs       errno table + inotify/poll declarations
-src/unix/enumerate.rs readdir + statx enumeration, symlink and mount helpers
+src/unix/enumerate.rs getdents64 enumeration, statx fields, symlink and mount helpers
 src/unix/delete.rs    unlink/rmdir delete, never follows symlinks
 src/unix/watch.rs     change feed for --watch (inotify)
 src/bin/dusage.rs     thin CLI: cmd::dispatch + cmd::finish
@@ -221,17 +228,22 @@ pub fn file_id_of(path: &std::path::Path) -> std::io::Result<u128>;
 ### unix::enumerate (`src/unix/enumerate.rs`)
 
 `Entry` carries `name`, `is_dir`, `is_link`, `size`, `alloc` (`st_blocks * 512`),
-`file_id` (`dev << 64 | ino`) and `dev`. Enumeration is `std::fs::read_dir` plus one
-`lstat` per entry (`DirEntry::metadata` never follows a symlink), which is why the Linux
-`batched` backend is "one stat per entry" rather than "many entries per syscall".
-`read_plain` leaves `alloc`, `file_id` and `dev` zero, matching the `readdir` backend's
-"size on disk unknown" contract. `refuse_reparse_root` refuses a symlink root;
+`file_id` (`dev << 64 | ino`) and `dev`. Directories are read with a raw
+`getdents64` over one reusable 64 KiB buffer, and each record's `d_reclen` is checked
+against the buffer, the name offset and the NUL before anything is parsed — a record
+that is short, overlong, unaligned or unterminated is an error, never a read past the
+buffer, and the same holds for an empty name. Sizes and timestamps come from `statx`
+with `AT_SYMLINK_NOFOLLOW`, resolved against the open directory descriptor where a
+listing already holds one, which is why the Linux backend no longer pays one path
+resolution per entry. `read_plain` leaves `alloc`, `file_id` and `dev` zero, matching
+the "size on disk unknown" contract. `refuse_reparse_root` refuses a symlink root;
 `file_id_of` is the inode identity that makes `--dedup-hardlinks` correct; `dev_of` and
 `other_filesystem` implement `--one-filesystem`; `same_filesystem` stops a prune at a
 mount point.
-Bounds-check every `NextEntryOffset`/`FileNameLength` (bytes) against the
-returned buffer. The tests must compare against `std::fs::read_dir` on a fixture
-for names, sizes and dir flags, and confirm that a junction shows `is_reparse()`.
+The tests build directory batches by hand for every malformed-record case above, and
+compare against a real fixture for names, sizes and dir flags, confirming that a
+symlink is reported as one and is never followed. Windows bounds-check
+`NextEntryOffset`/`FileNameLength` (bytes) against the returned buffer the same way.
 
 ### win::delete (`src/win/delete.rs`)
 
