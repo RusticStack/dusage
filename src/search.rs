@@ -120,6 +120,10 @@ pub struct SearchOptions {
     pub search_zip: bool,
     /// A binary file is not a match at all (`-I`, `--binary-files=without-match`).
     pub skip_binary: bool,
+    /// A command to run on each file first, whose output is what gets searched (`--pre`).
+    pub pre: Option<String>,
+    /// `--pre-glob` patterns: the files `pre` runs on, or every file when empty.
+    pub pre_globs: Vec<String>,
     /// Records are separated by NUL instead of newline (`--null-data`), and printed the same
     /// way: the terminator is `self.term`.
     pub null_data: bool,
@@ -203,6 +207,8 @@ impl SearchOptions {
             multiline: false,
             search_zip: false,
             skip_binary: false,
+            pre: None,
+            pre_globs: Vec::new(),
             null_data: false,
             term: b'\n',
         }
@@ -925,6 +931,13 @@ fn scan_file_with(
     if o.null_data {
         return scan_records(path, o, stats);
     }
+    // `--pre` hands the file to a command and searches what it prints, which is how a PDF or
+    // an office document becomes text without this tool knowing anything about the format.
+    if let Some(cmd) = &o.pre {
+        if o.pre_globs.is_empty() || pre_matches(path, &o.pre_globs) {
+            return scan_prepared(path, cmd, o, stats);
+        }
+    }
     let mut f = File::open(path)?;
     stats.files_scanned += 1;
     let n = f.read(&mut *buf)?;
@@ -1103,6 +1116,42 @@ fn scan_multiline(
         binary: false,
     };
     Ok(Some(out))
+}
+
+/// True when `--pre-glob` names this file. The walk already narrowed the set; this is only
+/// for the mode that runs a command per path.
+fn pre_matches(path: &Path, globs: &[String]) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    globs.iter().any(|g| {
+        crate::glob::Glob::new(g)
+            .map(|g| name.as_deref().is_some_and(|n| g.matches(n, false)))
+            .unwrap_or(false)
+    })
+}
+
+/// Run `--pre` on `path` and search its output. The command gets the path as its only
+/// argument, exactly as ripgrep runs one, so a pipeline is the caller's business.
+fn scan_prepared(
+    path: &Path,
+    cmd: &str,
+    o: &SearchOptions,
+    stats: &mut Stats,
+) -> io::Result<Option<FileHits>> {
+    let out = std::process::Command::new(cmd)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    // A preprocessor that fails is reported the way an unreadable path is, unless it still
+    // printed something to search.
+    if !out.status.success() && out.stdout.is_empty() {
+        return Err(io::Error::other(format!(
+            "{cmd} {} exited with {}",
+            path.display(),
+            out.status
+        )));
+    }
+    stats.files_scanned += 1;
+    scan_expanded(path, &out.stdout, o, stats)
 }
 
 /// Search a file whose records end in NUL instead of a newline (`--null-data`). Records are

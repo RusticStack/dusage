@@ -1478,3 +1478,39 @@ fn empty_files_and_directories() {
         "hollow"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn pre_runs_a_command_per_file() {
+    let f = Fixture::new("pre");
+    let dir = f.root.join("pre");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "raw text needle\n").unwrap();
+    fs::write(dir.join("b.bin"), "needle\n").unwrap();
+
+    // The command gets the path as its argument and its output is what gets searched.
+    let out = stdout(&run(
+        &["search", "-h", "-n", "--pre", "cat", "needle"],
+        &dir,
+    ));
+    assert_eq!(out, "1:raw text needle\n1:needle\n", "{out}");
+
+    // `--pre-glob` narrows which files the command runs on; the rest are searched as they are.
+    let narrowed = stdout(&run(
+        &[
+            "search",
+            "-l",
+            "--pre",
+            "cat",
+            "--pre-glob",
+            "*.txt",
+            "needle",
+        ],
+        &dir,
+    ));
+    assert_eq!(narrowed.lines().count(), 2, "{narrowed}");
+
+    // A command that fails on a file is an error, reported like an unreadable path.
+    let broken = run(&["search", "--pre", "false", "needle"], &dir);
+    assert_eq!(code(&broken), 2);
+}

@@ -67,6 +67,8 @@ OPTIONS:
         --include PATTERN  grep's spelling of a narrowing glob; repeatable
         --exclude PATTERN  grep's spelling of an exclusion glob; repeatable
         --exclude-dir PATTERN  exclude directories by this glob; repeatable
+        --pre COMMAND          run COMMAND PATH and search its output
+        --pre-glob PATTERN     only run --pre on files matching this glob; repeatable
         --binary-files T    binary, text or without-match: what a NUL-carrying file is
     -I                     the same as --binary-files without-match
     -d, --directories A    recurse (default) or skip: whether to descend into directories
@@ -142,6 +144,8 @@ OPTIONS:
         --include PATTERN  grep's spelling of a narrowing glob; repeatable
         --exclude PATTERN  grep's spelling of an exclusion glob; repeatable
         --exclude-dir PATTERN  exclude directories by this glob; repeatable
+        --pre COMMAND          run COMMAND PATH and search its output
+        --pre-glob PATTERN     only run --pre on files matching this glob; repeatable
         --binary-files T    binary, text or without-match: what a NUL-carrying file is
     -I                     the same as --binary-files without-match
     -d, --directories A    recurse (default) or skip: whether to descend into directories
@@ -373,6 +377,8 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--include",
     "--exclude",
     "--exclude-dir",
+    "--pre",
+    "--pre-glob",
     "--binary-files",
     "-d",
     "--directories",
@@ -1008,6 +1014,8 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.no_ignore_dot = a.flag("--no-ignore-dot") || a.flag("--no-ignore-files");
     o.no_ignore_parent = a.flag("--no-ignore-parent") || a.flag("--no-ignore-files");
     o.follow = a.flag("--follow");
+    o.pre = a.value("--pre").map(str::to_string);
+    o.pre_globs = a.values("--pre-glob").to_vec();
     let binary_files = a.value("--binary-files").map(|v| v.to_ascii_lowercase());
     match binary_files.as_deref() {
         Some("text") => o.text = true,

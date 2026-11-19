@@ -75,6 +75,7 @@ combine. The option lists are `SEARCH_VALUE_FLAGS` / `SEARCH_BOOL_FLAGS`
 | `-Z`, `--null` | `rg --null` / `grep -Z` | A NUL instead of `:` after the file name, for `xargs -0` (`src/report.rs:336-342`, `src/report.rs:371-379`). |
 | `--no-ignore-vcs`, `--no-ignore-dot`, `--no-ignore-parent`, `--no-ignore-files` | `rg --no-ignore-vcs` and friends | Each removes one source of ignore rules: `.gitignore` and `.git/info/exclude`, `.ignore`, the rule files stacked from a root's ancestors, or all of them at once. `--no-ignore-global` is accepted and does nothing, because there is no global ignore file to read. |
 | `-r`, `--replace TEXT` | `rg -r` / `grep -r` | Prints each line with its matches replaced. `$0` is the whole match, `$1`..`$99` (or `${1}`) a capture group, `$$` a dollar; grep's `\1` spelling works too. The replacement is what gets highlighted and what `-o` prints. A reference the pattern cannot satisfy is refused with exit 2, as grep refuses an invalid back reference, where ripgrep prints nothing. Group references need the default engine: `-P` does not record groups, so a reference there is refused too. |
+| `--pre COMMAND`, `--pre-glob` | `rg --pre`, `rg --pre-glob` | Runs `COMMAND PATH` and searches what it prints, which is how a PDF or an office document becomes text without this tool knowing the format. The command is run directly with the path as its only argument, not through a shell, so a pipeline belongs in a script of your own. `--pre-glob` limits which files it runs on; the rest are searched as they are. A command that fails with no output is an error, reported like an unreadable path. |
 | `--null-data` | `rg --null-data` | Records are separated by NUL instead of a newline, and the output ends each record the same way, so `dusage search --null-data … | xargs -0` is safe. A record is cut in memory rather than streamed, since the line scanner is built around a newline; `-c`, `-l`, `-o` and `-n` all count and print by record. `-Z`/`-0` still mean "NUL after the file name". |
 | `-z`, `--search-zip` | `rg -z` | Expands gzip members and searches the contents, every member of a multi-member file in order. Only gzip: bzip2, xz, LZ4 and zstd would each need a decoder of their own (`src/archive.rs` holds the DEFLATE one, plus the CRC-32 that checks it). A truncated or corrupt member exits 2 rather than answering from half a stream. |
 | `-U`, `--multiline` | `rg -U` | Searches the whole file at once, so a match can contain a newline; `--multiline-dotall` widens `.` to one. Prints the lines each match covers, numbered, and `-o` prints the match itself. The bytes have to be in memory, which is the price of the mode; every other mode streams. `-v` and `-A`/`-B`/`-C` are refused rather than answered wrongly, and a pattern spelling a newline is refused without `-U`, as ripgrep refuses it. |
@@ -127,10 +128,12 @@ flag lists in `src/cmd/search.rs`).
 | `--help`, `-V`, `--version` | — | `find -h` is rejected as an unknown option here, unlike grep, where `-h` is `--no-filename`. |
 
 Absent relative to GNU find, and likely to matter: the expression language
-(`-a`, `-o`, `!`, parentheses), `-exec`/`-execdir`, `-delete`, `-printf`,
-`-prune`, `-regex`, `-iname`, `-mindepth`, `-newermt`, `-user`, `-perm`,
-`-links`, `-empty`, `-depth`, `-type` (we have `--dirs`/`--files` instead).
-There is no `-name` vs `-path` split: one glob, matched as described above.
+(`-a`, `-o`, `!`, parentheses), `-exec`/`-execdir` (which would run arbitrary
+commands, against this tool's read-only rule), `-printf`, `-prune`, `-regex`,
+`-user`, `-perm`, `-links`, `-depth` and `-type` (we have `--dirs`/`--files`
+instead). `-name`, `-path`, `-iname`, `-mindepth`, `-maxdepth`, `-newermt`,
+`-newerat`, `-newerct`, `-empty`, `-size`, `-newer` and `-mtime` all have a
+spelling here.
 
 ### 1.3 ripgrep flags we do not have
 
@@ -140,12 +143,10 @@ partial stand-in in the parser.
 | rg flag | What it does in ripgrep | What its absence means here |
 |---|---|---|
 | `-P`, `--pcre2` | Switches to the PCRE2 engine "when you want to use features such as look-around or backreferences" ([rg(1)](https://man.archlinux.org/man/rg.1.en), `-P, --pcre2`). | No lookaround and no backreferences, in any spelling. See §2.2. A pattern that needs them cannot be expressed; ripgrep gets them only if built with PCRE2. |
-| `--pre COMMAND`, `--pre-glob` | Searches the standard output of `COMMAND PATH` instead of the file ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--pre`). | No preprocessor. PDFs, office documents and anything else needing extraction cannot be searched. |
 | `-l` vs `--files-without-match` | rg spells the negative form `--files-without-match` and reserves `-L` for `--follow` ([rg(1)](https://man.archlinux.org/man/rg.1.en)). | We spell it `-L`. That is a direct letter collision: a script written for rg that passes `-L` to follow symlinks gets a list of files with no matches instead. |
 | `--no-require-git` | Respects `.gitignore` even outside a git repository ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--no-require-git`). | We always respect it — nothing in `src/ignore.rs` tests for a repository — which is exactly `--no-require-git` behaviour, on by default. `.git/info/exclude` is the one rule file that *is* gated on a `.git` directory (§3). |
 
-Also missing, and worth knowing: `--null-data`, `--crlf`, `--binary`,
-`--pre`,
+Also missing, and worth knowing: `--crlf`, `--binary`,
 `--max-columns-preview`, `--no-heading`, `--trim`, `--line-buffered`,
 `--block-buffered`, `--engine`, `--no-unicode` and `--sort` keys other than
 `path`, `none` and `modified`.
