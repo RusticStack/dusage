@@ -116,7 +116,7 @@ the sequential walker.
 | search, frequent literal `-c` | **125** | `rg` 175 / `grep -rI` 150 | **1.4x faster than rg** |
 | search, rare literal `-c` | 120 | `rg` 100 | 1.2x slower |
 | search, case-insensitive `-c` | 130 | `rg -i` 95 | 1.35x slower |
-| search, regex `-c` | 205 | `rg` 115 / `grep -rIE` 200 | 1.8x slower than rg, level with grep |
+| search, regex `-c` | 190 | `rg` 95 / `grep -rIE` 200 | 2x slower than rg, level with grep |
 | search `-l` | **136** | `rg -l` 141 | **1.04x faster** |
 | find `*.go` over `/usr` | 359 | `find -name` 345 | parity (1.04x) |
 
