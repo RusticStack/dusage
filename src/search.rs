@@ -112,6 +112,8 @@ pub struct SearchOptions {
     pub no_ignore_parent: bool,
     /// Follow symbolic links, refusing to walk a directory twice (`--follow`).
     pub follow: bool,
+    /// Let a match span lines (`-U`): the file is searched whole rather than line by line.
+    pub multiline: bool,
 }
 
 /// One piece of a `-r` replacement: text to print, or a group of the match it came from.
@@ -181,6 +183,7 @@ impl SearchOptions {
             no_ignore_dot: false,
             no_ignore_parent: false,
             follow: false,
+            multiline: false,
         }
     }
 }
@@ -882,6 +885,9 @@ fn scan_file_with(
     if o.max_count == Some(0) {
         return Ok(None);
     }
+    if o.multiline {
+        return scan_multiline(path, o, stats);
+    }
     let mut f = File::open(path)?;
     stats.files_scanned += 1;
     let n = f.read(&mut *buf)?;
@@ -942,6 +948,167 @@ fn scan_file_with(
         sc.feed(&buf[..n]);
     }
     finished(path, o, stats, sc, binary)
+}
+
+/// Search a whole file at once, so a match may span lines (`-U`). The bytes have to be in
+/// memory for that, which is the price of the mode; every other mode streams.
+fn scan_multiline(
+    path: &Path,
+    o: &SearchOptions,
+    stats: &mut Stats,
+) -> io::Result<Option<FileHits>> {
+    let mut f = File::open(path)?;
+    stats.files_scanned += 1;
+    let mut data = Vec::new();
+    f.read_to_end(&mut data)?;
+    stats.bytes_scanned += data.len() as u64;
+    let found = o.pattern.find_all(&data, usize::MAX);
+    let name = || path.to_string_lossy().into_owned();
+    if found.is_empty() {
+        let wants = o.files_without_matches || (o.include_zero && o.count) || o.passthru;
+        return Ok(wants.then(|| FileHits {
+            path: name(),
+            hits: if o.passthru {
+                plain_lines(&data)
+            } else {
+                Vec::new()
+            },
+            matches: 0,
+            total: 0,
+            binary: false,
+        }));
+    }
+    stats.matches += found.len() as u64;
+    let hits = if o.passthru {
+        every_line(&data, &found)
+    } else if o.only_matching {
+        found
+            .iter()
+            .map(|m| LineHit {
+                number: line_number(&data, m.start),
+                offset: m.start as u64,
+                text: data[m.start..m.end].to_vec(),
+                matched: true,
+                spans: vec![(0, m.end - m.start)],
+            })
+            .collect()
+    } else if o.count || o.files_with_matches || o.files_without_matches || o.quiet {
+        Vec::new()
+    } else {
+        matched_lines(&data, &found)
+    };
+    // `-c` counts the lines the matches cover, which is what a per-line mode would count.
+    let lines = if hits.is_empty() {
+        matched_lines(&data, &found).len() as u64
+    } else {
+        hits.iter().filter(|h| h.matched).count() as u64
+    };
+    let out = FileHits {
+        path: name(),
+        hits,
+        matches: lines,
+        total: found.len() as u64,
+        binary: false,
+    };
+    Ok(Some(out))
+}
+
+/// Every line of `data`, with the byte ranges each starts and ends at.
+fn line_spans(data: &[u8]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    // A file that ends with a newline has no line after it, unlike the split a reader would
+    // see: the empty tail is not a line and must not print.
+    while start < data.len() {
+        let end = match data[start..].iter().position(|b| *b == b'\n') {
+            Some(p) => start + p,
+            None => data.len(),
+        };
+        out.push((start, end));
+        start = end + 1;
+    }
+    out
+}
+
+fn line_number(data: &[u8], at: usize) -> u64 {
+    bytes::count_byte(&data[..at.min(data.len())], b'\n') as u64 + 1
+}
+
+/// The lines the matches cover, once each, with each line's own share of every match on it.
+fn matched_lines(data: &[u8], found: &[Match]) -> Vec<LineHit> {
+    let lines = line_spans(data);
+    let mut out: Vec<LineHit> = Vec::new();
+    let mut next = 0usize;
+    for m in found {
+        let first = lines
+            .partition_point(|(s, _)| *s <= m.start)
+            .saturating_sub(1);
+        let last = lines
+            .partition_point(|(s, _)| *s <= m.end.saturating_sub(1).max(m.start))
+            .saturating_sub(1);
+        for (i, (s, e)) in lines
+            .iter()
+            .enumerate()
+            .take(last + 1)
+            .skip(first.max(next))
+        {
+            let (s, e) = (*s, *e);
+            let mut spans = Vec::new();
+            for m in found.iter().filter(|m| m.start <= e && m.end > s) {
+                let (a, b) = (m.start.max(s), m.end.min(e));
+                if b > a {
+                    spans.push((a - s, b - s));
+                }
+            }
+            out.push(LineHit {
+                number: (i + 1) as u64,
+                offset: s as u64,
+                text: strip_cr(&data[s..e]).to_vec(),
+                matched: true,
+                spans,
+            });
+        }
+        next = next.max(last + 1);
+    }
+    out
+}
+
+/// Every line of the file with what matched on it, for `--passthru -U`.
+fn every_line(data: &[u8], found: &[Match]) -> Vec<LineHit> {
+    line_spans(data)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (s, e))| {
+            let mut spans = Vec::new();
+            for m in found.iter().filter(|m| m.start <= e && m.end > s) {
+                let (a, b) = (m.start.max(s), m.end.min(e));
+                if b > a {
+                    spans.push((a - s, b - s));
+                }
+            }
+            LineHit {
+                number: (i + 1) as u64,
+                offset: s as u64,
+                text: strip_cr(&data[s..e]).to_vec(),
+                matched: !spans.is_empty(),
+                spans,
+            }
+        })
+        .collect()
+}
+
+fn plain_lines(data: &[u8]) -> Vec<LineHit> {
+    line_spans(data)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (s, e))| LineHit {
+            number: (i + 1) as u64,
+            offset: s as u64,
+            text: strip_cr(&data[s..e]).to_vec(),
+            matched: false,
+            spans: Vec::new(),
+        })
+        .collect()
 }
 
 /// The per-file line state: carries the partial last line across blocks and accumulates hits.

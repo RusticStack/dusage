@@ -1006,3 +1006,72 @@ fn follow_walks_links_once() {
         assert!(out.status.code().is_some(), "the walk terminated");
     }
 }
+
+#[test]
+fn multiline_matches_span_lines() {
+    let f = Fixture::new("multiline");
+    let dir = f.root.join("ml");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "start\nmid\nend\n").unwrap();
+
+    // A match across lines prints each line it covers, numbered.
+    let block = stdout(&run(&["search", "-U", "-n", "-h", r"start\nmid"], &dir));
+    assert_eq!(block, "1:start\n2:mid\n");
+
+    // `-o` prints the whole match, newline included.
+    assert_eq!(
+        stdout(&run(
+            &["search", "-U", "-o", "-h", r"start[\s\S]*end"],
+            &dir
+        )),
+        "start\nmid\nend\n"
+    );
+    // Without `-U` a pattern that spells a newline is refused, as ripgrep refuses it, rather
+    // than quietly matching nothing.
+    let escaped = run(&["search", "-n", r"start\nmid"], &dir);
+    assert_eq!(code(&escaped), 2);
+    assert!(
+        stderr(&escaped).contains("pass -U/--multiline"),
+        "{}",
+        stderr(&escaped)
+    );
+    // `--multiline-dotall` is what lets `.` cross the newline.
+    assert_eq!(code(&run(&["search", "-U", "-o", r"start.*end"], &dir)), 1);
+    assert_eq!(
+        stdout(&run(
+            &[
+                "search",
+                "-U",
+                "--multiline-dotall",
+                "-o",
+                "-h",
+                r"start.*end"
+            ],
+            &dir
+        )),
+        "start\nmid\nend\n"
+    );
+
+    // `-c` counts the lines the matches cover, and `-l` names the file once.
+    assert_eq!(
+        stdout(&run(&["search", "-U", "-c", "-h", "mid"], &dir)),
+        "1\n"
+    );
+    assert_eq!(
+        stdout(&run(&["search", "-U", "-l", "start\\nmid"], &dir))
+            .lines()
+            .count(),
+        1
+    );
+
+    // The line-level modes this cannot answer are refused rather than answered wrongly.
+    let inverted = run(&["search", "-U", "-v", "mid"], &dir);
+    assert_eq!(code(&inverted), 2);
+    assert!(
+        stderr(&inverted).contains("-U cannot be combined"),
+        "{}",
+        stderr(&inverted)
+    );
+    let context = run(&["search", "-U", "-A", "1", "mid"], &dir);
+    assert_eq!(code(&context), 2);
+}
