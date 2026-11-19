@@ -51,6 +51,18 @@ jobs:
         run: bash scripts/differential.sh
       - name: Build release
         run: cargo build --release
+      - name: Performance guard (advisory)
+        continue-on-error: true
+        run: |
+          set -eu
+          # A tree big enough that matching dominates process startup, built from the
+          # repository itself so the case is deterministic on any runner.
+          rm -rf /tmp/guard && mkdir -p /tmp/guard
+          for i in $(seq 1 30); do
+            cat src/*.rs src/cmd/*.rs src/unix/*.rs src/win/*.rs > "/tmp/guard/f$i.rs"
+          done
+          DUSAGE_BENCH_SEARCH_ROOT=/tmp/guard DUSAGE_PERF_TOL=60 \
+            DUSAGE_SKIP_BUILD=1 bash scripts/perf-guard.sh
       - name: Smoke test against the filesystem oracle
         run: |
           set -eu
