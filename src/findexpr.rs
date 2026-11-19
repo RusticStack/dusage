@@ -52,52 +52,14 @@
 //! error rather than a guess, because the walk never opens a file and Windows has no mode
 //! bits to compare.
 
+use crate::native::enumerate;
 use crate::regex::{Flags, Regex};
-use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// What kind of entry the walk produced.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Kind {
-    File,
-    Dir,
-    Symlink,
-    Fifo,
-    Socket,
-    Char,
-    Block,
-    #[default]
-    Other,
-}
-
-impl Kind {
-    /// The letter `find -printf %y` prints, and what `-type`/`-xtype` accept.
-    pub fn letter(self) -> char {
-        match self {
-            Kind::File => 'f',
-            Kind::Dir => 'd',
-            Kind::Symlink => 'l',
-            Kind::Fifo => 'p',
-            Kind::Socket => 's',
-            Kind::Char => 'c',
-            Kind::Block => 'b',
-            Kind::Other => '?',
-        }
-    }
-
-    fn from_letter(c: char) -> Kind {
-        match c {
-            'f' => Kind::File,
-            'd' => Kind::Dir,
-            'l' => Kind::Symlink,
-            'p' => Kind::Fifo,
-            's' => Kind::Socket,
-            'c' => Kind::Char,
-            'b' => Kind::Block,
-            _ => Kind::Other,
-        }
-    }
-}
+/// What kind of entry the walk produced: the shared [`crate::model::Kind`], so the
+/// platform layer can name a fifo or a device node without this module knowing which
+/// platform it runs on.
+pub use crate::model::Kind;
 
 /// Everything the tests of one entry need, filled in by the walk.
 ///
@@ -344,6 +306,23 @@ const REGEXTYPES: [&str; 13] = [
 const UNCLOSED: &str =
     "invalid expression; I was expecting to find a ')' somewhere but did not see one.";
 
+/// Which parts of an entry's `stat` data an expression actually reads.
+///
+/// A directory record already carries the entry's kind, so an expression made of `-name`,
+/// `-path` and `-type` needs no `stat` at all — on a 267k-entry tree that is the difference
+/// between one syscall per entry and none. [`Expr::needs`] answers this once per run and is
+/// deliberately conservative: it reports what the tree says, and everything it cannot place
+/// (an unsupported predicate) asks for the field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Needs {
+    /// The entry's size, times, mode, owner, link count, inode or device.
+    pub stat: bool,
+    /// A symlink's target text or the kind of what it points at (`%l`, `-xtype`).
+    pub link: bool,
+    /// The filesystem type name behind an entry's device (`-fstype`).
+    pub fs: bool,
+}
+
 /// A parsed `find` expression.
 #[derive(Debug)]
 pub struct Expr {
@@ -400,6 +379,13 @@ impl Expr {
         &self.settings
     }
 
+    /// What this expression reads from an entry, so the walk can leave the rest unread.
+    pub fn needs(&self) -> Needs {
+        let mut needs = Needs::default();
+        self.root.needs(&self.settings, &mut needs);
+        needs
+    }
+
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
@@ -441,6 +427,19 @@ enum Node {
 }
 
 impl Node {
+    fn needs(&self, settings: &Settings, out: &mut Needs) {
+        match self {
+            Node::And(a, b) | Node::Or(a, b) => {
+                a.needs(settings, out);
+                b.needs(settings, out);
+            }
+            Node::Not(a) => a.needs(settings, out),
+            Node::Test(t) => t.needs(settings, out),
+            Node::Action(a) => a.needs(out),
+            Node::True | Node::False => {}
+        }
+    }
+
     fn test(t: Test) -> Node {
         Node::Test(Box::new(t))
     }
@@ -462,6 +461,39 @@ impl Node {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+impl Test {
+    fn needs(&self, settings: &Settings, out: &mut Needs) {
+        match self {
+            // Name, path, kind and the reference file's own data: nothing this entry has.
+            Test::Glob { .. }
+            | Test::Regex(_)
+            | Test::Type(_)
+            | Test::SameFile { .. }
+            | Test::Unsupported(_) => {}
+            // Without `-follow` the target's kind says what the link points at.
+            Test::XType(_) => out.link |= !settings.follow,
+            Test::Size { .. }
+            | Test::Empty
+            | Test::Perm(_)
+            | Test::User(_)
+            | Test::Group(_)
+            | Test::NoUser
+            | Test::NoGroup
+            | Test::Uid(_)
+            | Test::Gid(_)
+            | Test::Links(_)
+            | Test::Inum(_)
+            | Test::Newer { .. }
+            | Test::Period { .. }
+            | Test::Used(_) => out.stat = true,
+            Test::FsType(_) => {
+                out.stat = true;
+                out.fs = true;
+            }
         }
     }
 }
@@ -515,6 +547,42 @@ enum Action {
     Prune,
     Quit,
     Exec(ExecRequest),
+}
+
+impl Action {
+    fn needs(&self, out: &mut Needs) {
+        match self {
+            Action::Print { .. } | Action::Prune | Action::Quit | Action::Exec(_) => {}
+            Action::Ls => out.stat = true,
+            Action::Printf(format) => {
+                for piece in &format.pieces {
+                    let Piece::Field { conv, .. } = piece else {
+                        continue;
+                    };
+                    match conv {
+                        Conv::Size
+                        | Conv::Blocks512
+                        | Conv::Blocks1k
+                        | Conv::ModeOctal
+                        | Conv::ModeText
+                        | Conv::Inode
+                        | Conv::Links
+                        | Conv::User
+                        | Conv::Group
+                        | Conv::Time(..) => out.stat = true,
+                        Conv::Target => out.link = true,
+                        Conv::Path
+                        | Conv::Name
+                        | Conv::DirName
+                        | Conv::Sub
+                        | Conv::Kind
+                        | Conv::Depth
+                        | Conv::Percent => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A comparison width: find's `n`, `+n` and `-n`.
@@ -1674,52 +1742,32 @@ fn directive(chars: &[char], i: usize) -> Option<(Conv, usize, bool, Option<usiz
 }
 
 fn reference_time(path: &str, which: TimeWhich) -> Result<SystemTime, String> {
-    let md = fs::metadata(path).map_err(|e| format!("`{path}': {e}"))?;
-    let t = match which {
-        TimeWhich::Mtime => md.modified().ok(),
-        TimeWhich::Atime => md.accessed().ok(),
-        TimeWhich::Ctime => change_time(&md),
-    };
-    Ok(t.unwrap_or(UNIX_EPOCH))
+    let st = enumerate::stat(std::path::Path::new(path)).map_err(|e| format!("`{path}': {e}"))?;
+    Ok(match which {
+        TimeWhich::Mtime => st.mtime,
+        TimeWhich::Atime => st.atime,
+        TimeWhich::Ctime => st.ctime,
+    })
 }
 
-#[cfg(unix)]
-fn change_time(md: &fs::Metadata) -> Option<SystemTime> {
-    use std::os::unix::fs::MetadataExt;
-    Some(UNIX_EPOCH + Duration::from_secs(md.ctime().max(0) as u64))
-}
-
-#[cfg(not(unix))]
-fn change_time(md: &fs::Metadata) -> Option<SystemTime> {
-    md.created().or_else(|_| md.modified()).ok()
-}
-
-#[cfg(unix)]
 fn file_identity(path: &str) -> Result<(u64, u64), String> {
-    use std::os::unix::fs::MetadataExt;
-    let md = fs::metadata(path).map_err(|e| format!("`{path}': {e}"))?;
-    Ok((md.dev(), md.ino()))
+    let st = enumerate::stat(std::path::Path::new(path)).map_err(|e| format!("`{path}': {e}"))?;
+    Ok((st.dev, st.inode))
 }
 
-#[cfg(not(unix))]
-fn file_identity(_: &str) -> Result<(u64, u64), String> {
-    Err("-samefile is not supported on this platform".to_string())
-}
-
-#[cfg(unix)]
 fn perm_matches(e: &Entry, test: &PermTest) -> Result<bool, String> {
+    if !enumerate::POSIX_FIELDS {
+        return Err(
+            "-perm is not supported on this platform: there are no mode bits to compare"
+                .to_string(),
+        );
+    }
     let mode = e.mode & 0o7777;
     Ok(match test.kind {
         PermKind::Exact => mode == test.bits,
         PermKind::All => mode & test.bits == test.bits,
         PermKind::Any => test.bits == 0 || mode & test.bits != 0,
     })
-}
-
-#[cfg(not(unix))]
-fn perm_matches(_: &Entry, test: &PermTest) -> Result<bool, String> {
-    let _ = (test.bits, test.kind);
-    Err("-perm is not supported on this platform: there are no mode bits to compare".to_string())
 }
 
 impl Test {
@@ -1978,6 +2026,45 @@ mod tests {
 
     fn printf_of(args: &[&str], e: &Entry) -> String {
         printf_with(args, e, &ctx())
+    }
+
+    #[test]
+    fn needs_names_what_the_walk_has_to_read() {
+        let needs = |args: &[&str]| parsed(args).needs();
+        // A name and a kind come from the directory record: no `stat`, no `readlink`.
+        assert_eq!(needs(&["-name", "*.md", "-type", "f"]), Needs::default());
+        assert_eq!(needs(&["-type", "l", "-prune"]), Needs::default());
+        assert_eq!(
+            needs(&["-path", "*/x/*", "-print", "-quit"]),
+            Needs::default()
+        );
+        // Anything that compares size, times, mode, owners or the link count reads `stat`.
+        for args in [
+            &["-size", "+1k"][..],
+            &["-mtime", "-1"],
+            &["-newermt", "2024-01-01"],
+            &["-perm", "644"],
+            &["-uid", "1000"],
+            &["-user", "root"],
+            &["-links", "+1"],
+            &["-inum", "5"],
+            &["-empty"],
+            &["-fstype", "ext4"],
+            &["-printf", "%s"],
+            &["-printf", "%TY"],
+            &["-ls"],
+        ] {
+            assert!(needs(args).stat, "{args:?} must ask for a stat");
+        }
+        // `%l` and `-xtype` need the target; nothing else does.
+        assert!(needs(&["-printf", "%l"]).link);
+        assert!(needs(&["-xtype", "f"]).link);
+        assert!(!needs(&["-type", "l"]).link);
+        // `-follow` makes the entry itself the target, so the link is never read.
+        assert!(!needs(&["-follow", "-xtype", "f"]).link);
+        // `-fstype` is the only predicate that also wants the device table.
+        assert!(needs(&["-fstype", "ext4"]).fs);
+        assert!(!needs(&["-size", "+1k"]).fs);
     }
 
     fn printf_with(args: &[&str], e: &Entry, c: &Ctx) -> String {

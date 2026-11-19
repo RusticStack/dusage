@@ -7,9 +7,9 @@
 
 use crate::bytes;
 use crate::encodings::{self, Encoding};
-use crate::findexpr::{self, Ctx, Expr, Kind, Sink};
+use crate::findexpr::{self, Ctx, Expr, Kind, Needs, Sink};
 use crate::ignore::IgnoreRules;
-use crate::model::ErrorCounts;
+use crate::model::{ErrorCounts, Stat};
 use crate::native::enumerate;
 use crate::par_for_each;
 use crate::pattern::{Match, Pattern};
@@ -514,8 +514,7 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
                 size = md.len();
                 modified = md.modified().ok();
             } else if o.details || o.max_file_size.is_some() {
-                let path = job.dir.join(&e.name);
-                match e.stat(&path) {
+                match e.stat() {
                     Ok(st) => {
                         if o.max_file_size.is_some_and(|limit| st.size > limit) {
                             continue;
@@ -666,171 +665,76 @@ pub struct ExprOutcome {
     pub stats: Stats,
 }
 
-/// One entry's facts, in the shape [`findexpr::Entry`] wants them. The platforms differ in
-/// which of them exist, so they are filled in one place per platform below.
-struct Facts {
-    path: PathBuf,
-    kind: Kind,
-    size: u64,
-    blocks: u64,
-    mtime: SystemTime,
-    atime: SystemTime,
-    ctime: SystemTime,
-    links: u64,
-    inode: u64,
-    dev: u64,
-    mode: u32,
-    uid: u32,
-    gid: u32,
+/// One entry's facts, in the shape [`findexpr::Entry`] wants them: the platform's [`Stat`]
+/// (one `statx`/directory record, whichever the platform has) plus the path pieces the
+/// expression and the sink print.
+struct Facts<'a> {
+    path: &'a Path,
+    st: Stat,
     /// A symlink's target, and what the target is.
     target: Option<String>,
     target_kind: Option<Kind>,
 }
 
-impl Facts {
-    fn of(path: &Path) -> io::Result<Facts> {
-        let md = std::fs::symlink_metadata(path)?;
-        let mut f = Facts {
-            path: path.to_path_buf(),
-            kind: kind_of(&md),
-            ..fields(&md)
+impl<'a> Facts<'a> {
+    /// The facts of a path on its own: the walk's starting point, read with one `lstat`.
+    fn of(path: &'a Path) -> io::Result<Facts<'a>> {
+        Ok(Facts {
+            path,
+            st: enumerate::lstat(path)?,
+            target: None,
+            target_kind: None,
+        }
+        .link(false))
+    }
+
+    /// The facts of one entry of a directory being read, whose `stat` resolves the name
+    /// against the open directory instead of the full path. The `stat` runs only when the
+    /// expression reads a field the directory record does not carry; the kind is always
+    /// exact, because a `DT_UNKNOWN` record was already stat-ed when it was listed.
+    fn of_entry(path: &'a Path, e: &enumerate::Lite, needs: Needs) -> io::Result<Facts<'a>> {
+        let st = if needs.stat {
+            e.stat()?
+        } else {
+            Stat {
+                kind: e.kind(),
+                ..Stat::default()
+            }
         };
-        if f.kind == Kind::Symlink {
-            f.target = std::fs::read_link(path)
+        Ok(Facts {
+            path,
+            st,
+            target: None,
+            target_kind: None,
+        }
+        .link(needs.link))
+    }
+
+    /// A symlink's target text (`%l`) and target kind (`-xtype`), which only a link has and
+    /// only an expression that asks for one pays for: two syscalls per link otherwise.
+    fn link(mut self, want: bool) -> Facts<'a> {
+        if want && self.st.kind == Kind::Symlink {
+            self.target = std::fs::read_link(self.path)
                 .ok()
                 .map(|t| t.to_string_lossy().into_owned());
-            f.target_kind = std::fs::metadata(path).ok().map(|md| kind_of(&md));
+            self.target_kind = enumerate::stat(self.path).ok().map(|s| s.kind);
         }
-        Ok(f)
+        self
     }
 
     /// The entry described by its target instead of the link, which is what `-follow` turns
     /// a symlink into; the link's own name and target stay for `%l` and `-xtype`.
-    fn followed(self, target: &Path) -> Facts {
-        let Ok(md) = std::fs::metadata(target) else {
+    fn followed(mut self, target: &Path) -> Facts<'a> {
+        let Ok(st) = enumerate::stat(target) else {
             return self;
         };
-        let kind = match kind_of(&md) {
-            Kind::Other => self.kind,
+        let kind = match st.kind {
+            Kind::Other => self.st.kind,
             k => k,
         };
-        Facts {
-            path: self.path,
-            kind,
-            target: self.target,
-            target_kind: self.target_kind.or(Some(kind)),
-            ..fields(&md)
-        }
-    }
-}
-
-/// The `lstat` fields both platforms have some of. `path` and `kind` are placeholders here:
-/// every caller fills them in from the metadata it already parsed.
-#[cfg(unix)]
-fn fields(md: &std::fs::Metadata) -> Facts {
-    use std::os::unix::fs::MetadataExt;
-    Facts {
-        path: PathBuf::new(),
-        kind: Kind::Other,
-        size: md.size(),
-        blocks: md.blocks(),
-        mtime: stamp(md.mtime()),
-        atime: stamp(md.atime()),
-        ctime: stamp(md.ctime()),
-        links: md.nlink(),
-        inode: md.ino(),
-        dev: md.dev(),
-        mode: md.mode(),
-        uid: md.uid(),
-        gid: md.gid(),
-        target: None,
-        target_kind: None,
-    }
-}
-
-#[cfg(not(unix))]
-fn fields(md: &std::fs::Metadata) -> Facts {
-    use std::os::windows::fs::MetadataExt;
-    Facts {
-        path: PathBuf::new(),
-        kind: Kind::Other,
-        size: md.file_size(),
-        // Windows has no `st_blocks`, and find's `%b` is a POSIX idea; 0 says "unknown".
-        blocks: 0,
-        mtime: tick(md.last_write_time()),
-        atime: tick(md.last_access_time()),
-        ctime: tick(md.creation_time()),
-        // No link count, inode, mode bits or owner the walk can read without opening the
-        // file, so `-links`, `-perm`, `-uid`, `-user` answer from zeros (see SEARCH.md).
-        links: 0,
-        inode: 0,
-        dev: 0,
-        mode: 0,
-        uid: 0,
-        gid: 0,
-        target: None,
-        target_kind: None,
-    }
-}
-
-/// What kind of entry this is, from the `lstat` the walk already has.
-#[cfg(unix)]
-fn kind_of(md: &std::fs::Metadata) -> Kind {
-    use std::os::unix::fs::FileTypeExt;
-    let t = md.file_type();
-    if t.is_dir() {
-        Kind::Dir
-    } else if t.is_symlink() {
-        Kind::Symlink
-    } else if t.is_file() {
-        Kind::File
-    } else if t.is_fifo() {
-        Kind::Fifo
-    } else if t.is_socket() {
-        Kind::Socket
-    } else if t.is_char_device() {
-        Kind::Char
-    } else if t.is_block_device() {
-        Kind::Block
-    } else {
-        Kind::Other
-    }
-}
-
-#[cfg(not(unix))]
-fn kind_of(md: &std::fs::Metadata) -> Kind {
-    let t = md.file_type();
-    if t.is_symlink() {
-        Kind::Symlink
-    } else if t.is_dir() {
-        Kind::Dir
-    } else if t.is_file() {
-        Kind::File
-    } else {
-        // Nothing reports a fifo, socket or device node here, and the walk never opens a
-        // file to find out.
-        Kind::Other
-    }
-}
-
-#[cfg(unix)]
-fn stamp(secs: i64) -> SystemTime {
-    if secs >= 0 {
-        std::time::UNIX_EPOCH + Duration::from_secs(secs as u64)
-    } else {
-        std::time::UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs())
-    }
-}
-
-/// A FILETIME is 100 ns ticks since 1601-01-01, 11644473600 s before the Unix epoch.
-#[cfg(not(unix))]
-fn tick(ticks: u64) -> SystemTime {
-    const EPOCH_DIFF: u64 = 11_644_473_600;
-    let secs = ticks / 10_000_000;
-    let nanos = (ticks % 10_000_000) * 100;
-    match secs.checked_sub(EPOCH_DIFF) {
-        Some(s) => std::time::UNIX_EPOCH + Duration::new(s, nanos as u32),
-        None => std::time::UNIX_EPOCH,
+        self.target_kind = self.target_kind.or(Some(kind));
+        self.st = Stat { kind, ..st };
+        self
     }
 }
 
@@ -846,6 +750,8 @@ struct ExprWalk<'a> {
     sink: &'a mut dyn Sink,
     /// Compute `-empty` per entry: one `read_dir` per directory, so only when asked.
     want_empty: bool,
+    /// What the expression reads, so an entry it only names and types is never stat-ed.
+    needs: Needs,
     out: ExprOutcome,
     /// Filesystem type names by device, for `-fstype` (`ext4`, `ntfs`, ...).
     fs_names: HashMap<u64, String>,
@@ -864,14 +770,20 @@ pub fn walk_expr(
     want_empty: bool,
     sink: &mut dyn Sink,
 ) -> Result<ExprOutcome, String> {
+    let needs = expr.needs();
     let mut w = ExprWalk {
         o,
         expr,
         ctx,
         sink,
         want_empty,
+        needs,
         out: ExprOutcome::default(),
-        fs_names: filesystem_types(),
+        fs_names: if needs.fs {
+            enumerate::filesystem_types()
+        } else {
+            HashMap::new()
+        },
         stop: false,
     };
     for root in &o.roots {
@@ -902,11 +814,11 @@ impl ExprWalk<'_> {
                 return Ok(());
             }
         };
-        if self.follow() && facts.kind == Kind::Symlink {
+        if self.follow() && facts.st.kind == Kind::Symlink {
             facts = facts.followed(root);
         }
         let settings = self.expr.settings();
-        let mut descend = facts.kind == Kind::Dir;
+        let mut descend = facts.st.kind == Kind::Dir;
         // `-depth` reports a directory after its contents, the starting point included.
         let visit_now = !settings.depth_first;
         if visit_now && settings.mindepth.is_none_or(|m| m == 0) {
@@ -914,7 +826,7 @@ impl ExprWalk<'_> {
         }
         if descend && settings.maxdepth != Some(0) {
             let mut chain = vec![real_path(root)];
-            self.dir(root, "", 0, rules, facts.dev, &mut chain)?;
+            self.dir(root, "", 0, rules, facts.st.dev, &mut chain)?;
         }
         if !visit_now && settings.mindepth.is_none_or(|m| m == 0) {
             self.visit(&facts, "", 0)?;
@@ -969,8 +881,8 @@ impl ExprWalk<'_> {
             // with `-follow`, and then as the directory it points at.
             let mut is_dir = e.is_dir() && !e.is_reparse();
             if e.is_reparse() && self.follow() {
-                match std::fs::metadata(&child) {
-                    Ok(md) => is_dir = md.is_dir(),
+                match enumerate::stat(&child) {
+                    Ok(st) => is_dir = st.kind == Kind::Dir,
                     Err(err) => {
                         self.out.stats.errors.record(&err);
                         continue;
@@ -981,21 +893,21 @@ impl ExprWalk<'_> {
                 self.out.stats.entries_ignored += 1;
                 continue;
             }
-            let mut facts = match Facts::of(&child) {
+            let mut facts = match Facts::of_entry(&child, e, self.needs) {
                 Ok(f) => f,
                 Err(err) => {
                     self.out.stats.errors.record(&err);
                     continue;
                 }
             };
-            if self.follow() && facts.kind == Kind::Symlink {
+            if self.follow() && facts.st.kind == Kind::Symlink {
                 facts = facts.followed(&child);
             }
             // `-maxdepth` bounds what is walked as well as what is reported: the entry at
             // the limit is still evaluated, but its directory is never read.
             let mut descend =
-                facts.kind == Kind::Dir && settings.maxdepth.is_none_or(|m| (depth as u64) < m);
-            if descend && self.one_filesystem() && facts.dev != root_dev {
+                facts.st.kind == Kind::Dir && settings.maxdepth.is_none_or(|m| (depth as u64) < m);
+            if descend && self.one_filesystem() && facts.st.dev != root_dev {
                 self.out.stats.entries_ignored += 1;
                 descend = false;
             }
@@ -1053,30 +965,31 @@ impl ExprWalk<'_> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.clone());
         let below = sub_path(sub);
+        let st = &facts.st;
         let empty = self.want_empty
-            && match facts.kind {
-                Kind::File => facts.size == 0,
-                Kind::Dir => std::fs::read_dir(&facts.path).is_ok_and(|mut d| d.next().is_none()),
+            && match st.kind {
+                Kind::File => st.size == 0,
+                Kind::Dir => std::fs::read_dir(facts.path).is_ok_and(|mut d| d.next().is_none()),
                 _ => false,
             };
         let entry = findexpr::Entry {
-            size: facts.size,
-            blocks: facts.blocks,
-            mtime: facts.mtime,
-            atime: facts.atime,
-            ctime: facts.ctime,
-            links: facts.links,
-            inode: facts.inode,
-            dev: facts.dev,
-            mode: facts.mode,
-            uid: facts.uid,
-            gid: facts.gid,
+            size: st.size,
+            blocks: st.blocks,
+            mtime: st.mtime,
+            atime: st.atime,
+            ctime: st.ctime,
+            links: st.links,
+            inode: st.inode,
+            dev: st.dev,
+            mode: st.mode,
+            uid: st.uid,
+            gid: st.gid,
             depth,
             empty,
-            fs: self.fs_names.get(&facts.dev).map(String::as_str),
+            fs: self.fs_names.get(&st.dev).map(String::as_str),
             target: facts.target.as_deref(),
             target_kind: facts.target_kind,
-            ..findexpr::Entry::new(&path, &name, &below, facts.kind)
+            ..findexpr::Entry::new(&path, &name, &below, st.kind)
         };
         let verdict = self.expr.eval(&entry, self.ctx, &mut *self.sink)?;
         if verdict.selected {
@@ -1103,41 +1016,6 @@ fn sub_path(rel: &str) -> String {
 /// cannot be resolved, so the check fails closed rather than skipping the entry.
 fn real_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Filesystem type names by device, best effort, for `-fstype`. Linux records which type is
-/// mounted where in `/proc/self/mountinfo`; Windows leaves every name unknown.
-#[cfg(unix)]
-fn filesystem_types() -> HashMap<u64, String> {
-    let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else {
-        return HashMap::new();
-    };
-    let mut out = HashMap::new();
-    for line in text.lines() {
-        // device mount-point options [optional...] `-` fstype source super-options
-        let mut parts = line.split(' ');
-        let dev = parts.nth(2).and_then(|d| {
-            let (major, minor) = d.split_once(':')?;
-            Some(makedev(major.parse().ok()?, minor.parse().ok()?))
-        });
-        let Some(dev) = dev else { continue };
-        let name = parts.skip_while(|f| *f != "-").nth(1);
-        if let Some(name) = name {
-            out.insert(dev, name.to_string());
-        }
-    }
-    out
-}
-
-/// glibc's `makedev`, which is the number `st_dev` holds for the same device.
-#[cfg(unix)]
-fn makedev(major: u64, minor: u64) -> u64 {
-    (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12) | ((major & !0xfff) << 32)
-}
-
-#[cfg(not(unix))]
-fn filesystem_types() -> HashMap<u64, String> {
-    HashMap::new()
 }
 
 /// Order the matched files, and reverse them when `--sortr` asked. `--sort modified` pays one
@@ -2569,6 +2447,31 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// The walk reads an entry's kind from the directory record, and its size only when the
+    /// expression asks for one: `-name`/`-type` cost no syscall per entry.
+    #[test]
+    fn facts_read_the_kind_from_the_record_and_the_rest_on_demand() {
+        let f = Fixture::new("facts");
+        let path = f.file("a.txt", "12345");
+        let mut ents = Vec::new();
+        enumerate::list(&f.0, &mut ents, &mut ErrorCounts::default()).unwrap();
+        let e = ents.iter().find(|e| e.name == "a.txt").unwrap();
+        let cheap = Facts::of_entry(&path, e, Needs::default()).unwrap();
+        assert_eq!(cheap.st.kind, Kind::File);
+        assert_eq!(cheap.st.size, 0, "size was never read");
+        let full = Facts::of_entry(
+            &path,
+            e,
+            Needs {
+                stat: true,
+                ..Needs::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(full.st.size, 5);
+        assert_eq!(full.st.kind, Kind::File);
     }
 
     fn opts(f: &Fixture, pat: &str) -> SearchOptions {
