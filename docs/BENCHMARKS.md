@@ -112,39 +112,32 @@ the sequential walker.
 
 | Case | dusage | reference | dusage vs it |
 | --- | --- | --- | --- |
-| scan `/usr`, 180k files | **330** | `du -sb` 620 | **1.9x faster** |
-| search, frequent literal `-c` | **110** | `rg` 150 / `grep -rI` 150 | **1.35x faster than rg** |
-| search, rare literal `-c` | **90** | `rg` 90 | parity |
-| search, case-insensitive `-c` | **100** | `rg -i` 95 | parity (1.05x) |
-| search, regex `-c` | 190 | `rg` 95 / `grep -rIE` 200 | 2x slower than rg, level with grep |
-| search `-l` | **104** | `rg -l` 141 | **1.35x faster** |
-| find `*.go` over `/usr` | 359 | `find -name` 345 | parity (1.04x) |
+| scan `/usr`, 180k files | **312** | `du -sb` 602 | **1.9x faster** |
+| search, frequent literal (print) | **148** | `rg` 170 / `grep -rI` 135 | **1.15x faster than rg**, 1.1x slower than grep |
+| search, rare literal (print) | **107** | `rg` 100 | parity (1.07x) |
+| search, case-insensitive (print) | **104** | `rg -i` 100 | parity (1.04x) |
+| search, regex (print) | 232 | `rg` 97 / `grep -rIE` 210 | 2.4x slower than rg, level with grep |
+| search `-l` | **110** | `rg -l` 149 | **1.35x faster** |
+| find `*.go` over `/usr` | 351 | `find -name` 323 | parity (1.08x) |
 
-The last three rows moved with the vector scan: `bytes::find_byte`, the anchor search behind
-every literal pattern and the newline counter now go through `simd::memchr` and `simd::count`
-(AVX2 or SSE2, detected once at startup) on haystacks of 128 bytes or more, and a worker reuses
-one 64 KiB read buffer instead of zeroing a fresh one per file. A frequent literal is now
-faster than ripgrep rather than level with it, and regex counting went from 2.4x to 1.8x behind.
+Every literal case is now at parity or ahead. The engine scans bytes with the vector unit
+(`simd::memchr`, `simd::memchr_ci`, `simd::count`, AVX2 or SSE2, detected once at startup), pulls
+the longest run of bytes every match must contain out of a regex and scans for that run before
+touching the automaton, keys the DFA's transition table by byte classes, reuses one read buffer
+and one set of line buffers per worker, and scans a binary file for one match instead of holding
+its lines.
 
 Measurements on the I/O-bound cases are noisy on this box: `/usr` is 7.9 GB and the machine has
 8 GB of RAM, so a search over it cannot stay in page cache. Two runs of the same binary there
 differ by more than 2x. The numbers above are the cached-tree cases, where the spread is a few
 percent.
 
-A frequent literal is now the fastest of the three tools, `-l` is a dead heat with ripgrep, and
-`find` is level with `find(1)` where it used to be 2.4x behind. The two places dusage still
-loses are a rare literal and a general regex, both twice or more over ripgrep's time:
-
-- **Rare literals** pay a fixed per-block cost the frequent case hides: the block scanner finds
-  no match and still has to count the newlines it skipped.
-- **Regexes** run the line-at-a-time path. The engine now pulls the longest run of bytes that
-  every match must contain out of the pattern (`[A-Z][a-zA-Z0-9_]*\.go` gives `.go`) and scans
-  for that run before it touches the automaton, which took the counting case from 348 ms to
-  220 ms and the printing case from 480 ms to 330 ms. What is left is the per-line walk itself:
-  the DFA's leftmost-start recovery reads backwards from the end of the buffer it is handed, so
-  a block-scanned regex costs a block per match, and the block scanner can only be turned on
-  for a regex once that walk is bounded by the line rather than the buffer. A reverse-suffix
-  DFA is the open item in `docs/ROADMAP.md`.
+One case still loses: **a general regex**, at 2.4x ripgrep's time. It runs the line-at-a-time
+path, and the four block-scanned variants that were built and measured for it all came out
+slower (0.45-1.5 s against 0.19 s for the same search), because every one of them re-enters the
+automaton once per candidate line or per match. Closing that needs a reverse automaton that
+answers "where does this match start" in one suffix pass over the block, which is a new machine
+rather than a tweak; `docs/ROADMAP.md` records the attempts.
 
 Where the wins came from, in order: a parallel walk (every thread reads directories), a
 lazy enumerator that reads types from the dirent and stats only when a mode needs size or mtime,
