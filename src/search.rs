@@ -557,16 +557,49 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
     Ok(report)
 }
 
+thread_local! {
+    /// The scan buffer, allocated once per worker thread and handed back after every file.
+    static SCAN_BUF: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn scan_buffer() -> Vec<u8> {
+    SCAN_BUF.with(|b| {
+        let mut slot = b.borrow_mut();
+        if slot.len() < BLOCK {
+            slot.resize(BLOCK, 0);
+        }
+        std::mem::take(&mut *slot)
+    })
+}
+
+fn recycle_buffer(buf: Vec<u8>) {
+    SCAN_BUF.with(|b| *b.borrow_mut() = buf);
+}
+
 /// Scan one file. `None` means "nothing to report" (no match, or filtered out).
 fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Option<FileHits>> {
+    // One scan buffer per thread: a fresh `vec![0u8; BLOCK]` per file zeroes 64 KiB that the
+    // read is about to overwrite, which on a 162k-file tree is ten gigabytes of memset.
+    let mut buf = scan_buffer();
+    let res = scan_file_with(path, o, stats, &mut buf);
+    recycle_buffer(buf);
+    res
+}
+
+fn scan_file_with(
+    path: &Path,
+    o: &SearchOptions,
+    stats: &mut Stats,
+    buf: &mut Vec<u8>,
+) -> io::Result<Option<FileHits>> {
     // `-m 0` asks for no match at all: never open the file.
     if o.max_count == Some(0) {
         return Ok(None);
     }
     let mut f = File::open(path)?;
-    let mut buf = vec![0u8; BLOCK];
     stats.files_scanned += 1;
-    let n = f.read(&mut buf)?;
+    let n = f.read(&mut *buf)?;
     if n == 0 {
         return finished(path, o, stats, Scanner::new(o), false);
     }
@@ -598,7 +631,7 @@ fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Op
     stats.bytes_scanned += n as u64;
     sc.feed(&buf[..n]);
     while !sc.done() {
-        let n = f.read(&mut buf)?;
+        let n = f.read(&mut *buf)?;
         if n == 0 {
             break;
         }

@@ -20,6 +20,7 @@ pub mod regex;
 pub mod report;
 pub mod scan;
 pub mod search;
+pub mod simd;
 pub mod unicode;
 
 #[cfg(target_os = "linux")]
