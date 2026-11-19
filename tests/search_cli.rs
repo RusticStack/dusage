@@ -2703,11 +2703,14 @@ fn find_ls_prints_finds_columns_and_a_link_target() {
     assert!(line.ends_with(&shown(&dir, "a.rs")), "{line}");
 
     let linked = stdout(&find_at(&dir, &["-name", "link.md", "-ls"]));
+    // The target's spelling belongs to the platform (Windows can hand back a verbatim
+    // prefix), so the assertion is on the field and the name it ends with.
+    let (_, target) = linked
+        .rsplit_once(" -> ")
+        .unwrap_or_else(|| panic!("a symlink names what it points at: {linked}"));
     assert!(
-        linked
-            .trim_end()
-            .ends_with(&format!("-> {}", shown(&dir, "b.md"))),
-        "a symlink names what it points at: {linked}"
+        target.trim_end().ends_with("b.md"),
+        "the target is the file it points at: {linked}"
     );
     assert!(
         linked.contains("lrwxrwxrwx"),
