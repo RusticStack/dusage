@@ -280,7 +280,7 @@ those docs were written.
 - No `.git/info/exclude` and no global `core.excludesFile`, and ignore files are read from
   each root down, so a `.gitignore` above the root does not apply even though ripgrep honours
   it inside a repository.
-- Short flags do not combine (`-i -n`, not `-in`), and there is no `-f PATTERNFILE`.
+- No `-U` (multi-line) and no `-P` lookaround, as above; those are the two flag-level gaps left.
 
 **Open questions worth measuring later.**
 

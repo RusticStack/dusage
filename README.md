@@ -270,9 +270,9 @@ path. The same three values `dusage` and `fastdel` already use.
 
 **vs ripgrep, grep and find.** Not a drop-in replacement, and not trying to be one. There is
 no PCRE2 `-P`, so no lookaround and no backreferences; no multi-line matching (`-U`); no
-`--follow`, no mmap, no compressed-file search, no lookaround; and
-and short flags do not combine (`-i -n`, not `-in`). `-x` here means `--one-filesystem`, not grep's whole-line
-match. Ignore files are read from the roots down, so a `.gitignore` above the root,
+`--follow`, no mmap, no compressed-file search. `-x` here means `--one-filesystem`, not grep's
+whole-line match. Bundled short flags work (`-in`, `-ilw`, `-inm5`) and `-f PATTERNFILE` reads
+one pattern per line, as grep and rg do. Ignore files are read from the roots down, so a `.gitignore` above the root,
 `.git/info/exclude` and a global `core.excludesFile` are not consulted. The defaults are
 also more aggressive than ripgrep's: the cache list applies everywhere (outside a
 git repository too) and `.gitignore` is honoured outside a repository as well. What you get

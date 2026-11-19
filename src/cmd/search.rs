@@ -29,7 +29,8 @@ OPTIONS:
     -i, --ignore-case      case-insensitive (ASCII folding)
     -w, --word-regexp      match whole words only
     -v, --invert-match     select lines that do not match
-    -e, --regexp PATTERN   pattern to search for; repeatable-free, one pattern
+    -e, --regexp PATTERN   pattern to search for; repeatable
+    -f, --file PATH        read patterns from PATH, one per line; repeatable
     -n, --line-number      print line numbers
     -H, --with-filename    always print the file name
     -h, --no-filename      never print the file name
@@ -158,6 +159,29 @@ fn alternation(patterns: &[String], fixed: bool) -> String {
         .join("|")
 }
 
+/// The patterns in one `-f` file: one per line, blank lines skipped, CRLF accepted.
+fn read_pattern_file(path: &str) -> Result<Vec<String>, Fail> {
+    let data = match path {
+        // A pattern file of `-` is the standard input, as in grep, but only when the haystack
+        // is not itself the standard input: two readers of one stream cannot both have it.
+        "-" => {
+            let mut buf = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut buf)
+                .map_err(|e| Fail::from(format!("-f -: {e}")))?;
+            buf
+        }
+        _ => std::fs::read(path).map_err(|e| Fail::from(format!("-f {path}: {e}")))?,
+    };
+    let text = String::from_utf8_lossy(&data);
+    Ok(text
+        .lines()
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 fn ext_globs(t: &str) -> Result<Vec<String>, String> {
     let exts: &[&str] = match t {
         "rust" | "rs" => &["rs"],
@@ -192,6 +216,8 @@ fn ext_globs(t: &str) -> Result<Vec<String>, String> {
 const SEARCH_VALUE_FLAGS: &[&str] = &[
     "-e",
     "--regexp",
+    "-f",
+    "--file",
     "-A",
     "--after-context",
     "-B",
@@ -312,13 +338,23 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let mut multi_pattern = false;
     let mut given: Vec<String> = a.values("-e").to_vec();
     given.extend(a.values("--regexp").iter().cloned());
-    let (pattern_text, paths) = if given.is_empty() {
+    let mut from_flags = !given.is_empty();
+    let mut patterns_stdin = false;
+    for path in a.values("-f").iter().chain(a.values("--file").iter()) {
+        from_flags = true;
+        patterns_stdin |= path == "-";
+        given.extend(read_pattern_file(path)?);
+    }
+    let (pattern_text, paths) = if !from_flags {
         match a.positionals().split_first() {
             Some((p, rest)) => (p.clone(), rest.to_vec()),
             None => return Err("missing <pattern>".to_string().into()),
         }
     } else {
-        // `-e` may repeat: every pattern is an alternative, as in grep and rg.
+        if given.is_empty() {
+            return Err("no patterns in the pattern file".to_string().into());
+        }
+        // `-e` and `-f` may repeat: every pattern is an alternative, as in grep and rg.
         let fixed = a.flag("-F") || a.flag("--fixed-strings");
         // Several literals become one escaped regex, so the fixed-string path is off.
         multi_pattern = given.len() > 1;
@@ -346,6 +382,13 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     };
     // An explicit path always wins: stdin is only read when `-` names it or nothing else does.
     let read_stdin = scope == Scope::Content && (stdin_wanted || (paths.is_empty() && piped));
+    if patterns_stdin && read_stdin {
+        return Err(
+            "stdin cannot be both the pattern file (-f -) and the text to search"
+                .to_string()
+                .into(),
+        );
+    }
     for r in &roots {
         if !r.exists() {
             return Err(format!("{}: no such file or directory", r.display()).into());
