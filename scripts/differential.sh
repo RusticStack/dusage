@@ -55,6 +55,18 @@ have grep && HAVE_GREP=1
 [ "$HAVE_RG" = 1 ] || warn "rg not found: ripgrep comparisons are skipped"
 [ "$HAVE_GREP" = 1 ] || warn "grep not found: grep comparisons are skipped"
 
+# `du` and `find` are compared against GNU coreutils/findutils only: BSD's versions print
+# different units and accept a different expression list, so a case run against them would
+# fail for a reason the harness cannot explain. `du --version` and `find --version` are the
+# cheapest discriminator and both tools print their banner first.
+have_gnu() { "$1" --version 2>/dev/null | head -n 1 | grep -q GNU; }
+HAVE_DU=0
+have du && have_gnu du && HAVE_DU=1
+[ "$HAVE_DU" = 1 ] || warn "GNU du not found: du comparisons are skipped"
+HAVE_FIND=0
+have find && have_gnu find && HAVE_FIND=1
+[ "$HAVE_FIND" = 1 ] || warn "GNU find not found: find comparisons are skipped"
+
 RG_EXTRA=""
 # ripgrep honours .gitignore only inside a git repository unless told otherwise.
 if [ "$HAVE_RG" = 1 ] && ! have git; then
@@ -179,6 +191,109 @@ make_fixture() {
 
 make_fixture "$WORK"
 
+# --- size fixture: du and find ---------------------------------------------
+# `size/` is the one tree both the `du` and the `find` groups run against, so a case can
+# name a size or an age and both tools see the same entry. Every size below is a whole
+# number of KiB on purpose: dusage rounds each file *up into its block* while GNU du
+# rounds a subtree's total up *once*, so sub-KiB sizes would make the `-k` rows disagree
+# for a rounding reason that has nothing to do with the walk. The `rounding/` tree is the
+# one that demonstrates that difference, deliberately.
+#
+# `many/` holds 400 files of 4096 bytes: the file sizes are already multiples of the 4 KiB
+# allocation unit of the filesystem on purpose, so the only number that can differ between
+# `du -k many` and `dusage du -k many` is the directory inode's own allocation.
+mkfile() { head -c "$2" /dev/zero >"$1"; }
+
+make_size_fixture() {
+    local w=$1/size
+    mkdir -p "$w/sub/deep" "$w/excl" "$w/hl" "$w/aged/empty-dir"
+    mkfile "$w/a.txt" 1024
+    mkfile "$w/b.bin" 5120
+    mkfile "$w/exact.dat" 2048
+    mkfile "$w/kb2.dat" 3072
+    : >"$w/empty.zero"
+    mkfile "$w/big.dat" 102400
+    mkfile "$w/mib3.dat" 3145728
+    mkfile "$w/sub/c.txt" 3072
+    mkfile "$w/sub/deep/d.txt" 7168
+    mkfile "$w/excl/skip.log" 2048
+    mkfile "$w/excl/keep.txt" 1024
+    mkfile "$w/hl/orig.txt" 4096
+    ln "$w/hl/orig.txt" "$w/hl/link2.txt"
+    # A holey file: apparent size 1 MiB, allocated near zero, which is the one row that
+    # shows `du-allocation` without depending on how the filesystem tiles a small file.
+    truncate -s 1048576 "$w/sparse.dat"
+    # Ages are 10 and 100 days, and `-newermt` cuts at 50 days, so every time case has a
+    # 40-day margin on both sides and cannot flip while the suite runs.
+    mkfile "$w/aged/old.txt" 1024
+    mkfile "$w/aged/ancient.txt" 1024
+    mkfile "$w/aged/fresh.txt" 1024
+    mkfile "$w/aged/perm640.txt" 1024
+    chmod 640 "$w/aged/perm640.txt"
+    touch -d '10 days ago' "$w/aged/old.txt"
+    touch -d '100 days ago' "$w/aged/ancient.txt"
+
+    mkdir -p "$1/rounding"
+    printf 'abc' >"$1/rounding/s1"
+    printf 'abcde' >"$1/rounding/s2"
+    printf 'abcdefg' >"$1/rounding/s3"
+    printf 'abcdefghi' >"$1/rounding/s4"
+
+    mkdir -p "$1/many"
+    local i=0
+    while [ "$i" -lt 400 ]; do
+        mkfile "$1/many/f$i.dat" 4096
+        i=$((i + 1))
+    done
+}
+
+# --- compressed fixture: -z -------------------------------------------------
+# The decoder fixtures under tests/fixtures/ are checked in byte for byte, so `-z` is
+# compared on streams a real encoder produced. They are copied into the work tree because
+# the originals live inside this git repository, where rg's ignore rules apply.
+#
+# gzip has no checked-in fixture; it is built here with the gzip binary when one exists,
+# because it is the one format every rg build can read and therefore the only one that can
+# carry the `-z` cases on a machine where rg was built without the others.
+make_zip_fixture() {
+    local src=$REPO/tests/fixtures w=$1/zip
+    mkdir -p "$w"
+    # Two formats ship a plaintext called mixed.txt, so every copy is prefixed: the last
+    # copy would otherwise silently become the expectation of the first.
+    cp "$src/bz2/mixed_200k.bz2" "$w/bz2_200k.bz2" 2>/dev/null
+    cp "$src/bz2/mixed_200k.txt" "$w/bz2_200k.txt" 2>/dev/null
+    cp "$src/bz2/corrupt.bz2" "$w/bz2_corrupt.bz2" 2>/dev/null
+    cp "$src/lz4/mixed-100k.lz4" "$w/lz4_100k.lz4" 2>/dev/null
+    cp "$src/lz4/mixed-100k.txt" "$w/lz4_100k.txt" 2>/dev/null
+    cp "$src/xz/mixed.xz" "$w/xz_mixed.xz" 2>/dev/null
+    cp "$src/xz/mixed.txt" "$w/xz_mixed.txt" 2>/dev/null
+    cp "$src/zstd/text3.zst" "$w/zstd_text3.zst" 2>/dev/null
+    cp "$src/zstd/text.bin" "$w/zstd_text.bin" 2>/dev/null
+    cp "$src/brotli/mixed-q11.br" "$w/br_mixed.br" 2>/dev/null
+    cp "$src/brotli/mixed.txt" "$w/br_mixed.txt" 2>/dev/null
+    printf 'gzip needle line one\ngzip second line needle\nplain tail needle\n' >"$w/gz.txt"
+    if have gzip; then
+        gzip -c "$w/gz.txt" >"$w/gz.txt.gz"
+    fi
+}
+
+make_size_fixture "$WORK"
+make_zip_fixture "$WORK"
+
+# The cut `-newermt` uses: between the 10-day-old and the 100-day-old fixture files, so the
+# row cannot flip while the suite runs.
+NEWER_MT=$(date -u -d '50 days ago' +%Y-%m-%d 2>/dev/null)
+[ -n "$NEWER_MT" ] || NEWER_MT=1970-01-01
+
+# One probe for the whole find-expression group. `src/findexpr.rs` is a library; until the
+# CLI takes an expression, `dusage find . -name '*'` rejects the first token and exits 2,
+# and every expression case is the catalogue entry `findexpr-unwired`.
+FINDEXPR=0
+UNWIRED=0
+if (cd "$WORK/one" && "$BIN" find . -name '*' >/dev/null 2>&1); then
+    FINDEXPR=1
+fi
+
 # --- helpers ---------------------------------------------------------------
 # Sorted stdout with the `./` prefix removed. Group separators are dropped here: dusage
 # prints one between any two non-adjacent matches, grep and rg only when a context flag is
@@ -187,6 +302,10 @@ make_fixture "$WORK"
 normalize() { sed -e 's|^\./||' -e '/^--$/d' | LC_ALL=C sort; }
 # The same, keeping the separators, for the cases that test them.
 normalize_kept() { sed -e 's|^\./||' | LC_ALL=C sort; }
+# `-z` echoes lines out of a decoded stream, and the bzip2 fixture's plaintext holds CRLF
+# lines: dusage drops the trailing `\r` of a CRLF line (catalogue entry `crlf-strip`) while
+# rg echoes it. Only that byte is dropped, on both sides; nothing else is rewritten.
+zip_normalize() { sed -e 's|^\./||' -e 's/\r$//' | LC_ALL=C sort; }
 
 show_diff() {
     if have diff; then
@@ -208,6 +327,11 @@ run_one() {
 selected() {
     [ -z "$ONLY" ] || [ "${1#"$ONLY"}" != "$1" ]
 }
+
+# Lines in a compared output. It rides in the `--verbose` detail of every du, find-expression
+# and `-z` case, because two empty outputs compare equal and would otherwise look like a
+# passing case.
+count() { wc -l <"$1" | tr -d ' '; }
 
 # verdict <expect> <state> <name> <detail>
 verdict() {
@@ -331,6 +455,150 @@ find_case() {
     if ! cmp -s "$out.d.norm" "$out.f.norm"; then
         state=mismatch
         [ "$expect" = eq ] && show_diff "$out.d.norm" "$out.f.norm"
+    fi
+    verdict "$expect" "$state" "$name" "$detail"
+}
+
+# find_expr_case <name> <expect> <tree> <expr> [nul]
+# The same GNU find argv is handed to both tools -- `dusage find . -name '*.txt'` against
+# `find . -name '*.txt'` -- so no row needs translating once the expression language is
+# wired to the CLI. Only stdout is compared, as in `find_case`: find(1) exits 0 even when
+# nothing matched. `nul` switches the splitter from lines to `-print0`'s NUL-terminated
+# records before sorting.
+find_expr_case() {
+    local name=$1 expect=$2 tree=$3 expr=$4 nul=${5:-}
+    # `expr` is one expectation for a capability that may not exist yet: a real `eq` once
+    # the CLI takes expressions, and the catalogue entry `findexpr-unwired` while it does
+    # not. Written as a plain `known:` in the table, a half-wired evaluator would answer
+    # FIXED and never fail the run, which defeats the point.
+    if [ "$expect" = expr ]; then
+        if [ "$FINDEXPR" = 1 ]; then expect=eq; else expect=known:findexpr-unwired; fi
+    fi
+    selected "$name" || {
+        skipped=$((skipped + 1))
+        return 0
+    }
+    if [ "$HAVE_FIND" != 1 ]; then
+        skipped=$((skipped + 1))
+        return 0
+    fi
+    [ "$FINDEXPR" = 1 ] || UNWIRED=$((UNWIRED + 1))
+    local dir="$WORK/$tree" out="$WORK/.case" state=ok
+
+    # shellcheck disable=SC2086
+    run_one "$out.d" "$dir" "$BIN" find $expr
+    # shellcheck disable=SC2086
+    run_one "$out.f" "$dir" find $expr
+    if [ "$nul" = nul ]; then
+        tr '\0' '\n' <"$out.d.out" | LC_ALL=C sort >"$out.d.norm"
+        tr '\0' '\n' <"$out.f.out" | LC_ALL=C sort >"$out.f.norm"
+    else
+        normalize <"$out.d.out" >"$out.d.norm"
+        normalize <"$out.f.out" >"$out.f.norm"
+    fi
+
+    if ! cmp -s "$out.d.norm" "$out.f.norm"; then
+        state=mismatch
+        [ "$expect" = eq ] && show_diff "$out.d.norm" "$out.f.norm"
+    fi
+    verdict "$expect" "$state" "$name" "dusage find vs find(1), $(count "$out.f.norm") line(s)"
+}
+
+# du_case <name> <expect> <tree> <target> <dusage-flags> <du-flags>
+# Both sides get the same start point, so the printed paths already agree and the only
+# normalisation is the sort: dusage prints post-order and GNU du's order follows its own
+# traversal. Sizes, units, the `total` label and the separator are compared as printed.
+# The GNU side is asked for `--apparent-size` (except under `-b`, which implies it, and
+# `--inodes`, which ignores size) because that is the mode dusage documents; plain GNU du
+# reports allocation and is catalogued as `du-allocation`.
+du_case() {
+    local name=$1 expect=$2 tree=$3 target=$4 dflags=${5:-} uflags=${6:-}
+    selected "$name" || {
+        skipped=$((skipped + 1))
+        return 0
+    }
+    if [ "$HAVE_DU" != 1 ]; then
+        skipped=$((skipped + 1))
+        return 0
+    fi
+    local dir="$WORK/$tree" out="$WORK/.case" state=ok
+
+    # shellcheck disable=SC2086
+    run_one "$out.d" "$dir" "$BIN" du $dflags $target
+    # shellcheck disable=SC2086
+    run_one "$out.u" "$dir" du $uflags $target
+    LC_ALL=C sort <"$out.d.out" >"$out.d.norm"
+    LC_ALL=C sort <"$out.u.out" >"$out.u.norm"
+
+    if ! cmp -s "$out.d.norm" "$out.u.norm"; then
+        state=mismatch
+        [ "$expect" = eq ] && show_diff "$out.d.norm" "$out.u.norm"
+    fi
+    verdict "$expect" "$state" "$name" "dusage du vs du(1), $(count "$out.u.norm") line(s)"
+}
+
+# --- -z: one capability probe per format ------------------------------------
+# A format is comparable only when the local rg can decode it faithfully. The probe asks
+# `rg -z` on the stream and `rg` on the plaintext the stream was made from for the same
+# count: that is ripgrep against itself, so it can never mask a dusage bug, and it catches
+# both a build without the decoder (brotli in the default feature set: no matches at all)
+# and a decoder that misreads the stream (this rg on lz4 frames: one match in 100 KiB of
+# text). A format that fails the probe is named in the `note:` line before the summary and
+# counted as skipped, never as agreed.
+ZIPDIR="$WORK/.zip"
+ZIP_SKIPS=""
+
+zip_probe() { # zip_probe <fmt> <packed> <plain> <needle> [missing-reason]
+    local fmt=$1 packed=$2 plain=$3 needle=$4 missing=${5:-fixture missing} rp rq
+    mkdir -p "$ZIPDIR"
+    if [ "$HAVE_RG" = 0 ]; then
+        printf 'rg not installed' >"$ZIPDIR/$fmt.why"
+        return 0
+    fi
+    if [ ! -f "$WORK/zip/$packed" ]; then
+        printf '%s' "$missing" >"$ZIPDIR/$fmt.why"
+        return 0
+    fi
+    rq=$(cd "$WORK/zip" && rg -c "$needle" "$plain" 2>/dev/null)
+    rp=$(cd "$WORK/zip" && rg -z -c "$needle" "$packed" 2>/dev/null)
+    if [ -n "$rq" ] && [ "$rp" = "$rq" ]; then
+        : >"$ZIPDIR/$fmt.ok"
+    elif [ -z "$rp" ]; then
+        printf 'rg -z reads no %s stream from %s' "$fmt" "$packed" >"$ZIPDIR/$fmt.why"
+    else
+        printf 'rg -z counts %s in %s, its own plaintext search counts %s' \
+            "$rp" "$packed" "$rq" >"$ZIPDIR/$fmt.why"
+    fi
+}
+
+# zip_case <name> <expect> <fmt> <packed> <needle> <dusage-flags> <rg-flags>
+zip_case() {
+    local name=$1 expect=$2 fmt=$3 packed=$4 needle=$5 dflags=${6:-} rflags=${7:-}
+    selected "$name" || {
+        skipped=$((skipped + 1))
+        return 0
+    }
+    if [ ! -f "$ZIPDIR/$fmt.ok" ]; then
+        skipped=$((skipped + 1))
+        ZIP_SKIPS="$ZIP_SKIPS${ZIP_SKIPS:+, }$name ($(cat "$ZIPDIR/$fmt.why" 2>/dev/null))"
+        return 0
+    fi
+    local dir="$WORK/zip" out="$WORK/.case" state=ok
+
+    # shellcheck disable=SC2086
+    run_one "$out.d" "$dir" "$BIN" search $dflags "$needle" "$packed"
+    zip_normalize <"$out.d.out" >"$out.d.norm"
+    # shellcheck disable=SC2086
+    run_one "$out.r" "$dir" rg $rflags "$needle" "$packed"
+    zip_normalize <"$out.r.out" >"$out.r.norm"
+
+    local detail="dusage -z vs rg -z, $(count "$out.r.norm") line(s)"
+    if ! cmp -s "$out.d.norm" "$out.r.norm"; then
+        state=mismatch
+        [ "$expect" = eq ] && show_diff "$out.d.norm" "$out.r.norm"
+    elif [ "$(cat "$out.d.code")" != "$(cat "$out.r.code")" ]; then
+        state=mismatch
+        detail="$detail, exit $(cat "$out.d.code") vs rg $(cat "$out.r.code")"
     fi
     verdict "$expect" "$state" "$name" "$detail"
 }
@@ -471,6 +739,102 @@ find_case find_empty eq plain . '--empty *' '. -empty'
 # in. `tests/search_cli.rs` asserts the exact bytes instead.
 
 say ""
+say "== find expressions: dusage find vs GNU find (size/)"
+# One row per test the expression language has to reproduce, run as the same argv on both
+# sides. `expr` means: a real `eq` comparison once the CLI takes expressions, the catalogue
+# entry `findexpr-unwired` while it does not. Today `src/findexpr.rs` is only a library, so
+# `dusage find` takes a glob positional, answers the first expression token with "unknown
+# option" and exits 2; the rows become live comparisons the moment that changes, without an
+# edit here, and a half-wired evaluator then fails the run instead of passing quietly.
+find_expr_case find_expr_name expr size '. -name *.txt'
+find_expr_case find_expr_iname expr size '. -iname *.TXT'
+find_expr_case find_expr_path expr size '. -path *aged*'
+find_expr_case find_expr_type_file expr size '. -type f'
+find_expr_case find_expr_type_dir expr size '. -type d'
+find_expr_case find_expr_size_plus_k expr size '. -type f -size +4k'
+find_expr_case find_expr_size_minus_k expr size '. -type f -size -4k'
+find_expr_case find_expr_size_exact_k expr size '. -type f -size 3k'
+find_expr_case find_expr_size_plus_m expr size '. -type f -size +1M'
+find_expr_case find_expr_mtime_plus expr size '. -type f -mtime +5'
+find_expr_case find_expr_mtime_minus expr size '. -type f -mtime -1'
+find_expr_case find_expr_mtime_exact expr size '. -type f -mtime 0'
+find_expr_case find_expr_mmin_plus expr size '. -type f -mmin +60'
+find_expr_case find_expr_mmin_minus expr size '. -type f -mmin -60'
+find_expr_case find_expr_newermt expr size ". -newermt $NEWER_MT"
+find_expr_case find_expr_empty expr size '. -empty'
+find_expr_case find_expr_perm expr size '. -type f -perm 640'
+find_expr_case find_expr_links expr size '. -type f -links 2'
+find_expr_case find_expr_maxdepth expr size '. -maxdepth 1'
+find_expr_case find_expr_mindepth expr size '. -mindepth 2'
+find_expr_case find_expr_prune expr size '. -name aged -prune -o -name *.txt -print'
+find_expr_case find_expr_print0 expr size '. -name *.txt -print0' nul
+find_expr_case find_expr_printf expr size '. -type f -printf %8s|%-28p|%.6f\n'
+find_expr_case find_expr_combined expr size '( -name *.txt -o -name *.bin ) ! -path *aged*'
+
+say ""
+say "== du: dusage du vs GNU du (size/)"
+# The GNU side asks for `--apparent-size` throughout: that is dusage's documented unit, and
+# the allocation default is the catalogue entry `du-allocation` instead of a rewrite of
+# these numbers. `-b` implies apparent size and `--inodes` ignores size, so neither row
+# passes it. Paths, units and the `total` label are compared exactly; only the sort is
+# applied, because the two tools print post-order in their own traversal order.
+du_case du_default eq . size '' '--apparent-size'
+du_case du_all eq . size '-a' '-a --apparent-size'
+du_case du_summarize eq . size '-s' '-s --apparent-size'
+du_case du_total eq . size '-c' '-c --apparent-size'
+du_case du_max_depth_1 eq . size '-d 1' '-d 1 --apparent-size'
+du_case du_bytes eq . size '-b' '-b'
+du_case du_kib eq . size '-k' '-k --apparent-size'
+du_case du_mib eq . size '-m' '-m --apparent-size'
+du_case du_human eq . size '-h' '-h --apparent-size'
+du_case du_si eq . size '--si' '--si --apparent-size'
+du_case du_inodes eq . size '--inodes' '--inodes'
+du_case du_separate_dirs eq . size '-S' '-S --apparent-size'
+du_case du_threshold eq . size '-t 2K' '-t 2K --apparent-size'
+du_case du_threshold_neg eq . size '-t -3K' '-t -3K --apparent-size'
+du_case du_exclude eq . size '--exclude *.log' '--exclude=*.log --apparent-size'
+du_case du_exclude_dir eq . size '--exclude excl' '--exclude=excl --apparent-size'
+# One hardlink pair under -a: the directory is one inode's worth (4096 bytes, not 8192) and
+# only one of the two names is listed, which is what both tools do with a deduplicated pair.
+du_case du_hardlinks eq . size/hl '-a -b' '-a -b'
+# A zero-length file and a 1 KiB one, named as two start points, so both a file root and
+# the empty-file arithmetic are pinned.
+du_case du_zero_length eq . 'size/empty.zero size/a.txt' '-b' '-b'
+
+say ""
+say "== du: catalogued differences"
+# Plain GNU du reports allocated blocks; dusage reports apparent size. The holey fixture
+# file makes the gap structural rather than a rounding coincidence.
+du_case du_allocation known:du-allocation . size '' ''
+# 400 files of 4096 bytes: allocation equals apparent size per file, so the only difference
+# left is the blocks the directory inode itself allocates (8 KiB here), which dusage counts
+# as zero.
+du_case du_dir_inode known:du-dir-inode . many '' ''
+# Sizes below 1 KiB: dusage rounds each file up into its block, GNU rounds the subtree total
+# once, so 4 files of 3..9 bytes are 4 blocks here and 1 there.
+du_case du_block_rounding known:du-block-rounding . rounding '' '--apparent-size'
+
+say ""
+say "== -z: dusage search -z vs rg -z (zip/)"
+zip_probe gzip gz.txt.gz gz.txt needle 'gzip not installed: no gz.txt.gz fixture'
+zip_probe bzip2 bz2_200k.bz2 bz2_200k.txt needle
+zip_probe lz4 lz4_100k.lz4 lz4_100k.txt needle
+zip_probe xz xz_mixed.xz xz_mixed.txt needle
+zip_probe zstd zstd_text3.zst zstd_text.bin alpha
+zip_probe brotli br_mixed.br br_mixed.txt alpha
+zip_case zip_gzip eq gzip gz.txt.gz needle '-z' '-z'
+zip_case zip_bzip2 eq bzip2 bz2_200k.bz2 needle '-z' '-z'
+zip_case zip_lz4 eq lz4 lz4_100k.lz4 needle '-z' '-z'
+zip_case zip_xz eq xz xz_mixed.xz needle '-z' '-z'
+zip_case zip_zstd eq zstd zstd_text3.zst alpha '-z' '-z'
+zip_case zip_brotli eq brotli br_mixed.br alpha '-z' '-z'
+# A stream that starts like bzip2 and is corrupt must fail on both sides, not answer from a
+# half expansion. stdout is empty either way, so this row is carried by the exit status.
+zip_case zip_corrupt eq bzip2 bz2_corrupt.bz2 needle '-z -F' '-z -F'
+zip_case zip_count eq bzip2 bz2_200k.bz2 needle '-z -c' '-z -c'
+zip_case zip_only_matching eq xz xz_mixed.xz needle '-z -o' '-z -o'
+
+say ""
 say "== known differences"
 doc_case empty_pattern plain 2 search "" .
 doc_case attached_short_value plain 0 search -C1 needle .
@@ -489,6 +853,11 @@ content_case max_columns known:max-columns rg plain . needle '--max-columns 20' 
 content_case max_columns_preview eq rg plain . needle '--max-columns 20 --max-columns-preview' '--max-columns 20 --max-columns-preview' -rE
 
 say ""
+# A skipped case is never counted as agreed. The two notes below say why a case the table
+# lists did not run, so a shrinking corpus cannot pass for a green run.
+[ -n "$ZIP_SKIPS" ] && say "note: skipped, the reference cannot read the format -- $ZIP_SKIPS"
+[ "$FINDEXPR" = 0 ] && [ "$UNWIRED" -gt 0 ] &&
+    say "note: $UNWIRED find-expression case(s) are known differences -- src/findexpr.rs is not wired to the CLI yet"
 [ -n "$FAILED_NAMES" ] && say "unexpected mismatches:$FAILED_NAMES"
 say "summary: $agreed agreed, $differed known differences, $failed unexpected mismatch(es), $skipped skipped"
 [ "$failed" -gt 0 ] && exit 1
