@@ -461,6 +461,37 @@ impl Regex {
         Some(spans_from_slots(&slots, |i| i))
     }
 
+    /// True when some instruction in the program permits a newline, which means a match could
+    /// straddle a line and a block scan could not attribute it to one line.
+    pub fn can_match_newline(&self) -> bool {
+        self.prog.iter().any(|inst| match inst {
+            Inst::Set(set) => set.permits(b'\n'),
+            _ => false,
+        })
+    }
+
+    /// The position just past the first match ending at or after `from`, worked out by the
+    /// forward automaton alone. A block scan uses it to find the lines worth looking at, and
+    /// leaves the exact span to a per-line search.
+    pub fn accept_end(&self, hay: &[u8], from: usize) -> Option<usize> {
+        if from > hay.len() {
+            return None;
+        }
+        if let Some(lit) = &self.lit {
+            let i = crate::bytes::memmem_from(hay, lit, from)?;
+            return Some(i + lit.len());
+        }
+        if let Some((_, finder)) = &self.run {
+            finder.find_from(hay, from)?;
+        }
+        match with_dfa(self, |c| c.forward_end(&self.prog, hay, from)) {
+            Some(Some(Some(end))) => Some(end),
+            // The automaton proved there is no match; that is an answer, not a fallback.
+            Some(Some(None)) => None,
+            _ => self.find_at(hay, from).map(|m| m.end),
+        }
+    }
+
     /// True when the pattern uses no line-relative assertion, so a whole block can be
     /// matched at once: `^` and `$` would otherwise mean "start and end of the block".
     pub fn assertion_free(&self) -> bool {
@@ -1806,6 +1837,26 @@ impl DfaCache {
         Some(run_vm(prog, hay, start, false))
     }
 
+    /// The end of the first match, from the forward automaton only.
+    fn forward_end(
+        &mut self,
+        prog: &[Inst<ByteSet>],
+        hay: &[u8],
+        start: usize,
+    ) -> Option<Option<usize>> {
+        if self.off {
+            return None;
+        }
+        if self.start_only && start > 0 {
+            return Some(None);
+        }
+        let end = self.forward(prog, hay, start);
+        if end.is_none() {
+            self.off = true;
+        }
+        end
+    }
+
     /// True when the pattern matches anywhere in `hay`.
     fn is_match(&mut self, prog: &[Inst<ByteSet>], hay: &[u8], start: usize) -> Option<bool> {
         if self.off {
@@ -1828,6 +1879,10 @@ impl DfaCache {
         start: usize,
     ) -> Option<Option<usize>> {
         let hopeless = self.start_only;
+        // Past the end there is nothing to consume and nothing to find.
+        if start > hay.len() {
+            return Some(None);
+        }
         if self.skip.is_none() {
             self.skip = Some(self.fwd.skip_set(prog));
         }
@@ -3502,6 +3557,25 @@ mod tests {
                 assert_eq!(re.is_match(hay), reference(pat, hay), "{pat:?} on {hay:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod block_probe_tests {
+    use super::*;
+
+    #[test]
+    fn the_forward_probe_answers_past_the_end() {
+        // A block scan can ask about a position one past the last byte; the automaton has no
+        // answer to give, and must say so rather than index out of bounds.
+        let re = Regex::new("alpha|needle").unwrap();
+        assert_eq!(re.accept_end(b"needle here", 0), Some(6));
+        assert_eq!(re.accept_end(b"needle here", 7), None);
+        assert_eq!(
+            re.accept_end(b"needle here", b"needle here".len() + 1),
+            None
+        );
+        assert_eq!(re.accept_end(b"", 0), None);
     }
 }
 

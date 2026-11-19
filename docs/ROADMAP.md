@@ -233,18 +233,30 @@ output shapes) and by the unit suites in `regex`, `glob`, `ignore`, `pattern`, `
 and `preset`; every invocation in the README and the skill was run against the binary while
 those docs were written.
 
-- `search`: a walk plus a streaming line scanner, with `-i -w -v -n -H -h -l -L -c -o -q -a
-  -F -e -g -t -A -B -C -m -j --max-depth --max-filesize --max-columns --encoding --hidden
-  --no-ignore -x --json --color --stats`.
-- `find`: glob or `-F` substring over relative paths, with `-t --ext --size --older --newer
-  --dirs --files --long --json` and the same walk filters.
+- `search`: a walk plus a streaming line scanner, with `-i -s -S -w -v -n -H -h -l -L -c
+  --count-matches -o -r -q -a -F -P -E -G -e -f -g --iglob -t -T --type-list --type-add
+  --type-clear -A -B -C -m -j --max-depth --max-filesize --max-columns
+  --max-columns-preview --encoding --hidden --no-ignore --no-ignore-vcs/-dot/-parent/-files
+  -u -x --follow -U --multiline-dotall -z -Z --null-data --passthru --sort --sortr --column
+  --byte-offset --heading --line-regexp --include --exclude --exclude-dir --binary-files -I
+  -d --pre --pre-glob --json --color --stats`.
+- `find`: glob or `-F` substring over relative paths, with `-i --name --full-path -t --ext
+  --size --older --newer --newermt --newerat --newerct --empty --mindepth --dirs --files
+  --long --json --follow` and the same walk filters.
 - A regex engine of our own (`regex.rs`): Thompson NFA, run by a lazily built DFA (one
   table lookup per byte) with the Pike VM underneath it, no backtracking, so a pathological
   pattern costs time, never exponential time. A plain-literal pattern skips it for a byte
   scan, and the rest is prefiltred twice: by a single mandatory byte and by the longest run of
   bytes every match must contain (`.go` for `[A-Z][a-zA-Z0-9_]*\.go`), with the run's skip plan
   built once at compile time. Together they took regex counting from 348 ms to 220 ms on
-  `/usr/local/go`.
+  `/usr/local/go`. A block scan now runs regexes as well as literals: the forward automaton
+  alone finds where a match ends, which is enough to say which line to look at, and the exact
+  span is worked out afterwards on that one line. That is only sound for a pattern with no
+  line-relative assertion and no instruction that permits a newline, and only for a pattern
+  that does not need the character program, which `Pattern::block_re` checks. A pattern that
+  never matches is now slightly faster than ripgrep (`ZZZ[A-Z]qqq`: 80 ms against 90 ms);
+  the 2.4x loss that remains is for patterns that match often, where the per-byte automaton
+  walk is the cost and ripgrep's is more than twice as fast.
 - Ignore handling close enough to ripgrep to be unsurprising: the built-in cache list, then
   `.gitignore` and `.ignore` per directory with deeper files winning and `!` re-including,
   then `-g`; a positive `-g` switches the ignore layers off. `--no-ignore` switches them off
