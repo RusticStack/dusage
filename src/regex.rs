@@ -443,13 +443,13 @@ impl Regex {
         if let (Some(cap), Some(_)) = (&self.cap_chars, &self.cprog) {
             if !hay.is_ascii() {
                 if let Ok(text) = std::str::from_utf8(hay) {
-                    if text.is_char_boundary(start) {
-                        let (chars, bytes) = decode(text);
-                        let ch_start = bytes.partition_point(|&at| at < start);
-                        if let Some((_, slots)) = run_capture(cap, &chars[..], ch_start, nslots) {
-                            return Some(spans_from_slots(&slots, |i| bytes[i]));
-                        }
-                    }
+                    let (chars, bytes) = decode(text);
+                    let ch_start = bytes.partition_point(|&at| at < start);
+                    // The character program owns this haystack, exactly as it does in
+                    // `find_at`: its no-match is the answer, not a reason to ask the byte
+                    // program, whose idea of `\w` and `\b` is a different one.
+                    let (_, slots) = run_capture(cap, &chars[..], ch_start, nslots)?;
+                    return Some(spans_from_slots(&slots, |i| bytes[i]));
                 }
             }
         }
@@ -683,6 +683,8 @@ where
                 sp,
                 &mut st,
             );
+            // As in `run_vm_scratch`: the queued threads outrank the match this seed made.
+            st.cut = false;
         }
         let Some(sym) = hay.sym(sp) else {
             break;
@@ -802,7 +804,9 @@ struct Thread {
 #[derive(Default)]
 struct Pending {
     best: Option<Match>,
-    /// A match was recorded in this step: lower-priority threads are dropped.
+    /// A match was recorded in one epsilon closure of this step: the alternatives that
+    /// closure would add after it are lower priority and are dropped. Threads already
+    /// queued when the closure started outrank it and are untouched.
     cut: bool,
 }
 
@@ -877,6 +881,11 @@ where
         st.cut = false;
         if st.best.is_none() && !(anchored && sp > start) {
             add_thread(prog, clist, cl_marks, 0, sp, hay, sp, &mut st);
+            // That closure reaching `Match` only outranks what follows *it*: the threads
+            // already queued here were seeded at earlier positions and so have a higher
+            // priority, and their byte must still be offered to them. Clearing the cut
+            // here is what lets a greedy repeat outgrow the empty match it can also make.
+            st.cut = false;
         }
         let Some(sym) = hay.sym(sp) else {
             // Past the last symbol: the closures above have recorded any match that
@@ -1720,6 +1729,11 @@ fn strip_groups(n: &Node) -> Node {
 /// Alternation and repetition order is kept because only the language matters here — the VM
 /// settles leftmost-first — and a character outside ASCII stays as it is: it consumes no
 /// byte in the byte program, so it can neither match nor anchor anything there.
+///
+/// Assertions are kept as they are, including `^`, `$`, `\A` and `\z`: the walk reads the
+/// haystack leftwards but keeps counting in haystack offsets, so `\z` still asks about the
+/// text end and must stay `\z`. Flipping the text anchors into each other, as this once did,
+/// hid the start of every match that reaches the end of the haystack.
 fn reverse_node(n: &Node) -> Node {
     match n {
         Node::Empty => Node::Empty,
@@ -1734,13 +1748,7 @@ fn reverse_node(n: &Node) -> Node {
             Node::Repeat(Box::new(reverse_node(inner)), *min, *max, *greedy)
         }
         Node::Group(i, inner) => Node::Group(*i, Box::new(reverse_node(inner))),
-        Node::Assert(a) => Node::Assert(match a {
-            Assert::StartText => Assert::EndText,
-            Assert::EndText => Assert::StartText,
-            Assert::StartLine => Assert::EndLine,
-            Assert::EndLine => Assert::StartLine,
-            same => *same,
-        }),
+        Node::Assert(a) => Node::Assert(*a),
     }
 }
 
@@ -3649,6 +3657,56 @@ mod tests {
     }
 
     #[test]
+    fn a_greedy_repeat_outgrows_the_empty_match_at_the_same_start() {
+        // Both readings start at 0: the repeat consuming the line, and the empty match the
+        // same repeat can make without consuming anything. Greedy prefers the first, so the
+        // threads queued at a position must get their byte before an empty match counts.
+        for (pat, hay, want) in [
+            (".*", "abc", (0, 3)),
+            ("a*", "aaa", (0, 3)),
+            ("x*", "xa", (0, 1)),
+            ("[a-z]*", "abc1", (0, 3)),
+            (r"\w*", "abc def", (0, 3)),
+            ("a*b", "aab", (0, 3)),
+        ] {
+            assert_eq!(m(pat, hay), Some(want), "{pat:?} on {hay:?}");
+        }
+        // The capture program runs the same step and must agree.
+        let re = Regex::new("(.*)").unwrap();
+        assert_eq!(
+            re.captures_at(b"abc", 0),
+            Some(vec![Some((0, 3)), Some((0, 3))]),
+            "group 1 spans exactly the whole match"
+        );
+        // A lazy repeat still prefers the empty match, and the search resumes there.
+        assert_eq!(m(".*?", "abc"), Some((0, 0)));
+    }
+
+    #[test]
+    fn text_anchors_do_not_move_the_start_the_reverse_walk_finds() {
+        // `.*\z` runs from 4 to the end of the haystack; the `\A` branch matches empty at 5.
+        // Leftmost-first prefers the match that starts first, and the reverse walk has to
+        // see `\z` where it holds — at the text end — to report that start at all.
+        let re = Regex::new(r".*\z|\A").unwrap();
+        assert_eq!(
+            re.find_at(b"bc1bb", 4).map(|m| (m.start, m.end)),
+            Some((4, 5))
+        );
+        let re = Regex::new(r"a{1,3}(\z|[^abc]{1,3}|[^abc]*){2}|(\A.+)").unwrap();
+        assert_eq!(
+            re.find(b"0\tabbX").map(|m| (m.start, m.end)),
+            Some((0, 6)),
+            "the (\\A.+) branch matches at offset 0"
+        );
+        // A match that ends at the text end keeps the DFA: the reverse walk answers, so the
+        // cache is not abandoned for the rest of the thread.
+        let re = Regex::new("abc$").unwrap();
+        assert_eq!(re.find(b"xabc"), Some(Match { start: 1, end: 4 }));
+        assert_eq!(re.find(b"xabc\n"), None);
+        with_dfa(&re, |c| assert!(!c.off, "the reverse walk found the start")).unwrap();
+    }
+
+    #[test]
     fn dfa_path_is_used() {
         let re = Regex::new("[0-9]+z").unwrap();
         assert!(re.literal().is_none());
@@ -3813,6 +3871,31 @@ mod capture_tests {
         assert_eq!(got[0], Some((0, "é—ü".len())));
         assert_eq!(got[1], Some((0, "é".len())));
         assert_eq!(got[2], Some(("é—".len(), "é—ü".len())));
+    }
+
+    #[test]
+    fn a_character_program_miss_is_not_a_byte_program_question() {
+        // `é` is one word character, so both positions of this one-character haystack are
+        // word boundaries and `\B` cannot match. Its bytes `c3 a9` are both non-word, so the
+        // byte program would report a non-boundary at 0; the character path's answer is
+        // final, exactly as it is in `find_at`.
+        let re = Regex::new(r"(\B)").unwrap();
+        assert!(
+            re.is_unicode(),
+            "the character program is the one that answers"
+        );
+        assert_eq!(re.find("é".as_bytes()), None);
+        assert_eq!(re.captures_at("é".as_bytes(), 0), None);
+        // Offsets inside a character are read the way `find_at` reads them too, so the two
+        // entry points agree on every offset of a text haystack.
+        let hay = "aé".as_bytes();
+        for at in 0..=hay.len() {
+            assert_eq!(
+                re.captures_at(hay, at).map(|c| c[0]),
+                re.find_at(hay, at).map(|m| Some((m.start, m.end))),
+                "captures_at and find_at from {at}"
+            );
+        }
     }
 
     #[test]
