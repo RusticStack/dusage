@@ -3,13 +3,14 @@
 use super::Fail;
 use crate::cli::{self, parse_age, parse_size, Args};
 use crate::encodings::Encoding;
+use crate::findexpr::{self, Ctx, ExecRequest, Ids, Sink};
 use crate::glob::Glob;
 use crate::pattern::Pattern;
 use crate::report;
-use crate::search::{search, Scope, SearchOptions, Segment, SortKey};
+use crate::search::{search, walk_expr, Scope, SearchOptions, Segment, SortKey};
 use std::io::Read;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const SEARCH_HELP: &str = "dusage search - search file contents (grep/rg replacement)
@@ -137,11 +138,46 @@ const FIND_HELP: &str = "dusage find - find files and directories by name or pat
 
 USAGE:
     dusage find [OPTIONS] <glob> [paths...]
-    dusage ls   [OPTIONS] <glob> [paths...]      (alias)
+    dusage find [OPTIONS] [paths...] <expression...>
+    dusage ls   ...                                    (alias)
 
-The pattern is a glob matched against the path relative to each root, or against the file
-name when it has no '/': * ? **, [...] and [!...] classes, and a trailing / for directories.
-Prefix with ! to exclude instead. Use --fixed for a plain substring match on the path.
+The first form takes a glob matched against the path relative to each root, or against the
+file name when it has no '/': * ? **, [...] and [!...] classes, and a trailing / for
+directories. Prefix with ! to exclude instead. Use --fixed for a plain substring match.
+
+The second form runs a find(1) expression: the first argument that is not one of the options
+below and starts with '-' (or is '!', '(' or ')') begins it, the arguments before it are the
+starting points, and everything after it belongs to the expression. So 'dusage find . -name
+\"*.rs\" -o -type d' is find's own command line. `-name`/`-iname`, `-path`/`-ipath`, `-regex`,
+`-type`, `-size`, `-empty`, `-perm`, `-user`/`-group`/`-uid`/`-gid`, `-links`, `-inum`,
+`-newer*`, `-mtime`/`-atime`/`-ctime` and their -mmin forms, `-fstype`, `-true`, `-false`,
+`-a`/`-and`, `-o`/`-or`, `!`/`-not` and '(' ')' are tests; `-print`, `-print0`, `-printf`,
+`-ls`, `-exec`, `-execdir` are actions, and an expression with no action prints each match,
+so 'dusage find . -name \"*.rs\"' lists the same paths the glob form does.
+
+The expression also carries find's global options, and those win over the option of the same
+name below because they are applied after it: -maxdepth N, -mindepth N, -depth (report a
+directory after its contents), -xdev (stay on one filesystem) and -follow. -prune stops the
+walk descending into the directory it matched (a no-op under -depth, as in find), and -quit
+ends the run. Exit status is 0 when something was printed or the expression was true for some
+entry, 1 when nothing was, and 2 on an error.
+
+-exec and -execdir run commands, which is the one way this read-only tool writes anything, so
+they are refused with exit 2 unless --allow-exec is given. The command is run directly, with
+no shell: every '{}' in every argument is replaced by the entry's path, and a trailing
+'{} +' collects the paths into one invocation run when the walk ends. The command's exit
+status is the predicate's value. -delete is always refused, with or without --allow-exec.
+-execdir runs the command in the entry's directory with its path as ./name, and its '+'
+form runs once per directory. An expression holding both -exec and -execdir runs both the
+-exec way: the parsed request carries the command and the terminator, not which predicate
+asked for it.
+
+The options that describe the walk carry over: --hidden, --no-ignore and friends, -g/--glob,
+-t/--type, --ext, --max-depth, --mindepth, -x, --follow and --allow-exec. --files, --dirs and
+--empty become the matching test. The options that describe the glob itself are refused with
+a message naming the expression spelling (-F, -i, --name, --full-path, --size, --older,
+--newer, --newermt, --newerat, --newerct, -Z, --long, --sort, --sortr, --json), because
+silently ignoring them would print what they did not ask for.
 
 OPTIONS:
     -F, --fixed            match the pattern as a substring of the path
@@ -173,7 +209,8 @@ OPTIONS:
     -d, --directories A    recurse (default) or skip: whether to descend into directories
         --iglob PATTERN    the same, matched without case
     --sort KEY             result order: path (default), none, modified, accessed, created
-                           (each oldest first)
+                           (each oldest first); ignored by an expression walk, which prints
+                           in find's order
     --sortr KEY            the same, reversed
     --hidden               also look at hidden files and directories
     --no-ignore            do not skip .gitignore/.ignore rules or cache directories
@@ -188,7 +225,8 @@ OPTIONS:
     --follow               follow symbolic links, walking each real directory once
                            (ripgrep spells this -L; here -L means --files-without-match)
     -x, --one-filesystem   stay on the starting filesystem
-    --json                 machine-readable output
+    --allow-exec           let an expression's -exec and -execdir run commands
+    --json                 machine-readable output (the glob form; not with an expression)
     --color[=WHEN]         WHEN is always, never or auto (default auto)
     -h, --help             this text
     -V, --version          print the version
@@ -790,68 +828,82 @@ fn take_dash_zero(raw: &mut Vec<String>) -> bool {
     seen
 }
 
+/// The flags `dusage find` takes before its pattern or expression, and the ones that carry
+/// a value. The expression splitter reads the same tables, so a flag's value is never
+/// mistaken for the start of an expression.
+const FIND_VALUE_FLAGS: &[&str] = &[
+    "-g",
+    "--glob",
+    "-t",
+    "--type",
+    "--ext",
+    "--size",
+    "--older",
+    "--newer",
+    "--newermt",
+    "--newerat",
+    "--newerct",
+    "--max-depth",
+    "--mindepth",
+    "--sort",
+    "--sortr",
+];
+
+const FIND_BOOL_FLAGS: &[&str] = &[
+    "-F",
+    "--fixed",
+    "-i",
+    "--ignore-case",
+    "--name",
+    "--full-path",
+    "--empty",
+    "--dirs",
+    "--files",
+    "--long",
+    "--hidden",
+    "--no-ignore",
+    "--no-ignore-vcs",
+    "--no-ignore-dot",
+    "--no-ignore-parent",
+    "--no-ignore-global",
+    "--ignore-file-case-insensitive",
+    "--no-ignore-files",
+    "--follow",
+    "-x",
+    "--one-filesystem",
+    "--one-file-system",
+    "--no-messages",
+    "--type-list",
+    "--json",
+    "--color",
+    "-Z",
+    "--null",
+    "--allow-exec",
+    "--help",
+    "-V",
+    "--version",
+];
+
 fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let color_mode = take_color_flag(&mut raw);
     let heading = take_heading(&mut raw);
     let dash_zero = take_dash_zero(&mut raw);
     let unrestricted = take_unrestricted(&mut raw);
+    let found = if scope == Scope::Paths {
+        split_find_args(raw)
+    } else {
+        FindArgs {
+            args: raw,
+            roots: Vec::new(),
+            expr: Vec::new(),
+        }
+    };
     let (value_flags, bool_flags): (&[&str], &[&str]) = if scope == Scope::Content {
         (SEARCH_VALUE_FLAGS, SEARCH_BOOL_FLAGS)
     } else {
-        (
-            &[
-                "-g",
-                "--glob",
-                "-t",
-                "--type",
-                "--ext",
-                "--size",
-                "--older",
-                "--newer",
-                "--newermt",
-                "--newerat",
-                "--newerct",
-                "--max-depth",
-                "--mindepth",
-                "--sort",
-                "--sortr",
-            ],
-            &[
-                "-F",
-                "--fixed",
-                "-i",
-                "--ignore-case",
-                "--name",
-                "--full-path",
-                "--empty",
-                "--dirs",
-                "--files",
-                "--long",
-                "--hidden",
-                "--no-ignore",
-                "--no-ignore-vcs",
-                "--no-ignore-dot",
-                "--no-ignore-parent",
-                "--no-ignore-global",
-                "--ignore-file-case-insensitive",
-                "--no-ignore-files",
-                "--follow",
-                "-x",
-                "--one-filesystem",
-                "--one-file-system",
-                "--no-messages",
-                "--type-list",
-                "--json",
-                "--color",
-                "-Z",
-                "--null",
-                "--help",
-                "-V",
-                "--version",
-            ],
-        )
+        (FIND_VALUE_FLAGS, FIND_BOOL_FLAGS)
     };
-    let a = Args::parse(raw, value_flags, bool_flags)?;
+    let a = Args::parse(found.args, value_flags, bool_flags)?;
     let mut types = Types::new();
     for name in a.values("--type-clear").iter() {
         types.clear(name);
@@ -879,6 +931,11 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     }
     if a.flag("-V") || a.flag("--version") {
         return write_out(&format!("dusage {}\n", env!("CARGO_PKG_VERSION")));
+    }
+    // `find` accepts a whole expression in place of the positional glob; the splitter
+    // above has already taken its tokens out of the argument list.
+    if !found.expr.is_empty() {
+        return run_find_expression(&a, &found.expr, &found.roots, &types, color_mode.as_deref());
     }
     let basic = a.flag("-G") || a.flag("--basic-regexp");
     let mut multi_pattern = false;
@@ -1439,6 +1496,546 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     } else {
         Err(Fail(1, String::new()))
     }
+}
+
+/// Where `dusage find`'s arguments divide into flags, starting points and a find expression.
+struct FindArgs {
+    /// Everything the shared parser sees: our own flags and their values.
+    args: Vec<String>,
+    /// The starting points written before the expression.
+    roots: Vec<String>,
+    /// The expression's tokens, empty for the `<glob> [paths...]` form.
+    expr: Vec<String>,
+}
+
+/// Split the arguments at the first token that begins a find expression.
+///
+/// `dusage find` keeps its positional glob, so a run is an expression only when one of its
+/// arguments is expression syntax: a token that starts with `-` and is not one of our own
+/// flags, or a bare `!`, `(` or `)`. Everything before that token is a starting point (the
+/// glob, for the form without an expression) and everything from it on is the expression,
+/// which is find's own order: `find [paths...] [expression]`.
+///
+/// Our own flags are recognised wherever they appear — find's expression has no `--`-spelled
+/// predicate, and `--allow-exec` would otherwise have to sit before the action that needs it
+/// — except inside a `-exec` command, where every token belongs to the command.
+fn split_find_args(raw: Vec<String>) -> FindArgs {
+    let mut args = Vec::with_capacity(raw.len());
+    let mut roots = Vec::new();
+    let mut expr = Vec::new();
+    let mut in_expr = false;
+    let mut in_exec = false;
+    let mut i = 0;
+    while i < raw.len() {
+        let tok = raw[i].clone();
+        i += 1;
+        let ours =
+            !in_exec && (FIND_BOOL_FLAGS.contains(&tok.as_str()) || tok.starts_with("--color="));
+        if ours {
+            args.push(tok);
+            continue;
+        }
+        if !in_exec && FIND_VALUE_FLAGS.contains(&tok.as_str()) {
+            args.push(tok);
+            if let Some(v) = raw.get(i) {
+                args.push(v.clone());
+                i += 1;
+            }
+            continue;
+        }
+        if tok == "--" && !in_expr {
+            // After the terminator every token is positional, and no expression starts.
+            args.push(tok);
+            args.extend(raw[i..].iter().cloned());
+            break;
+        }
+        if !in_expr
+            && ((tok.len() > 1 && tok.starts_with('-')) || tok == "!" || tok == "(" || tok == ")")
+        {
+            in_expr = true;
+        }
+        if !in_expr {
+            roots.push(tok.clone());
+            args.push(tok);
+            continue;
+        }
+        if tok == "-exec" || tok == "-execdir" {
+            in_exec = true;
+        } else if in_exec && (tok == ";" || tok == "+") {
+            in_exec = false;
+        }
+        expr.push(tok);
+    }
+    FindArgs { args, roots, expr }
+}
+
+/// How many `-exec` and `-execdir` predicates an expression holds, skipping the tokens of
+/// their commands: the pair `(execdir, exec)`.
+fn exec_predicates(tokens: &[String]) -> (usize, usize) {
+    let (mut dir, mut plain) = (0, 0);
+    let mut in_exec = false;
+    for tok in tokens {
+        if in_exec {
+            in_exec = tok != ";" && tok != "+";
+            continue;
+        }
+        match tok.as_str() {
+            "-exec" => plain += 1,
+            "-execdir" => dir += 1,
+            _ => {}
+        }
+        in_exec = tok == "-exec" || tok == "-execdir";
+    }
+    (dir, plain)
+}
+
+/// `dusage find <paths...> <expression...>`: find's own expression language, evaluated by
+/// the walk in `search::walk_expr`, with the actions in [`StdoutSink`].
+fn run_find_expression(
+    a: &Args,
+    tokens: &[String],
+    root_args: &[String],
+    types: &Types,
+    color_mode: Option<&str>,
+) -> Result<(), Fail> {
+    // Flags that describe the glob, or a filter with find's own spelling, do not carry into
+    // an expression; saying so beats printing what the flags did not ask for.
+    for (flag, instead) in [
+        ("-F", "-name and -path"),
+        ("--fixed", "-name and -path"),
+        ("-i", "-iname and -ipath"),
+        ("--ignore-case", "-iname and -ipath"),
+        ("--name", "-name"),
+        ("--full-path", "-path"),
+        ("--size", "-size"),
+        ("--older", "-mtime"),
+        ("--newer", "-mtime"),
+        ("--newermt", "-newermt"),
+        ("--newerat", "-newerat"),
+        ("--newerct", "-newerct"),
+        ("-Z", "-print0"),
+        ("--null", "-print0"),
+        ("--long", "-ls and -printf"),
+        (
+            "--sort",
+            "nothing: an expression walk prints in find's order",
+        ),
+        (
+            "--sortr",
+            "nothing: an expression walk prints in find's order",
+        ),
+        ("--json", "nothing: the actions decide what is printed"),
+    ] {
+        if a.flag(flag) || a.value(flag).is_some() {
+            return Err(Fail(
+                2,
+                format!("{flag} does not combine with a find expression; use {instead}"),
+            ));
+        }
+    }
+    // Our own flags become the expression's leading terms, so an option written inside the
+    // expression comes later and wins.
+    let mut all: Vec<String> = Vec::new();
+    for (flag, option) in [("--max-depth", "-maxdepth"), ("--mindepth", "-mindepth")] {
+        if let Some(v) = a.value(flag) {
+            all.push(option.to_string());
+            all.push(v.to_string());
+        }
+    }
+    if a.flag("-x") || a.flag("--one-filesystem") || a.flag("--one-file-system") {
+        all.push("-xdev".to_string());
+    }
+    if a.flag("--follow") {
+        all.push("-follow".to_string());
+    }
+    if a.flag("--files") {
+        all.extend(["-type".to_string(), "f".to_string()]);
+    }
+    if a.flag("--dirs") {
+        all.extend(["-type".to_string(), "d".to_string()]);
+    }
+    if a.flag("--empty") {
+        all.push("-empty".to_string());
+    }
+    all.extend(tokens.iter().cloned());
+    let expr = findexpr::Expr::parse(&all).map_err(Fail::from)?;
+    for warning in expr.warnings() {
+        eprintln!("dusage: {warning}");
+    }
+    // A run that would execute something is refused as a whole, before any output, rather
+    // than failing at the first entry that reaches the action.
+    let allow_exec = a.flag("--allow-exec");
+    if !allow_exec && !expr.exec_requests().is_empty() {
+        return Err(Fail(
+            2,
+            "-exec and -execdir run commands; pass --allow-exec to allow them".to_string(),
+        ));
+    }
+    let roots: Vec<PathBuf> = if root_args.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        root_args.iter().map(PathBuf::from).collect()
+    };
+    for r in &roots {
+        if !r.exists() {
+            return Err(format!("{}: no such file or directory", r.display()).into());
+        }
+    }
+    // The walk never reads the pattern in expression mode, but `SearchOptions` carries the
+    // walk's configuration, so it gets a pattern that cannot matter.
+    let mut o = SearchOptions::new(
+        Pattern::new("*", true, false, false).map_err(Fail::from)?,
+        roots,
+    );
+    o.scope = Scope::Paths;
+    let mut globs: Vec<String> = Vec::new();
+    for g in ["-g", "--glob"] {
+        globs.extend(a.values(g).iter().cloned());
+    }
+    let mut type_globs: Vec<String> = Vec::new();
+    for t in a.values("-t").iter().chain(a.values("--type").iter()) {
+        type_globs.extend(types.globs(t)?);
+    }
+    for exts in a.values("--ext") {
+        for e in exts.split(',').filter(|e| !e.is_empty()) {
+            type_globs.push(format!("*.{e}"));
+        }
+    }
+    o.globs = globs;
+    o.type_globs = type_globs;
+    o.hidden = a.flag("--hidden");
+    o.no_ignore = a.flag("--no-ignore");
+    o.no_ignore_vcs = a.flag("--no-ignore-vcs") || a.flag("--no-ignore-files");
+    o.no_ignore_dot = a.flag("--no-ignore-dot") || a.flag("--no-ignore-files");
+    o.no_ignore_parent = a.flag("--no-ignore-parent") || a.flag("--no-ignore-files");
+    o.no_ignore_global = a.flag("--no-ignore-global") || a.flag("--no-ignore-files");
+    o.ignore_file_icase = a.flag("--ignore-file-case-insensitive");
+    o.ignore_files = a.values("--ignore-file").to_vec();
+    for path in &o.ignore_files {
+        if std::fs::read_to_string(path).is_err() {
+            return Err(Fail::from(format!("{path}: cannot read ignore file")));
+        }
+    }
+    // `findexpr::ExecRequest` carries the command, not which predicate asked for it, so a run
+    // whose only exec predicate is -execdir is told to run them find's -execdir way, and a
+    // run holding both keeps -exec's. The count skips tokens inside an exec command.
+    let (execdir, plain) = exec_predicates(tokens);
+    let ids = run_ids();
+    let ctx = Ctx {
+        now: SystemTime::now(),
+        ids: &ids,
+    };
+    // `-empty` costs one `read_dir` per directory, so the walk only answers it when the
+    // expression asks.
+    let want_empty = all.iter().any(|t| t == "-empty");
+    let mut sink = StdoutSink::new(
+        &ids,
+        allow_exec,
+        color_enabled(color_mode),
+        execdir > 0 && plain == 0,
+    );
+    let outcome = match walk_expr(&o, &expr, &ctx, want_empty, &mut sink) {
+        Ok(out) => out,
+        Err(msg) => return Err(sink.failure().unwrap_or(Fail(2, msg))),
+    };
+    sink.finish()?;
+    let errs = outcome.stats.errors.total();
+    if errs > 0 && !a.flag("--no-messages") {
+        eprintln!("dusage: {errs} path(s) could not be read");
+    }
+    if errs > 0 {
+        Err(Fail(2, String::new()))
+    } else if outcome.matched == 0 && sink.printed == 0 {
+        Err(Fail(1, String::new()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Where a find expression's actions go: stdout, and the processes `-exec` names.
+struct StdoutSink<'a> {
+    out: std::io::BufWriter<std::io::Stdout>,
+    ids: &'a dyn Ids,
+    allow_exec: bool,
+    /// Run each command in the entry's own directory with its path as `./name`, which is
+    /// what `-execdir` does.
+    execdir: bool,
+    color: bool,
+    /// How many actions wrote something, for the exit status.
+    printed: u64,
+    /// `-exec ... {} +` collects its paths and runs once when the walk ends, one batch per
+    /// directory under `-execdir` and one for the whole walk otherwise.
+    batches: Vec<(Vec<String>, Option<PathBuf>, Vec<String>)>,
+    write_err: Option<std::io::Error>,
+}
+
+impl<'a> StdoutSink<'a> {
+    fn new(ids: &'a dyn Ids, allow_exec: bool, color: bool, execdir: bool) -> StdoutSink<'a> {
+        StdoutSink {
+            out: std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout()),
+            ids,
+            allow_exec,
+            execdir,
+            color,
+            printed: 0,
+            batches: Vec::new(),
+            write_err: None,
+        }
+    }
+
+    fn emit(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.printed += 1;
+        if self.write_err.is_some() {
+            return Err(String::new());
+        }
+        self.out.write_all(bytes).map_err(|e| {
+            let kind = e.kind();
+            self.write_err = Some(e);
+            // A reader that went away is not an error, but it does end the output.
+            if kind == std::io::ErrorKind::BrokenPipe {
+                String::new()
+            } else {
+                "write failed".to_string()
+            }
+        })
+    }
+
+    /// The stream's own failure, when it was the reason the walk stopped.
+    fn failure(&mut self) -> Option<Fail> {
+        self.write_err.take().map(Fail::output)
+    }
+
+    /// Flush what was printed, then run the batched `-exec ... {} +` commands.
+    fn finish(&mut self) -> Result<(), Fail> {
+        if let Err(e) = self.out.flush() {
+            return Err(Fail::output(e));
+        }
+        for (command, dir, paths) in std::mem::take(&mut self.batches) {
+            match exec_batch(&command, &paths, dir.as_deref()) {
+                Ok(true) => {}
+                Ok(false) => return Err(Fail(2, format!("-exec {}: command failed", command[0]))),
+                Err(e) => return Err(Fail(2, format!("-exec {}: {e}", command[0]))),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Sink for StdoutSink<'_> {
+    fn print(&mut self, path: &str, terminator: u8) -> Result<(), String> {
+        let mut bytes = Vec::with_capacity(path.len() + 1);
+        if self.color {
+            bytes.extend_from_slice(report::color::PATH.as_bytes());
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.extend_from_slice(report::color::RESET.as_bytes());
+        } else {
+            bytes.extend_from_slice(path.as_bytes());
+        }
+        bytes.push(terminator);
+        self.emit(&bytes)
+    }
+
+    fn printf(&mut self, text: &str) -> Result<(), String> {
+        self.emit(text.as_bytes())
+    }
+
+    fn ls(&mut self, entry: &findexpr::Entry) -> Result<(), String> {
+        let line = ls_line(entry, self.ids);
+        let mut bytes = line.into_bytes();
+        bytes.push(b'\n');
+        self.emit(&bytes)
+    }
+
+    fn exec(&mut self, request: &ExecRequest, entry: &findexpr::Entry) -> Result<bool, String> {
+        if !self.allow_exec {
+            return Err(
+                "-exec: dusage does not run commands from a find expression (pass --allow-exec)"
+                    .to_string(),
+            );
+        }
+        // `-execdir` runs in the entry's directory and names it `./name`; `-exec` names it
+        // as the walk printed it.
+        let (dir, named) = match self.execdir {
+            true => match Path::new(entry.path).parent() {
+                Some(parent) => (
+                    Some(parent.to_path_buf()),
+                    format!(".{}{}", std::path::MAIN_SEPARATOR, entry.name),
+                ),
+                None => (None, entry.path.to_string()),
+            },
+            false => (None, entry.path.to_string()),
+        };
+        if request.batch {
+            let slot = match self
+                .batches
+                .iter_mut()
+                .find(|(command, at, _)| *command == request.command && *at == dir)
+            {
+                Some(slot) => slot,
+                None => {
+                    self.batches
+                        .push((request.command.clone(), dir.clone(), Vec::new()));
+                    self.batches.last_mut().expect("just pushed")
+                }
+            };
+            slot.2.push(named);
+            return Ok(true);
+        }
+        exec_one(&request.command, &named, dir.as_deref())
+            .map_err(|e| format!("-exec {}: {e}", request.command[0]))
+    }
+}
+
+/// One `-ls` row in find's column layout: inode, 1K blocks, mode, links, user, group, size,
+/// time and path.
+fn ls_line(entry: &findexpr::Entry, ids: &dyn Ids) -> String {
+    let user = ids
+        .user_of(entry.uid)
+        .unwrap_or_else(|| entry.uid.to_string());
+    let group = ids
+        .group_of(entry.gid)
+        .unwrap_or_else(|| entry.gid.to_string());
+    format!(
+        "{:>9} {:>4} {} {:>3} {:<8} {:<8} {:>8} {} {}",
+        entry.inode,
+        entry.blocks.div_ceil(2),
+        ls_mode(entry.mode, entry.kind),
+        entry.links,
+        user,
+        group,
+        entry.size,
+        report::fmt_time(Some(entry.mtime)),
+        entry.path
+    )
+}
+
+/// `drwxr-xr-x` and friends, the way `find -ls` prints a mode. `%M` in `-printf` is rendered
+/// by the expression module itself; this is the same text for the `-ls` column.
+fn ls_mode(mode: u32, kind: findexpr::Kind) -> String {
+    let mut s = String::with_capacity(10);
+    s.push(if kind == findexpr::Kind::File {
+        '-'
+    } else {
+        kind.letter()
+    });
+    let bit = |shift: u32| mode & (1 << shift) != 0;
+    for (r, w, x, special, letter) in [
+        (8u32, 7u32, 6u32, 11u32, 's'),
+        (5, 4, 3, 10, 's'),
+        (2, 1, 0, 9, 't'),
+    ] {
+        s.push(if bit(r) { 'r' } else { '-' });
+        s.push(if bit(w) { 'w' } else { '-' });
+        s.push(match (bit(x), bit(special)) {
+            (true, true) => letter,
+            (true, false) => 'x',
+            (false, true) => letter.to_ascii_uppercase(),
+            (false, false) => '-',
+        });
+    }
+    s
+}
+
+/// Run one `-exec ... ;`, replacing every `{}` in every argument with the entry's path,
+/// from `dir` when the predicate was `-execdir`.
+fn exec_one(command: &[String], path: &str, dir: Option<&Path>) -> std::io::Result<bool> {
+    let mut argv: Vec<String> = command.iter().map(|a| a.replace("{}", path)).collect();
+    let program = argv.remove(0);
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(&argv);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    Ok(cmd.status()?.success())
+}
+
+/// Run one `-exec ... {} +` over every path it collected: a trailing `{}` becomes all of
+/// them as separate arguments, as find does.
+fn exec_batch(command: &[String], paths: &[String], dir: Option<&Path>) -> std::io::Result<bool> {
+    let mut argv: Vec<String> = command[1..].to_vec();
+    if argv.last().is_some_and(|a| a == "{}") {
+        argv.pop();
+    }
+    argv.extend(paths.iter().cloned());
+    let mut cmd = std::process::Command::new(&command[0]);
+    cmd.args(&argv);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    Ok(cmd.status()?.success())
+}
+
+/// User and group names for `-user`, `-group`, `-nouser`, `-nogroup`, `%u`, `%g` and the
+/// `-ls` columns.
+#[cfg(unix)]
+struct PasswdIds {
+    users: std::collections::HashMap<String, u32>,
+    uids: std::collections::HashMap<u32, String>,
+    groups: std::collections::HashMap<String, u32>,
+    gids: std::collections::HashMap<u32, String>,
+}
+
+#[cfg(unix)]
+impl PasswdIds {
+    /// Read `/etc/passwd` and `/etc/group` once; a missing file leaves that half numeric.
+    fn load() -> PasswdIds {
+        let mut ids = PasswdIds {
+            users: std::collections::HashMap::new(),
+            uids: std::collections::HashMap::new(),
+            groups: std::collections::HashMap::new(),
+            gids: std::collections::HashMap::new(),
+        };
+        for (path, names, numbers) in [
+            ("/etc/passwd", &mut ids.users, &mut ids.uids),
+            ("/etc/group", &mut ids.groups, &mut ids.gids),
+        ] {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for line in text.lines() {
+                let mut fields = line.split(':');
+                let (Some(name), Some(_), Some(id)) = (fields.next(), fields.next(), fields.next())
+                else {
+                    continue;
+                };
+                let Ok(id) = id.parse::<u32>() else { continue };
+                names.insert(name.to_string(), id);
+                numbers.entry(id).or_insert_with(|| name.to_string());
+            }
+        }
+        ids
+    }
+}
+
+#[cfg(unix)]
+impl Ids for PasswdIds {
+    fn uid_of(&self, name: &str) -> Option<u32> {
+        name.parse().ok().or_else(|| self.users.get(name).copied())
+    }
+
+    fn gid_of(&self, name: &str) -> Option<u32> {
+        name.parse().ok().or_else(|| self.groups.get(name).copied())
+    }
+
+    fn user_of(&self, uid: u32) -> Option<String> {
+        self.uids.get(&uid).cloned()
+    }
+
+    fn group_of(&self, gid: u32) -> Option<String> {
+        self.gids.get(&gid).cloned()
+    }
+}
+
+/// Windows has no passwd table to read, so names stay numeric and `-nouser`/`-nogroup` are
+/// true for every entry, which [`findexpr::NumericIds`] documents.
+#[cfg(unix)]
+fn run_ids() -> PasswdIds {
+    PasswdIds::load()
+}
+
+#[cfg(not(unix))]
+fn run_ids() -> findexpr::NumericIds {
+    findexpr::NumericIds
 }
 
 /// `--size +10M`, `-10M` or `10M` (within 5%).

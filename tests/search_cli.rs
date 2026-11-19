@@ -2006,3 +2006,480 @@ fn search_zip_reports_a_corrupt_stream() {
     assert_eq!(code(&o), 2, "{}", stderr(&o));
     assert!(stderr(&o).contains("could not be read"), "{}", stderr(&o));
 }
+// ---------------------------------------------------------------------------
+// `dusage find <paths...> <expression...>` — find's own expression language
+// ---------------------------------------------------------------------------
+
+/// Run `dusage find <root> <expression...>`: a find expression comes after the starting
+/// points, as it does in find itself.
+fn find_at(root: &Path, args: &[&str]) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_dusage"));
+    c.arg("find").arg(root).args(args);
+    c.output().unwrap()
+}
+
+/// The path `dusage find` prints for `rel` below an absolute `root`, so assertions do not
+/// have to know the platform's separator.
+fn shown(root: &Path, rel: &str) -> String {
+    root.join(rel).display().to_string()
+}
+
+/// A tree with one of everything an expression can ask about.
+fn expr_tree(tag: &str) -> (Fixture, PathBuf) {
+    let f = Fixture::new(tag);
+    let dir = f.root.join("ex");
+    fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+    fs::create_dir_all(dir.join("cache/inner")).unwrap();
+    fs::write(dir.join("a.rs"), "fn main() {}\n").unwrap();
+    fs::write(dir.join("b.md"), "# doc\n").unwrap();
+    fs::write(dir.join("sub/c.rs"), "fn c() {}\n").unwrap();
+    fs::write(dir.join("sub/deeper/d.txt"), "x").unwrap();
+    fs::write(dir.join("cache/inner/buried.rs"), "hidden deep\n").unwrap();
+    (f, dir)
+}
+
+#[test]
+fn find_expression_name_or_not_and_parentheses() {
+    let (_f, dir) = expr_tree("expr_or");
+    // `-o` loosens, so both names come out.
+    let both = find_at(&dir, &["-name", "*.rs", "-o", "-name", "*.md"]);
+    assert_eq!(code(&both), 0, "{}", stderr(&both));
+    let out = stdout(&both);
+    assert!(out.contains(&shown(&dir, "a.rs")), "{out}");
+    assert!(out.contains(&shown(&dir, "b.md")), "{out}");
+    assert!(!out.contains("d.txt"), "{out}");
+
+    // `!` negates one test.
+    let not = stdout(&find_at(&dir, &["!", "-name", "*.rs", "-type", "f"]));
+    assert!(not.contains("b.md"), "{not}");
+    assert!(not.contains("d.txt"), "{not}");
+    assert!(!not.contains("a.rs"), "{not}");
+
+    // Parentheses group, so the `-o` stays inside the group and `-type f` applies to both.
+    let grouped = stdout(&find_at(
+        &dir,
+        &[
+            "(", "-name", "*.md", "-o", "-name", "*.txt", ")", "-type", "f",
+        ],
+    ));
+    assert!(grouped.contains("b.md"), "{grouped}");
+    assert!(grouped.contains("d.txt"), "{grouped}");
+    assert!(!grouped.contains("a.rs"), "{grouped}");
+}
+
+#[test]
+fn find_expression_iname_folds_case() {
+    let (_f, dir) = expr_tree("expr_iname");
+    let plain = find_at(&dir, &["-name", "B.MD"]);
+    assert_eq!(code(&plain), 1, "case matters without -iname");
+    let folded = find_at(&dir, &["-iname", "B.MD"]);
+    assert_eq!(code(&folded), 0, "{}", stderr(&folded));
+    assert_eq!(stdout(&folded).trim(), shown(&dir, "b.md"));
+}
+
+#[test]
+fn find_expression_type_selects_directories() {
+    let (_f, dir) = expr_tree("expr_type");
+    let out = stdout(&find_at(&dir, &["-type", "d"]));
+    assert!(out.contains(&shown(&dir, "sub")), "{out}");
+    assert!(out.contains(&shown(&dir, "cache")), "{out}");
+    assert!(!out.contains("a.rs"), "{out}");
+    // The starting point is an entry like any other, and it is a directory.
+    assert!(out.lines().any(|l| l == dir.display().to_string()), "{out}");
+    let links = find_at(&dir, &["-type", "l", "-name", "*"]);
+    assert_eq!(code(&links), 1, "no links in the fixture");
+}
+
+#[test]
+fn find_expression_maxdepth_and_mindepth_apply() {
+    let (_f, dir) = expr_tree("expr_depth");
+    let shallow = stdout(&find_at(&dir, &["-maxdepth", "1", "-name", "*"]));
+    assert!(shallow.contains(&shown(&dir, "a.rs")), "{shallow}");
+    assert!(!shallow.contains(&shown(&dir, "sub/c.rs")), "{shallow}");
+    assert!(
+        !shallow.contains(&shown(&dir, "sub/deeper/d.txt")),
+        "{shallow}"
+    );
+    assert!(
+        !shallow.lines().any(|l| l == shown(&dir, "ex")),
+        "maxdepth 0 is the only level that hides the starting point: {shallow}"
+    );
+
+    let deep = stdout(&find_at(&dir, &["-mindepth", "2", "-type", "f"]));
+    assert!(!deep.contains(&shown(&dir, "a.rs")), "{deep}");
+    assert!(deep.contains(&shown(&dir, "sub/c.rs")), "{deep}");
+    assert!(deep.contains(&shown(&dir, "sub/deeper/d.txt")), "{deep}");
+
+    // The expression's option overrides the flag of the same name, which is applied first.
+    let flag_and_expr = stdout(&find_at(
+        &dir,
+        &["--max-depth", "1", "-maxdepth", "2", "-type", "f"],
+    ));
+    assert!(
+        flag_and_expr.contains(&shown(&dir, "sub/c.rs")),
+        "{flag_and_expr}"
+    );
+    assert!(
+        !flag_and_expr.contains(&shown(&dir, "sub/deeper/d.txt")),
+        "{flag_and_expr}"
+    );
+}
+
+#[test]
+fn find_expression_size_counts_in_units() {
+    let (_f, dir) = expr_tree("expr_size");
+    fs::write(dir.join("big.bin"), vec![b'x'; 5000]).unwrap();
+    // `-size` rounds up to the unit, so 5000 bytes is 5 blocks of 1k, or exactly 5000c.
+    let k = stdout(&find_at(&dir, &["-size", "5k", "-type", "f"]));
+    assert!(k.contains("big.bin"), "{k}");
+    assert!(!k.contains("a.rs"), "{k}");
+    let bytes = stdout(&find_at(&dir, &["-size", "+4000c", "-type", "f"]));
+    assert!(bytes.contains("big.bin"), "{bytes}");
+    assert!(!bytes.contains("a.rs"), "{bytes}");
+    // `-empty` is the size-0 case, and it counts an empty directory too.
+    let empty = find_at(&dir, &["-empty"]);
+    assert_eq!(
+        code(&empty),
+        1,
+        "nothing in this fixture is empty: {}",
+        stdout(&empty)
+    );
+}
+
+#[test]
+fn find_expression_mtime_uses_whole_days() {
+    let (_f, dir) = expr_tree("expr_mtime");
+    let aged = dir.join("aged.txt");
+    fs::write(&aged, "old").unwrap();
+    let fresh = dir.join("fresh.txt");
+    fs::write(&fresh, "new").unwrap();
+    let three_days =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86_400 + 3600);
+    fs::File::options()
+        .write(true)
+        .open(&aged)
+        .unwrap()
+        .set_modified(three_days)
+        .unwrap();
+
+    let older = stdout(&find_at(&dir, &["-mtime", "+1", "-type", "f"]));
+    assert!(older.contains("aged.txt"), "{older}");
+    assert!(!older.contains("fresh.txt"), "{older}");
+    let newer = stdout(&find_at(&dir, &["-mtime", "-1", "-type", "f"]));
+    assert!(newer.contains("fresh.txt"), "{newer}");
+    assert!(!newer.contains("aged.txt"), "{newer}");
+}
+
+#[test]
+fn find_expression_prune_stops_the_descent() {
+    let (_f, dir) = expr_tree("expr_prune");
+    // A pruned directory is still reported by the test that prunes it, but its contents are
+    // never walked, so `buried.rs` cannot appear.
+    let out = stdout(&find_at(
+        &dir,
+        &["-name", "cache", "-prune", "-o", "-name", "*.rs", "-print"],
+    ));
+    assert!(!out.contains("buried.rs"), "{out}");
+    assert!(out.contains(&shown(&dir, "a.rs")), "{out}");
+    assert!(out.contains(&shown(&dir, "sub/c.rs")), "{out}");
+
+    // Under `-depth` prune has nothing to stop, exactly as in find.
+    let depth = stdout(&find_at(
+        &dir,
+        &[
+            "-name",
+            "cache",
+            "-prune",
+            "-o",
+            "-name",
+            "buried.rs",
+            "-print",
+            "-depth",
+        ],
+    ));
+    assert!(depth.contains("buried.rs"), "{depth}");
+}
+
+#[test]
+fn find_expression_printf_renders_fields() {
+    let (_f, dir) = expr_tree("expr_printf");
+    let out = stdout(&find_at(&dir, &["-name", "a.rs", "-printf", "%p %s %y\n"]));
+    assert_eq!(out.trim(), format!("{} 13 f", shown(&dir, "a.rs")), "{out}");
+    // `%f` is the name alone and `%P` the path below the starting point.
+    let rel = stdout(&find_at(&dir, &["-name", "c.rs", "-printf", "%f|%P|%d\n"]));
+    assert_eq!(
+        rel.trim(),
+        format!("c.rs|sub{}c.rs|2", std::path::MAIN_SEPARATOR),
+        "{rel}"
+    );
+}
+
+#[test]
+fn find_expression_print0_terminates_with_nul() {
+    let (_f, dir) = expr_tree("expr_print0");
+    let o = find_at(&dir, &["-name", "*.md", "-print0"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert_eq!(o.stdout.last(), Some(&0), "the last byte is the terminator");
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(text.split('\0').filter(|p| !p.is_empty()).count(), 1);
+    assert!(text.contains(&shown(&dir, "b.md")), "{text}");
+}
+
+#[test]
+fn find_expression_ls_prints_find_columns() {
+    let (_f, dir) = expr_tree("expr_ls");
+    let out = stdout(&find_at(&dir, &["-name", "a.rs", "-ls"]));
+    let line = out.lines().next().unwrap_or_default();
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    assert!(fields.len() >= 8, "find's column layout: {line}");
+    assert!(
+        line.ends_with(&shown(&dir, "a.rs")),
+        "the path comes last: {line}"
+    );
+    let mode = fields[2];
+    assert_eq!(mode.len(), 10, "a mode column: {line}");
+    assert!(mode.ends_with("r--"), "the file is readable: {line}");
+}
+
+#[test]
+fn find_expression_exec_is_refused_without_the_flag() {
+    let (_f, dir) = expr_tree("expr_exec_no");
+    let o = find_at(&dir, &["-name", "a.rs", "-exec", "echo", "ran", "{}", ";"]);
+    assert_eq!(code(&o), 2, "{}", stderr(&o));
+    assert!(stderr(&o).contains("--allow-exec"), "{}", stderr(&o));
+    assert!(stdout(&o).is_empty(), "nothing ran: {}", stdout(&o));
+
+    // `-delete` is refused whatever the flag says.
+    let del = find_at(&dir, &["-name", "a.rs", "-delete", "--allow-exec"]);
+    assert_eq!(code(&del), 2, "{}", stderr(&del));
+    assert!(stderr(&del).contains("-delete"), "{}", stderr(&del));
+}
+
+#[cfg(unix)]
+#[test]
+fn find_expression_exec_runs_with_the_flag() {
+    let (_f, dir) = expr_tree("expr_exec_yes");
+    let one = find_at(
+        &dir,
+        &[
+            "-name",
+            "a.rs",
+            "--allow-exec",
+            "-exec",
+            "echo",
+            "RAN",
+            "{}",
+            ";",
+        ],
+    );
+    assert_eq!(code(&one), 0, "{}", stderr(&one));
+    assert!(
+        stdout(&one).contains(&format!("RAN {}", shown(&dir, "a.rs"))),
+        "{}",
+        stdout(&one)
+    );
+    // A trailing `{} +` batches every match into one invocation, run at the end.
+    let batched = find_at(
+        &dir,
+        &[
+            "-name",
+            "*.rs",
+            "--allow-exec",
+            "-exec",
+            "echo",
+            "BATCH",
+            "{}",
+            "+",
+        ],
+    );
+    assert_eq!(code(&batched), 0, "{}", stderr(&batched));
+    let out = stdout(&batched);
+    assert_eq!(out.lines().count(), 1, "one invocation: {out}");
+    assert!(out.contains("BATCH"), "{out}");
+    assert!(out.contains("a.rs") && out.contains("buried.rs"), "{out}");
+
+    // The command's exit status is the predicate's value, so a failing command is not a match.
+    let failing = find_at(
+        &dir,
+        &["-name", "a.rs", "--allow-exec", "-exec", "false", "{}", ";"],
+    );
+    assert_eq!(code(&failing), 1, "{}", stderr(&failing));
+}
+
+#[test]
+fn find_expression_quit_stops_the_run() {
+    let (_f, dir) = expr_tree("expr_quit");
+    let all = find_at(&dir, &["-name", "*.rs", "-print"]);
+    assert!(stdout(&all).lines().count() > 1, "{}", stdout(&all));
+    let one = find_at(&dir, &["-name", "*.rs", "-print", "-quit"]);
+    assert_eq!(code(&one), 0, "{}", stderr(&one));
+    assert_eq!(stdout(&one).lines().count(), 1, "{}", stdout(&one));
+
+    // `-quit` on its own prints nothing, and being true for one entry still exits 0.
+    let quiet = find_at(&dir, &["-name", "*.rs", "-quit"]);
+    assert_eq!(code(&quiet), 0, "{}", stderr(&quiet));
+    assert!(stdout(&quiet).is_empty(), "{}", stdout(&quiet));
+}
+
+#[test]
+fn find_expression_exit_codes_and_errors() {
+    let (_f, dir) = expr_tree("expr_exit");
+    let none = find_at(&dir, &["-name", "*.nope"]);
+    assert_eq!(code(&none), 1, "nothing matched");
+    let bad = find_at(&dir, &["-name", "*.rs", "-frobnicate"]);
+    assert_eq!(code(&bad), 2, "{}", stderr(&bad));
+    assert!(stderr(&bad).contains("frobnicate"), "{}", stderr(&bad));
+    // `-json` has no shape for arbitrary actions.
+    let json = find_at(&dir, &["-name", "*.rs", "--json"]);
+    assert_eq!(code(&json), 2, "{}", stderr(&json));
+}
+
+#[test]
+fn find_glob_form_still_works_unchanged() {
+    // The positional glob still means what it meant, with no expression token in sight.
+    let (_f, dir) = expr_tree("expr_legacy");
+    // `run` appends the root, which is where the glob form wants it: `<glob> [paths...]`.
+    let glob = run(&["find", "*.rs"], &dir);
+    assert_eq!(code(&glob), 0, "{}", stderr(&glob));
+    let out = stdout(&glob);
+    assert!(out.contains("a.rs"), "{out}");
+    assert!(out.contains("buried.rs"), "{out}");
+    assert!(!out.contains("b.md"), "{out}");
+    let o = run(&["find", "*.md"], &dir);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "b.md");
+}
+
+#[test]
+fn find_expression_path_and_regex_tests() {
+    let (_f, dir) = expr_tree("expr_path");
+    let path = stdout(&find_at(&dir, &["-path", "*/sub/*.rs"]));
+    assert_eq!(path.trim(), shown(&dir, "sub/c.rs"), "{path}");
+    let re = stdout(&find_at(&dir, &["-regex", ".*/[ab]\\.(rs|md)"]));
+    assert!(re.contains("a.rs"), "{re}");
+    assert!(re.contains("b.md"), "{re}");
+    assert!(!re.contains("c.rs"), "{re}");
+}
+
+#[test]
+fn find_expression_options_are_accepted() {
+    let (_f, dir) = expr_tree("expr_opts");
+    // `-xdev` keeps the walk on the starting device; the fixture is on it, so nothing drops.
+    let xdev = find_at(&dir, &["-xdev", "-maxdepth", "1", "-name", "a.rs"]);
+    assert_eq!(code(&xdev), 0, "{}", stderr(&xdev));
+    assert!(stdout(&xdev).contains("a.rs"), "{}", stdout(&xdev));
+    // `--files` and `--dirs` still narrow the walk, and `--hidden` still widens it.
+    fs::write(dir.join(".dot.rs"), "dot").unwrap();
+    fs::create_dir_all(dir.join("dir.rs")).unwrap();
+    let files = find_at(&dir, &["--files", "-name", "*.rs"]);
+    let out = stdout(&files);
+    assert!(!out.contains(".dot.rs"), "{out}");
+    assert!(
+        !out.contains("dir.rs"),
+        "--files excludes directories: {out}"
+    );
+    let dirs = find_at(&dir, &["--dirs", "-name", "*.rs"]);
+    assert!(stdout(&dirs).contains("dir.rs"), "{}", stdout(&dirs));
+    let shown_hidden = find_at(&dir, &["--hidden", "--files", "-name", "*.rs"]);
+    assert!(
+        stdout(&shown_hidden).contains(".dot.rs"),
+        "{}",
+        stdout(&shown_hidden)
+    );
+    // `--empty` becomes the `-empty` test, which costs the same `read_dir` per directory.
+    let empties = find_at(&dir, &["--empty", "-name", "*"]);
+    assert!(stdout(&empties).contains("dir.rs"), "{}", stdout(&empties));
+
+    // A flag whose meaning is the glob itself is refused rather than ignored.
+    let refused = find_at(&dir, &["--size", "+1M", "-name", "*.rs"]);
+    assert_eq!(code(&refused), 2, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("-size"),
+        "the refusal names the expression spelling: {}",
+        stderr(&refused)
+    );
+}
+
+#[test]
+fn find_expression_empty_counts_an_empty_directory() {
+    let (f, _dir) = expr_tree("expr_empty");
+    let dir = f.root.join("emp");
+    fs::create_dir_all(dir.join("hollow")).unwrap();
+    fs::create_dir_all(dir.join("full")).unwrap();
+    fs::write(dir.join("zero.txt"), "").unwrap();
+    fs::write(dir.join("full/f.txt"), "x").unwrap();
+    let out = stdout(&find_at(&dir, &["-empty"]));
+    assert!(out.contains("hollow"), "{out}");
+    assert!(out.contains("zero.txt"), "{out}");
+    assert!(!out.contains("full"), "{out}");
+    // With `-type f` only the empty file is left, as `-empty -type f` in find.
+    let files = stdout(&find_at(&dir, &["-empty", "-type", "f"]));
+    assert_eq!(files.trim(), shown(&dir, "zero.txt"));
+}
+
+#[test]
+fn find_expression_follow_accepts_its_setting() {
+    let (_f, dir) = expr_tree("expr_follow");
+    // `-follow` is a global option of the expression, so it may sit among the tests.
+    let o = find_at(&dir, &["-type", "d", "-follow", "-maxdepth", "1"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(stdout(&o).contains("sub"), "{}", stdout(&o));
+}
+
+#[test]
+fn find_expression_depth_reports_contents_first() {
+    let (_f, dir) = expr_tree("expr_depth_order");
+    let out = stdout(&find_at(&dir, &["-maxdepth", "1", "-print", "-depth"]));
+    let lines: Vec<String> = out.lines().map(str::to_string).collect();
+    let root = dir.display().to_string();
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some(root.as_str()),
+        "the starting point comes last: {out}"
+    );
+    assert!(lines.contains(&shown(&dir, "a.rs")), "{out}");
+}
+
+#[cfg(unix)]
+#[test]
+fn find_expression_reports_symlinks_without_following_them() {
+    let (_f, dir) = expr_tree("expr_link");
+    let link = dir.join("link.rs");
+    if std::os::unix::fs::symlink("a.rs", &link).is_err() {
+        eprintln!("skipped: this filesystem does not allow symlinks");
+        return;
+    }
+    let links = stdout(&find_at(&dir, &["-type", "l"]));
+    assert!(links.contains("link.rs"), "{links}");
+    let target = stdout(&find_at(&dir, &["-name", "link.rs", "-printf", "%l %y\n"]));
+    assert_eq!(target.trim(), "a.rs l", "{target}");
+    // `-xtype` asks about the target without following the link, which is find's meaning.
+    let xtype = stdout(&find_at(&dir, &["-name", "link.rs", "-xtype", "f"]));
+    assert!(xtype.contains("link.rs"), "{xtype}");
+}
+
+#[cfg(unix)]
+#[test]
+fn find_expression_execdir_runs_in_the_entry_directory() {
+    let (_f, dir) = expr_tree("expr_execdir");
+    // `-execdir` runs in the entry's own directory and names it `./name`, so `pwd` prints
+    // the directory twice (once per directory) and `{}` is a bare name.
+    let o = find_at(
+        &dir,
+        &[
+            "-name",
+            "*.rs",
+            "--allow-exec",
+            "-execdir",
+            "echo",
+            "E",
+            "{}",
+            ";",
+        ],
+    );
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.lines().all(|l| l.starts_with("E ./")), "{out}");
+    assert!(!out.contains("sub"), "the path is a bare name: {out}");
+    assert_eq!(out.lines().count(), 3, "{out}");
+}
