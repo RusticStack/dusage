@@ -245,6 +245,52 @@ fn find_by_glob_and_filters() {
     assert!(stdout(&o).contains("\"count\":0"));
 }
 
+/// A listing with no sort key streams as the walk finds it, and it comes out in exactly the
+/// order `--sort path` prints: the order every listing has used. Nothing about what prints
+/// is new — the same lines, one result at a time instead of a list held to the end.
+#[test]
+fn find_streams_the_sorted_listing() {
+    let f = Fixture::new("stream");
+    let dir = f.root.join("many");
+    // Enough results that they used to be all held before the first line printed, and
+    // named so that a tree order and a path order disagree: `alpha-b.txt` sorts before
+    // everything inside `alpha-b/`, and `alpha/`'s own entries come after both.
+    for name in ["alpha", "alpha-b", "beta", "delta", "zeta"] {
+        fs::create_dir_all(dir.join(name)).unwrap();
+        for n in 0..50 {
+            fs::write(dir.join(name).join(format!("f{n:02}.txt")), "").unwrap();
+        }
+    }
+    fs::write(dir.join("alpha-b.txt"), "").unwrap();
+    fs::write(dir.join("beta.txt"), "").unwrap();
+
+    let plain = stdout(&run(&["find", "*"], &dir));
+    let sorted = stdout(&run(&["find", "*", "--sort", "path"], &dir));
+    assert_eq!(plain, sorted, "a plain listing is the path-sorted one");
+
+    let lines: Vec<&str> = plain.lines().collect();
+    assert_eq!(lines.len(), 5 * 50 + 5 + 2, "{}", plain);
+    let mut by_name = lines.clone();
+    by_name.sort();
+    assert_eq!(by_name, lines, "the stream is in path order");
+    for line in &lines {
+        assert!(
+            dir.join(line).exists(),
+            "a line is a path under the root: {line}"
+        );
+    }
+
+    // `--json` collects the walk and sorts it before printing, so the two lists agreeing is
+    // the set and the order agreeing at once.
+    let json = stdout(&run(&["find", "*", "--json"], &dir));
+    let rels: Vec<&str> = json
+        .split("\"rel\":\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert_eq!(rels, lines, "the streamed listing is the collected one");
+}
+
 #[test]
 fn legacy_scan_still_works_through_the_dispatcher() {
     let f = Fixture::new("legacy");
