@@ -1566,18 +1566,28 @@ fn scan_multiline(
     let mut hits = if o.passthru {
         every_line(&data, &found)
     } else if o.only_matching {
-        found
-            .iter()
-            .map(|m| LineHit {
-                number: line_number(&data, m.start),
+        // Each record carries the line its match starts on, counted forward from the previous
+        // record's line rather than from the start of the file.
+        let mut number = 1u64;
+        let mut pos = 0usize;
+        let mut out = Vec::with_capacity(found.len());
+        for m in &found {
+            let ls = line_start(&data, m.start);
+            if ls >= pos {
+                number += bytes::count_byte(&data[pos..ls], b'\n') as u64;
+                pos = ls;
+            }
+            out.push(LineHit {
+                number,
                 offset: m.start as u64,
                 text: data[m.start..m.end].to_vec(),
                 pooled: (0, 0),
                 matched: true,
                 spans: vec![(0, m.end - m.start)],
-                text_start: m.start - line_start(&data, m.start),
-            })
-            .collect()
+                text_start: m.start - ls,
+            });
+        }
+        out
     } else if o.count || o.files_with_matches || o.files_without_matches || o.quiet {
         Vec::new()
     } else {
@@ -1585,7 +1595,7 @@ fn scan_multiline(
     };
     // `-c` counts the lines the matches cover, which is what a per-line mode would count.
     let lines = if hits.is_empty() {
-        matched_lines(&data, &found).len() as u64
+        matched_line_count(&data, &found)
     } else {
         hits.iter().filter(|h| h.matched).count() as u64
     };
@@ -1735,10 +1745,6 @@ fn line_spans(data: &[u8]) -> Vec<(usize, usize)> {
     out
 }
 
-fn line_number(data: &[u8], at: usize) -> u64 {
-    bytes::count_byte(&data[..at.min(data.len())], b'\n') as u64 + 1
-}
-
 /// The offset at which the line holding `at` starts.
 fn line_start(data: &[u8], at: usize) -> usize {
     match data[..at.min(data.len())].iter().rposition(|b| *b == b'\n') {
@@ -1747,71 +1753,128 @@ fn line_start(data: &[u8], at: usize) -> usize {
     }
 }
 
+/// The offset of the newline that ends the line holding `at`, or the end of the data.
+fn line_end(data: &[u8], at: usize) -> usize {
+    bytes::find_byte(data, b'\n', at).unwrap_or(data.len())
+}
+
+/// The last byte a match covers, as a position within the data: a match ending past the final
+/// newline covers the line that newline ends, not the empty tail after it, which is not a line.
+fn last_byte(data: &[u8], m: &Match) -> usize {
+    m.end
+        .saturating_sub(1)
+        .max(m.start)
+        .min(data.len().saturating_sub(1))
+}
+
 /// The lines the matches cover, once each, with each line's own share of every match on it.
+///
+/// One forward walk: the lines a match covers are the lines it starts and ends on, the line
+/// numbers are the newlines counted between one reported line and the next, and the matches
+/// that can overlap a line are the run of them from the first that has not ended before it.
 fn matched_lines(data: &[u8], found: &[Match]) -> Vec<LineHit> {
-    let lines = line_spans(data);
     let mut out: Vec<LineHit> = Vec::new();
-    let mut next = 0usize;
-    for m in found {
-        let first = lines
-            .partition_point(|(s, _)| *s <= m.start)
-            .saturating_sub(1);
-        let last = lines
-            .partition_point(|(s, _)| *s <= m.end.saturating_sub(1).max(m.start))
-            .saturating_sub(1);
-        for (i, (s, e)) in lines
-            .iter()
-            .enumerate()
-            .take(last + 1)
-            .skip(first.max(next))
-        {
-            let (s, e) = (*s, *e);
+    // An empty file has no lines, so no match in it can be reported on one.
+    if data.is_empty() {
+        return out;
+    }
+    // The first byte of the first line no match has reported, and its number.
+    let mut pos = 0usize;
+    let mut number = 1u64;
+    // The first match that has not ended before the line being reported.
+    let mut first = 0usize;
+    for (i, m) in found.iter().enumerate() {
+        let last = line_end(data, last_byte(data, m));
+        if last < pos {
+            continue;
+        }
+        let mut ls = line_start(data, m.start).max(pos);
+        number += bytes::count_byte(&data[pos..ls], b'\n') as u64;
+        while ls <= last {
+            let le = line_end(data, ls);
+            while first < i && found[first].end <= ls {
+                first += 1;
+            }
             let mut spans = Vec::new();
-            for m in found.iter().filter(|m| m.start <= e && m.end > s) {
-                let (a, b) = (m.start.max(s), m.end.min(e));
+            for m in &found[first..] {
+                if m.start > le {
+                    break;
+                }
+                let (a, b) = (m.start.max(ls), m.end.min(le));
                 if b > a {
-                    spans.push((a - s, b - s));
+                    spans.push((a - ls, b - ls));
                 }
             }
             out.push(LineHit {
-                number: (i + 1) as u64,
-                offset: s as u64,
-                text: strip_cr(&data[s..e]).to_vec(),
+                number,
+                offset: ls as u64,
+                text: strip_cr(&data[ls..le]).to_vec(),
                 pooled: (0, 0),
                 matched: true,
                 spans,
                 text_start: 0,
             });
+            pos = le + 1;
+            number += 1;
+            ls = pos;
         }
-        next = next.max(last + 1);
     }
     out
 }
 
+/// How many lines the matches cover once each, for `-c`, which prints the number and never the
+/// lines themselves.
+fn matched_line_count(data: &[u8], found: &[Match]) -> u64 {
+    let mut count = 0u64;
+    let mut pos = 0usize;
+    if data.is_empty() {
+        return 0;
+    }
+    for m in found {
+        let last = line_end(data, last_byte(data, m));
+        if last < pos {
+            continue;
+        }
+        let mut ls = line_start(data, m.start).max(pos);
+        while ls <= last {
+            count += 1;
+            ls = line_end(data, ls) + 1;
+        }
+        pos = ls;
+    }
+    count
+}
+
 /// Every line of the file with what matched on it, for `--passthru -U`.
 fn every_line(data: &[u8], found: &[Match]) -> Vec<LineHit> {
-    line_spans(data)
-        .into_iter()
-        .enumerate()
-        .map(|(i, (s, e))| {
-            let mut spans = Vec::new();
-            for m in found.iter().filter(|m| m.start <= e && m.end > s) {
-                let (a, b) = (m.start.max(s), m.end.min(e));
-                if b > a {
-                    spans.push((a - s, b - s));
-                }
+    let mut out: Vec<LineHit> = Vec::new();
+    // Every match has ended before this index once the walk is past it, as they are in order.
+    let mut first = 0usize;
+    for (i, (ls, le)) in line_spans(data).into_iter().enumerate() {
+        while first < found.len() && found[first].end <= ls {
+            first += 1;
+        }
+        let mut spans = Vec::new();
+        for m in &found[first..] {
+            if m.start > le {
+                break;
             }
-            LineHit {
-                number: (i + 1) as u64,
-                offset: s as u64,
-                text: strip_cr(&data[s..e]).to_vec(),
-                pooled: (0, 0),
-                matched: !spans.is_empty(),
-                spans,
-                text_start: 0,
+            let (a, b) = (m.start.max(ls), m.end.min(le));
+            if b > a {
+                spans.push((a - ls, b - ls));
             }
-        })
-        .collect()
+        }
+        out.push(LineHit {
+            number: (i + 1) as u64,
+            offset: ls as u64,
+            text: strip_cr(&data[ls..le]).to_vec(),
+            pooled: (0, 0),
+            matched: !spans.is_empty(),
+            spans,
+            text_start: 0,
+        });
+    }
+    out
 }
 
 fn plain_lines(data: &[u8]) -> Vec<LineHit> {
@@ -2717,6 +2780,95 @@ mod tests {
             .map(|h| (h.number, h.matched))
             .collect();
         assert_eq!(got, [(3, false), (4, true), (5, false), (6, false)]);
+    }
+
+    /// `-U` hands the whole file to the pattern, so a match may cover several lines: each of
+    /// them is reported once, in order, and the count a `-c` run prints is the number of those
+    /// lines, not the number of matches.
+    #[test]
+    fn multiline_matches_report_every_line_they_cover() {
+        let f = Fixture::new("ml-lines");
+        f.file("a.txt", "one\nstart\nmid\nend\ntail\nstart x end\nlast\n");
+        let mut o = opts(&f, r"(?s)start.*?end");
+        o.multiline = true;
+        o.line_numbers = true;
+        let r = search(&o).unwrap();
+        let got: Vec<(u64, String)> = lines(&r).into_iter().map(|(_, n, t, _)| (n, t)).collect();
+        assert_eq!(
+            got,
+            [
+                (2, "start".to_string()),
+                (3, "mid".to_string()),
+                (4, "end".to_string()),
+                (6, "start x end".to_string()),
+            ]
+        );
+        assert_eq!(
+            r.files[0].matches, 4,
+            "one report per covered line, once each"
+        );
+        assert_eq!(r.stats.matches, 2, "two matches over the whole file");
+        let mut o = opts(&f, r"(?s)start.*?end");
+        o.multiline = true;
+        o.count = true;
+        assert_eq!(search(&o).unwrap().files[0].matches, 4, "-c counts lines");
+        let mut o = opts(&f, r"(?s)start.*?end");
+        o.multiline = true;
+        o.only_matching = true;
+        o.line_numbers = true;
+        let starts: Vec<(u64, String)> = lines(&search(&o).unwrap())
+            .into_iter()
+            .map(|(_, n, t, _)| (n, t))
+            .collect();
+        assert_eq!(
+            starts,
+            [
+                (2, "start\nmid\nend".to_string()),
+                (6, "start x end".to_string())
+            ],
+            "-o reports the match whole, numbered by the line it starts on"
+        );
+    }
+
+    /// The lines a match covers are counted the same way whether they are built or counted:
+    /// one line each, the last line of the file when the match ends past its final newline,
+    /// and none for an empty file, which has no lines at all.
+    #[test]
+    fn multiline_line_count_matches_the_lines_built() {
+        let cases: [&[u8]; 7] = [
+            b"",
+            b"a",
+            b"a\n",
+            b"a\nb",
+            b"a\nb\n",
+            b"\n\n",
+            b"start\nmid\nend",
+        ];
+        for data in cases {
+            for src in [r"a", r"(?s)start.*?end", r"(?:)", r"(?m)^$", r"\w"] {
+                let found = Pattern::new(src, false, false, false)
+                    .unwrap()
+                    .find_all(data, usize::MAX);
+                assert_eq!(
+                    matched_line_count(data, &found),
+                    matched_lines(data, &found).len() as u64,
+                    "{src} over {data:?}"
+                );
+            }
+        }
+        let empty = Pattern::new(r"^$", false, false, false).unwrap();
+        assert_eq!(
+            matched_lines(b"", &empty.find_all(b"", usize::MAX)).len(),
+            0
+        );
+        let end = Pattern::new(r"(?:)", false, false, false).unwrap();
+        let trailing = end.find_all(b"a\n", usize::MAX);
+        assert_eq!(trailing.len(), 3);
+        assert_eq!(
+            matched_lines(b"a\n", &trailing).len(),
+            1,
+            "the empty tail after the final newline is not a line"
+        );
     }
 
     #[test]
