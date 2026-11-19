@@ -196,6 +196,9 @@ enum Inst<S> {
     Jmp(usize),
     Assert(Assert),
     Match,
+    /// Record the current position in a capture slot: pairs of slots bracket a group, and
+    /// only the capture program carries these.
+    Save(u32),
 }
 
 /// A set of symbols an instruction consumes.
@@ -289,6 +292,9 @@ enum Node {
     Alt(Vec<Node>),
     Repeat(Box<Node>, u32, Option<u32>, bool),
     Assert(Assert),
+    /// A capturing group, by index: a `Save` pair when the program is built for captures,
+    /// and transparent otherwise.
+    Group(u32, Box<Node>),
 }
 
 /// A compiled pattern.
@@ -303,6 +309,12 @@ pub struct Regex {
     /// The character program, present when the pattern needs Unicode semantics.
     cprog: Option<Vec<Inst<CharClass>>>,
     flags: Flags,
+    /// How many capturing groups the pattern has.
+    groups: usize,
+    /// The byte and character programs with `Save` instructions, built only when the pattern
+    /// has groups: they exist for `-r`, and nothing on the search path touches them.
+    cap_bytes: Option<Vec<Inst<ByteSet>>>,
+    cap_chars: Option<Vec<Inst<CharClass>>>,
     /// The whole pattern, when it is a case-sensitive literal.
     lit: Option<Vec<u8>>,
     /// A byte every match must contain, for prefiltering.
@@ -326,12 +338,19 @@ impl Regex {
 
     pub fn new_with(pattern: &str, flags: Flags) -> Result<Regex, String> {
         let parsed = Parser::parse(pattern, flags, false)?;
-        let node = parsed.node;
+        // The search programs and every analysis see a group-free tree; the capture program
+        // is built from `parsed.node`, which still has them.
+        let node = strip_groups(&parsed.node);
         let mut prog = Vec::new();
-        compile(&node, &mut prog, byte_symbols);
+        compile(&node, &mut prog, byte_symbols, false);
         prog.push(Inst::Match);
-        // An inline `(?i)` anywhere in the pattern rules out the literal fast path.
-        let lit = literal_of(&node, parsed.folded);
+        // An inline `(?i)` anywhere in the pattern rules out the literal fast path, and so
+        // does a capturing group: a whole-pattern literal has no groups to report, so `-r`
+        // could not refer to one.
+        let lit = match parsed.groups {
+            0 => literal_of(&node, parsed.folded),
+            _ => None,
+        };
         let required = required_byte(&node);
         // A literal's rarest byte is the best prefilter the parser can give us cheaply;
         // for everything else use the single mandatory byte of the leftmost atom.
@@ -347,15 +366,34 @@ impl Regex {
             true => {
                 let chars = Parser::parse(pattern, flags, true)?.node;
                 let mut cprog = Vec::new();
-                compile(&chars, &mut cprog, char_symbols);
+                compile(&chars, &mut cprog, char_symbols, false);
                 cprog.push(Inst::Match);
                 Some(cprog)
             }
             false => None,
         };
         let mut rprog = Vec::new();
-        compile(&reverse_node(&node), &mut rprog, byte_symbols);
+        compile(&reverse_node(&node), &mut rprog, byte_symbols, false);
         rprog.push(Inst::Match);
+        // The capture programs keep the group boundaries, which every other program drops.
+        let (cap_bytes, cap_chars) = if parsed.groups > 0 {
+            let mut cap = Vec::new();
+            compile(&parsed.node, &mut cap, byte_symbols, true);
+            cap.push(Inst::Match);
+            let chars = match parsed.unicode {
+                true => {
+                    let tree = Parser::parse(pattern, flags, true)?.node;
+                    let mut c = Vec::new();
+                    compile(&tree, &mut c, char_symbols, true);
+                    c.push(Inst::Match);
+                    Some(c)
+                }
+                false => None,
+            };
+            (Some(cap), chars)
+        } else {
+            (None, None)
+        };
         // A folded pattern's bytes in the tree are pre-folded and no longer literal.
         let run = match parsed.folded {
             true => None,
@@ -370,6 +408,9 @@ impl Regex {
             prog,
             rprog,
             cprog,
+            groups: parsed.groups,
+            cap_bytes,
+            cap_chars,
             flags,
             lit,
             required,
@@ -382,6 +423,42 @@ impl Regex {
 
     pub fn flags(&self) -> Flags {
         self.flags
+    }
+
+    /// How many capturing groups the pattern has.
+    pub fn group_count(&self) -> usize {
+        self.groups
+    }
+
+    /// The capture spans of the leftmost-first match at or after `start`: index 0 is the
+    /// whole match, and a group that did not take part in it is `None`. Built for `-r`, so
+    /// it runs the capture program and nothing else.
+    pub fn captures_at(&self, hay: &[u8], start: usize) -> Option<Vec<Option<(usize, usize)>>> {
+        if start > hay.len() {
+            return None;
+        }
+        let nslots = 2 * (self.groups + 1);
+        // Same program choice as `find_at`: text that is not ASCII goes through the character
+        // program, so a group around `é` is bounded by the character and not by one byte.
+        if let (Some(cap), Some(_)) = (&self.cap_chars, &self.cprog) {
+            if !hay.is_ascii() {
+                if let Ok(text) = std::str::from_utf8(hay) {
+                    if text.is_char_boundary(start) {
+                        let (chars, bytes) = decode(text);
+                        let ch_start = bytes.partition_point(|&at| at < start);
+                        if let Some((_, slots)) = run_capture(cap, &chars[..], ch_start, nslots) {
+                            return Some(spans_from_slots(&slots, |i| bytes[i]));
+                        }
+                    }
+                }
+            }
+        }
+        let Some(cap) = self.cap_bytes.as_ref() else {
+            let m = self.find_at(hay, start)?;
+            return Some(vec![Some((m.start, m.end))]);
+        };
+        let (_, slots) = run_capture(cap, hay, start, nslots)?;
+        Some(spans_from_slots(&slots, |i| i))
     }
 
     /// True when the pattern uses no line-relative assertion, so a whole block can be
@@ -507,6 +584,181 @@ fn decode(text: &str) -> (Vec<char>, Vec<usize>) {
     }
     bytes.push(text.len());
     (chars, bytes)
+}
+
+/// Turn a slot array into capture spans, mapping each position through `to_offset`.
+fn spans_from_slots(
+    slots: &[usize],
+    to_offset: impl Fn(usize) -> usize,
+) -> Vec<Option<(usize, usize)>> {
+    slots
+        .chunks(2)
+        .map(|pair| match (pair.first(), pair.get(1)) {
+            (Some(&a), Some(&b)) if a != usize::MAX && b != usize::MAX => {
+                Some((to_offset(a), to_offset(b)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// One thread of the capture VM: the search VM's `(pc, start)` pair plus the slot array that
+/// the `Save` instructions have written so far.
+struct CapThread {
+    pc: usize,
+    start: usize,
+    slots: Vec<usize>,
+}
+
+struct CapPending {
+    best: Option<(Match, Vec<usize>)>,
+    cut: bool,
+}
+
+/// The Pike VM again, over a program that carries `Save` instructions. It exists for `-r`,
+/// where a handful of matched lines need to know where each group began and ended, so it
+/// buys correctness with a slot array per thread and leaves the search path untouched.
+fn run_capture<H, S>(
+    prog: &[Inst<S>],
+    hay: &H,
+    start: usize,
+    nslots: usize,
+) -> Option<(Match, Vec<usize>)>
+where
+    H: Hay + ?Sized,
+    S: Symbols<Sym = H::Sym>,
+{
+    let mut clist: Vec<CapThread> = Vec::new();
+    let mut nlist: Vec<CapThread> = Vec::new();
+    let mut cl_marks = vec![false; prog.len()];
+    let mut nl_marks = vec![false; prog.len()];
+    let mut st = CapPending {
+        best: None,
+        cut: false,
+    };
+    let mut sp = start;
+    loop {
+        st.cut = false;
+        if st.best.is_none() {
+            let slots = vec![usize::MAX; nslots];
+            add_cap_thread(
+                prog,
+                &mut clist,
+                &mut cl_marks,
+                0,
+                sp,
+                slots,
+                hay,
+                sp,
+                &mut st,
+            );
+        }
+        let Some(sym) = hay.sym(sp) else {
+            break;
+        };
+        for t in clist.drain(..) {
+            if let Inst::Set(set) = &prog[t.pc] {
+                if set.permits(sym) {
+                    add_cap_thread(
+                        prog,
+                        &mut nlist,
+                        &mut nl_marks,
+                        t.pc + 1,
+                        t.start,
+                        t.slots,
+                        hay,
+                        sp + 1,
+                        &mut st,
+                    );
+                }
+            }
+        }
+        std::mem::swap(&mut clist, &mut nlist);
+        std::mem::swap(&mut cl_marks, &mut nl_marks);
+        nl_marks.fill(false);
+        nlist.clear();
+        sp += 1;
+        if st.best.is_some() && clist.is_empty() {
+            break;
+        }
+    }
+    st.best
+}
+
+/// Epsilon closure over a capture program, keeping the slots each path has written.
+#[allow(clippy::too_many_arguments)]
+fn add_cap_thread<H, S>(
+    prog: &[Inst<S>],
+    list: &mut Vec<CapThread>,
+    visited: &mut [bool],
+    mut pc: usize,
+    start: usize,
+    mut slots: Vec<usize>,
+    hay: &H,
+    sp: usize,
+    st: &mut CapPending,
+) where
+    H: Hay + ?Sized,
+    S: Symbols<Sym = H::Sym>,
+{
+    if st.cut || visited[pc] {
+        return;
+    }
+    visited[pc] = true;
+    loop {
+        if st.cut {
+            return;
+        }
+        match &prog[pc] {
+            Inst::Jmp(to) => {
+                if visited[*to] {
+                    return;
+                }
+                visited[*to] = true;
+                pc = *to;
+            }
+            Inst::Split(a, b) => {
+                add_cap_thread(prog, list, visited, *a, start, slots.clone(), hay, sp, st);
+                if visited[*b] {
+                    return;
+                }
+                visited[*b] = true;
+                pc = *b;
+            }
+            Inst::Assert(a) => {
+                if !hay.assert_holds(*a, sp) {
+                    return;
+                }
+                if visited[pc + 1] {
+                    return;
+                }
+                visited[pc + 1] = true;
+                pc += 1;
+            }
+            Inst::Save(slot) => {
+                slots[*slot as usize] = sp;
+                if visited[pc + 1] {
+                    return;
+                }
+                visited[pc + 1] = true;
+                pc += 1;
+            }
+            Inst::Set(_) => {
+                list.push(CapThread { pc, start, slots });
+                return;
+            }
+            Inst::Match => {
+                let m = Match { start, end: sp };
+                slots[0] = start;
+                slots[1] = sp;
+                if st.best.as_ref().is_none_or(|(b, _)| m.start <= b.start) {
+                    st.best = Some((m, slots.clone()));
+                }
+                st.cut = true;
+                return;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -676,6 +928,13 @@ fn add_thread<H, S>(
                 visited[pc + 1] = true;
                 pc += 1;
             }
+            Inst::Save(_) => {
+                if visited[pc + 1] {
+                    return;
+                }
+                visited[pc + 1] = true;
+                pc += 1;
+            }
             Inst::Set(_) => {
                 list.push(Thread { pc, start });
                 return;
@@ -699,7 +958,10 @@ fn add_thread<H, S>(
 }
 
 /// Compile `n` into `prog`, asking `symbols` what each consuming atom matches.
-fn compile<S>(n: &Node, prog: &mut Vec<Inst<S>>, symbols: fn(&Node) -> S) -> usize {
+/// Build the program for `n`. `caps` asks for `Save` instructions around every capturing
+/// group, which only the capture VM reads: the search program leaves them out, so the hot
+/// path carries no writes it never uses.
+fn compile<S>(n: &Node, prog: &mut Vec<Inst<S>>, symbols: fn(&Node) -> S, caps: bool) -> usize {
     match n {
         Node::Empty => {}
         Node::Byte(_) | Node::Set(_) | Node::Char(_) | Node::CharSet(_) | Node::Dot(_) => {
@@ -707,7 +969,7 @@ fn compile<S>(n: &Node, prog: &mut Vec<Inst<S>>, symbols: fn(&Node) -> S) -> usi
         }
         Node::Concat(parts) => {
             for p in parts {
-                compile(p, prog, symbols);
+                compile(p, prog, symbols, caps);
             }
         }
         Node::Alt(branches) => {
@@ -715,11 +977,11 @@ fn compile<S>(n: &Node, prog: &mut Vec<Inst<S>>, symbols: fn(&Node) -> S) -> usi
             let mut jumps = Vec::new();
             for (i, b) in branches.iter().enumerate() {
                 if i + 1 == branches.len() {
-                    compile(b, prog, symbols);
+                    compile(b, prog, symbols, caps);
                 } else {
                     let split = prog.len();
                     prog.push(Inst::Split(0, 0));
-                    compile(b, prog, symbols);
+                    compile(b, prog, symbols, caps);
                     jumps.push(prog.len());
                     prog.push(Inst::Jmp(0));
                     let next = prog.len();
@@ -736,7 +998,7 @@ fn compile<S>(n: &Node, prog: &mut Vec<Inst<S>>, symbols: fn(&Node) -> S) -> usi
         }
         Node::Repeat(inner, min, max, greedy) => {
             for _ in 0..*min {
-                compile(inner, prog, symbols);
+                compile(inner, prog, symbols, caps);
             }
             match max {
                 None => {
@@ -744,7 +1006,7 @@ fn compile<S>(n: &Node, prog: &mut Vec<Inst<S>>, symbols: fn(&Node) -> S) -> usi
                     let split = prog.len();
                     prog.push(Inst::Split(0, 0));
                     let body = prog.len();
-                    compile(inner, prog, symbols);
+                    compile(inner, prog, symbols, caps);
                     prog.push(Inst::Jmp(split));
                     let out = prog.len();
                     prog[split] = if *greedy {
@@ -760,7 +1022,7 @@ fn compile<S>(n: &Node, prog: &mut Vec<Inst<S>>, symbols: fn(&Node) -> S) -> usi
                         let split = prog.len();
                         prog.push(Inst::Split(0, 0));
                         splits.push(split);
-                        compile(inner, prog, symbols);
+                        compile(inner, prog, symbols, caps);
                     }
                     let out = prog.len();
                     for split in splits {
@@ -775,6 +1037,15 @@ fn compile<S>(n: &Node, prog: &mut Vec<Inst<S>>, symbols: fn(&Node) -> S) -> usi
             }
         }
         Node::Assert(a) => prog.push(Inst::Assert(*a)),
+        Node::Group(i, inner) => {
+            if caps {
+                prog.push(Inst::Save(2 * *i));
+            }
+            compile(inner, prog, symbols, caps);
+            if caps {
+                prog.push(Inst::Save(2 * *i + 1));
+            }
+        }
     }
     prog.len()
 }
@@ -886,6 +1157,7 @@ fn required_byte(n: &Node) -> Option<u8> {
         }
         // An optional repetition matches zero times, and then its byte never appears.
         Node::Repeat(inner, min, _, _) => (*min > 0).then(|| required_byte(inner)).flatten(),
+        Node::Group(_, inner) => required_byte(inner),
         Node::Assert(_) | Node::Dot(_) | Node::Empty => None,
     }
 }
@@ -1355,10 +1627,32 @@ fn closure(prog: &[Inst<ByteSet>], entry: &[u32], ctx: u8) -> (Vec<u32>, bool) {
                 }
             }
             Inst::Match => accept = true,
+            Inst::Save(_) => stack.push(pc + 1),
         }
     }
     pcs.sort_unstable();
     (pcs, accept)
+}
+
+/// The same tree with capturing groups rubbed out. Groups change nothing about which text
+/// matches, so every analysis and the search programs work on the stripped tree; only the
+/// capture program, which has to know where each group starts and ends, keeps them.
+fn strip_groups(n: &Node) -> Node {
+    match n {
+        Node::Group(_, inner) => strip_groups(inner),
+        Node::Concat(parts) => Node::Concat(parts.iter().map(strip_groups).collect()),
+        Node::Alt(branches) => Node::Alt(branches.iter().map(strip_groups).collect()),
+        Node::Repeat(inner, min, max, greedy) => {
+            Node::Repeat(Box::new(strip_groups(inner)), *min, *max, *greedy)
+        }
+        Node::Empty => Node::Empty,
+        Node::Byte(b) => Node::Byte(*b),
+        Node::Set(s) => Node::Set(*s),
+        Node::Char(c) => Node::Char(*c),
+        Node::CharSet(cc) => Node::CharSet(cc.clone()),
+        Node::Dot(m) => Node::Dot(*m),
+        Node::Assert(a) => Node::Assert(*a),
+    }
 }
 
 /// The pattern that matches a string backwards: the same language read right to left.
@@ -1378,6 +1672,7 @@ fn reverse_node(n: &Node) -> Node {
         Node::Repeat(inner, min, max, greedy) => {
             Node::Repeat(Box::new(reverse_node(inner)), *min, *max, *greedy)
         }
+        Node::Group(i, inner) => Node::Group(*i, Box::new(reverse_node(inner))),
         Node::Assert(a) => Node::Assert(match a {
             Assert::StartText => Assert::EndText,
             Assert::EndText => Assert::StartText,
@@ -1643,6 +1938,9 @@ struct Parser<'a> {
     /// shorthand (`\d`, `\w`, `\s`, `\b`), a POSIX class, a character outside ASCII,
     /// or `-i` over one.
     needs_unicode: bool,
+    /// The index the next capturing group takes. Group 0 is the whole match, which the VM
+    /// fills in from the match itself, so counting starts at 1.
+    groups: usize,
 }
 
 /// What one parse produced.
@@ -1652,6 +1950,8 @@ struct Parsed {
     folded: bool,
     /// The pattern needs Unicode semantics, so it also needs a character program.
     unicode: bool,
+    /// How many capturing groups the pattern has.
+    groups: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -1667,6 +1967,7 @@ impl<'a> Parser<'a> {
             folded: flags.case_insensitive,
             code_points,
             needs_unicode: false,
+            groups: 1,
         };
         let node = p.parse_alternation()?;
         if p.at < p.src.len() {
@@ -1676,6 +1977,7 @@ impl<'a> Parser<'a> {
             node,
             folded: p.folded,
             unicode: p.needs_unicode,
+            groups: p.groups - 1,
         })
     }
     fn err_at(&self, msg: &str, at: usize) -> String {
@@ -1923,7 +2225,14 @@ impl<'a> Parser<'a> {
                 _ => return Err(self.err_at("unknown (? group", self.at)),
             }
         }
-        let _ = capturing;
+        // A capturing group takes the next index; `(?:` is transparent.
+        let index = if capturing {
+            let i = self.groups as u32;
+            self.groups += 1;
+            Some(i)
+        } else {
+            None
+        };
         let body = self.parse_alternation()?;
         if self.peek() != Some(b')') {
             return Err(self.err_at("unterminated group", open));
@@ -1931,7 +2240,10 @@ impl<'a> Parser<'a> {
         self.at += 1;
         self.flags = saved;
         self.depth -= 1;
-        Ok(body)
+        Ok(match index {
+            Some(i) => Node::Group(i, Box::new(body)),
+            None => body,
+        })
     }
 
     /// `(?i)`, `(?ism)`, `(?-i)` at a group or pattern start. Returns true when the
@@ -3184,5 +3496,58 @@ mod tests {
                 assert_eq!(re.is_match(hay), reference(pat, hay), "{pat:?} on {hay:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    fn caps(pat: &str, hay: &str) -> Vec<Option<(usize, usize)>> {
+        let re = Regex::new(pat).unwrap();
+        re.captures_at(hay.as_bytes(), 0).unwrap()
+    }
+
+    #[test]
+    fn groups_report_their_spans() {
+        // The whole match is group 0, and each group follows in pattern order.
+        assert_eq!(
+            caps(r"(\w+)@(\w+)", "mail me at bob@host now"),
+            vec![Some((11, 19)), Some((11, 14)), Some((15, 19))]
+        );
+        // A group that did not take part is absent, not empty.
+        let got = caps(r"(a)|(b)", "zzb");
+        assert_eq!(got[0], Some((2, 3)));
+        assert_eq!(got[1], None);
+        assert_eq!(got[2], Some((2, 3)));
+        // A repeated group keeps its last iteration, as every engine does.
+        assert_eq!(caps(r"(ab)+", "ababab")[1], Some((4, 6)));
+        // Alternation, nesting and an empty group all report something usable.
+        assert_eq!(
+            caps(r"((\d{4})-(\d{2}))", "on 2026-11"),
+            vec![Some((3, 10)), Some((3, 10)), Some((3, 7)), Some((8, 10))]
+        );
+        assert_eq!(caps(r"x()y", "xy")[1], Some((1, 1)));
+    }
+
+    #[test]
+    fn captures_over_characters_are_bounded_by_bytes() {
+        // The character program produces character offsets; they must come back as byte
+        // offsets, or a replacement would slice a code point in half.
+        let got = caps(r"(\p{L}+)—(\p{L}+)", "é—ü");
+        assert_eq!(got[0], Some((0, "é—ü".len())));
+        assert_eq!(got[1], Some((0, "é".len())));
+        assert_eq!(got[2], Some(("é—".len(), "é—ü".len())));
+    }
+
+    #[test]
+    fn a_pattern_without_groups_has_group_zero_only() {
+        let re = Regex::new("needle").unwrap();
+        assert_eq!(re.group_count(), 0);
+        assert_eq!(
+            re.captures_at(b"a needle here", 0).unwrap(),
+            vec![Some((2, 8))]
+        );
+        assert!(re.captures_at(b"nothing", 0).is_none());
     }
 }

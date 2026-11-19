@@ -914,3 +914,47 @@ fn ignore_sources_can_be_switched_off() {
     let none = stdout(&run(&["search", "-l", "--no-ignore-files", "needle"], &dir));
     assert_eq!(none.lines().count(), 3, "{none}");
 }
+
+#[test]
+fn replace_rewrites_matches() {
+    let f = Fixture::new("replace");
+    let dir = f.root.join("rep");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("m.txt"), "a1 a2 a3\nzzz\n").unwrap();
+
+    // A replacement covers every match on the line, not just the first.
+    assert_eq!(
+        stdout(&run(&["search", "-h", "-r", "[$1]", r"a(.)"], &dir)),
+        "[1] [2] [3]\n"
+    );
+    assert_eq!(
+        stdout(&run(&["search", "-h", "-r", "", r"a."], &dir)),
+        "  \n"
+    );
+
+    // `-o` prints just the replacement, one per match.
+    assert_eq!(
+        stdout(&run(&["search", "-h", "-o", "-r", "<$1>", r"a(.)"], &dir)),
+        "<1>\n<2>\n<3>\n"
+    );
+    // `$0` is the whole match, `$$` a literal dollar, `${1}` the braced spelling, and grep's
+    // `\1` is accepted as the same thing.
+    assert_eq!(
+        stdout(&run(&["search", "-h", "-o", "-r", "$0/$0", r"a."], &dir)),
+        "a1/a1\na2/a2\na3/a3\n"
+    );
+    assert_eq!(
+        stdout(&run(&["search", "-h", "-o", "-r", "$$${1}", r"a(.)"], &dir)),
+        "$1\n$2\n$3\n"
+    );
+    assert_eq!(
+        stdout(&run(&["search", "-h", "-o", "-r", r"\1", r"a(.)"], &dir)),
+        "1\n2\n3\n"
+    );
+
+    // A group the pattern does not have is refused, as grep refuses an invalid back
+    // reference, rather than printing nothing.
+    let bad = run(&["search", "-r", "$3", r"a(.)"], &dir);
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).contains("group $3"), "{}", stderr(&bad));
+}
