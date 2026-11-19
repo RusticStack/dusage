@@ -879,10 +879,6 @@ impl Run {
 
     fn one(&mut self, spec: &str, out: &mut impl Write) -> io::Result<()> {
         let path = Path::new(spec);
-        if let Err(e) = enumerate::refuse_reparse_root(path) {
-            self.error(e.to_string());
-            return Ok(());
-        }
         let md = match fs::symlink_metadata(path) {
             Ok(m) => m,
             Err(e) => {
@@ -890,6 +886,10 @@ impl Run {
                 return Ok(());
             }
         };
+        if let Err(e) = enumerate::refuse_reparse_root(path) {
+            self.error(e.to_string());
+            return Ok(());
+        }
         let mtime = md.modified().unwrap_or(UNIX_EPOCH);
         if !md.is_dir() {
             let size = md.len();
