@@ -5,8 +5,10 @@
 //! is here: a canonical-Huffman decoder over a bit reader, plus the CRC-32 that a gzip
 //! trailer uses to prove the expansion was right.
 //!
-//! Only gzip is handled. It is the format logs are rotated into, and the one an inflater
-//! this size gets right; bzip2, xz, LZ4 and zstd would each need a decoder of their own.
+//! This module is gzip only. The other formats `-z` reads have one module each beside it —
+//! [`crate::archive_bz2`], [`crate::archive_lz4`], [`crate::archive_xz`],
+//! [`crate::archive_zstd`] and [`crate::archive_brotli`] — and `search` dispatches on the
+//! magic here and the `.br` extension there.
 
 use std::io;
 

@@ -62,7 +62,8 @@ OPTIONS:
         --include-zero     with -c, also print files that matched nothing
         --count-matches    print the number of individual matches per file
     -o, --only-matching    print only the matching part of each line
-    -z, --search-zip       expand gzip files and search their contents
+    -z, --search-zip       expand compressed files and search their contents: gzip,
+                           bzip2, lz4, xz, zstd by their magic, brotli by its .br name
     -U, --multiline        let a match span lines: the file is searched whole
         --multiline-dotall with -U, also let '.' match a newline
     -r, --replace TEXT     print each line with its matches replaced by TEXT;

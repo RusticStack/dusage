@@ -992,17 +992,13 @@ fn scan_file_with(
     // A compressed file has no lines to stream: it is expanded whole first, and what is
     // searched is the expansion. The first block is already read, so the magic costs a
     // comparison against bytes a scan would have read anyway.
-    if o.search_zip && crate::archive::is_gzip(&buf[..n]) {
+    if o.search_zip && may_be_compressed(path, &buf[..n]) {
         let mut packed = buf[..n].to_vec();
         f.read_to_end(&mut packed)?;
         stats.bytes_scanned += packed.len() as u64;
-        let data = crate::archive::gunzip(&packed).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: {e}", path.display()),
-            )
-        })?;
-        return scan_expanded(path, &data, o, stats);
+        if let Some(data) = expand_stream(path, &packed)? {
+            return scan_expanded(path, &data, o, stats);
+        }
     }
     // A file that needs transcoding is read whole: UTF-16 code units straddle the block
     // boundary, so there is nothing to stream. Everything else keeps the streaming path.
@@ -1091,6 +1087,50 @@ fn scan_expanded(
     finished(path, o, stats, sc, binary)
 }
 
+/// True when the first block could be a compressed stream this tool expands. Brotli carries
+/// no signature, so it is recognised by the `.br` name and everything else by its magic.
+fn may_be_compressed(path: &Path, head: &[u8]) -> bool {
+    crate::archive::is_gzip(head)
+        || crate::archive_bz2::is_bzip2(head)
+        || crate::archive_lz4::is_lz4(head)
+        || crate::archive_xz::is_xz(head)
+        || crate::archive_zstd::is_zstd(head)
+        || has_br_extension(path)
+}
+
+fn has_br_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("br"))
+}
+
+/// The expansion of a compressed file, or `None` when these bytes are not one of the
+/// formats `-z` understands. A stream that starts right but is corrupt is an error that
+/// names the path, never a silently short answer.
+fn expand_stream(path: &Path, data: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    let out = if crate::archive::is_gzip(data) {
+        crate::archive::gunzip(data)
+    } else if crate::archive_bz2::is_bzip2(data) {
+        crate::archive_bz2::decompress(data)
+    } else if crate::archive_lz4::is_lz4(data) {
+        crate::archive_lz4::decompress(data)
+    } else if crate::archive_xz::is_xz(data) {
+        crate::archive_xz::decompress(data)
+    } else if crate::archive_zstd::is_zstd(data) {
+        crate::archive_zstd::decompress(data)
+    } else if has_br_extension(path) {
+        crate::archive_brotli::decompress(data)
+    } else {
+        return Ok(None);
+    };
+    out.map(Some).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {e}", path.display()),
+        )
+    })
+}
+
 /// Search a whole file at once, so a match may span lines (`-U`). The bytes have to be in
 /// memory for that, which is the price of the mode; every other mode streams.
 fn scan_multiline(
@@ -1103,14 +1143,11 @@ fn scan_multiline(
     let mut data = Vec::new();
     f.read_to_end(&mut data)?;
     stats.bytes_scanned += data.len() as u64;
-    if o.search_zip && crate::archive::is_gzip(&data) {
-        data = crate::archive::gunzip(&data).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: {e}", path.display()),
-            )
-        })?;
-        stats.bytes_scanned += data.len() as u64;
+    if o.search_zip {
+        if let Some(expanded) = expand_stream(path, &data)? {
+            data = expanded;
+            stats.bytes_scanned += data.len() as u64;
+        }
     }
     let found = o.pattern.find_all(&data, usize::MAX);
     let name = || path.to_string_lossy().into_owned();
