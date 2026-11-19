@@ -322,6 +322,9 @@ pub struct Regex {
     /// A substring every match must contain, with its skip plan built once so the per-line
     /// check costs a scan and nothing else.
     run: Option<(Vec<u8>, crate::bytes::Finder)>,
+    /// The runs a block scan jumps between, when a byte walk can rely on them: the pattern
+    /// holds no assertion, cannot match a newline, and cannot match the empty string.
+    cand: Option<Candidates>,
     /// No `^`, `$`, `\b` or `\B` anywhere in the pattern.
     assertion_free: bool,
     /// The assertion context bits the byte program reads, which is what decides how many
@@ -402,6 +405,16 @@ impl Regex {
                 (run, finder)
             }),
         };
+        // A candidate scan walks a slice of the haystack and works from newline bounds, so it
+        // only stands in for the plain byte walk when the pattern reads no assertion, cannot
+        // match across a line, and every match holds one of the runs.
+        let cand = match parsed.folded {
+            true => None,
+            false => match candidates_are_sound(&node, &prog) {
+                true => candidate_runs(&node).and_then(Candidates::new),
+                false => None,
+            },
+        };
         let ctx_mask = ctx_mask(&prog);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         Ok(Regex {
@@ -415,6 +428,7 @@ impl Regex {
             lit,
             required,
             run,
+            cand,
             ctx_mask,
             id,
             assertion_free: !has_assertion(&node),
@@ -481,6 +495,13 @@ impl Regex {
             let i = crate::bytes::memmem_from(hay, lit, from)?;
             return Some(i + lit.len());
         }
+        // With runs to jump between, the automaton only walks where a match could be; the
+        // bytes between two candidates are skipped at the speed of a vector compare.
+        if let Some(cand) = &self.cand {
+            if let Some(found) = self.candidate_end(cand, hay, from) {
+                return found;
+            }
+        }
         if let Some((_, finder)) = &self.run {
             finder.find_from(hay, from)?;
         }
@@ -490,6 +511,41 @@ impl Regex {
             Some(Some(None)) => None,
             _ => self.find_at(hay, from).map(|m| m.end),
         }
+    }
+
+    /// The end of a match found by jumping between candidate runs. `None` is the automaton
+    /// giving up (the state cap), which leaves the answer to the slow path; `Some(None)` is a
+    /// proof that no match exists.
+    fn candidate_end(&self, cand: &Candidates, hay: &[u8], from: usize) -> Option<Option<usize>> {
+        let mut at = from;
+        while let Some((p, i)) = cand.scan.find_any(hay, at) {
+            let (run, place) = &cand.runs[i];
+            let end = p + run.len();
+            match place {
+                Place::Whole => return Some(Some(end)),
+                // The match starts where the run does: an anchored walk from there is exactly
+                // the match, and stops at its end.
+                Place::Start => match with_dfa(self, |c| c.forward_end(&self.prog, &hay[p..], 0)) {
+                    Some(Some(Some(end))) => return Some(Some(p + end)),
+                    Some(Some(None)) => at = p + 1,
+                    _ => return None,
+                },
+                // Nothing is known about where the run sits, so the line holding it is the
+                // least the automaton can be asked to walk. A line with no accept in it holds
+                // no match, because no match may cross the newline that ends it. The walk still
+                // begins at `from`: a match starting before the caller's offset is not its to
+                // report, exactly as in the plain byte walk.
+                Place::Any => {
+                    let (ls, le) = (line_start(hay, p).max(from), line_end(hay, p));
+                    match with_dfa(self, |c| c.forward_end(&self.prog, &hay[ls..le], 0)) {
+                        Some(Some(Some(end))) => return Some(Some(ls + end)),
+                        Some(Some(None)) => at = le + 1,
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        Some(None)
     }
 
     /// True when the pattern uses no line-relative assertion, so a whole block can be
@@ -1272,6 +1328,143 @@ fn required_run(n: &Node) -> Option<Vec<u8>> {
         _ => None,
     }
 }
+
+/// Where in a match the run a candidate scan looks for sits, which is what decides how little
+/// the automaton has to walk to confirm a candidate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Place {
+    /// The run is the whole match.
+    Whole,
+    /// Every match begins with it: an anchored forward walk from its first byte is the match.
+    Start,
+    /// Every match contains it somewhere, so the line holding it has to be walked.
+    Any,
+}
+
+/// The runs a prefiltered scan jumps between, how each of them sits in a match, and the scan
+/// itself.
+#[derive(Debug)]
+struct Candidates {
+    runs: Vec<(Vec<u8>, Place)>,
+    scan: crate::simd::Prefilter,
+}
+
+impl Candidates {
+    fn new(runs: Vec<(Vec<u8>, Place)>) -> Option<Candidates> {
+        let needles: Vec<Vec<u8>> = runs.iter().map(|(run, _)| run.clone()).collect();
+        let scan = crate::simd::Prefilter::new(needles.clone())?;
+        // The scan answers an index into its needles, which are sorted longest first; the runs
+        // are kept in that same order.
+        let mut sorted = Vec::with_capacity(runs.len());
+        for needle in scan.needles() {
+            let (_, place) = runs.iter().find(|(run, _)| run == needle)?;
+            sorted.push((needle.clone(), *place));
+        }
+        Some(Candidates { runs: sorted, scan })
+    }
+}
+
+/// The runs a prefiltered scan may look for: one per alternation branch when every branch has a
+/// run of its own, and otherwise the single run every match must contain.
+fn candidate_runs(n: &Node) -> Option<Vec<(Vec<u8>, Place)>> {
+    if let Node::Alt(branches) = n {
+        if branches.len() > 1 {
+            let per_branch: Option<Vec<_>> = branches.iter().map(single_run).collect();
+            if let Some(runs) = per_branch.filter(|r| r.len() <= crate::simd::MAX_PREFILTER) {
+                let mut out: Vec<(Vec<u8>, Place)> = Vec::with_capacity(runs.len());
+                for run in runs.into_iter().flatten() {
+                    if !out.iter().any(|(seen, _)| *seen == run.0) {
+                        out.push(run);
+                    }
+                }
+                if !out.is_empty() {
+                    return Some(out);
+                }
+            }
+        }
+    }
+    single_run(n)
+}
+
+/// The one run that best stands in for `n`, and where it sits. A run the match begins with is
+/// worth more than one it merely contains — it costs a walk over the match instead of over its
+/// line — so an anchored run wins a tie and loses to a longer one, which is rarer to find.
+fn single_run(n: &Node) -> Option<Vec<(Vec<u8>, Place)>> {
+    if let Some(lit) = pure_literal(n) {
+        return (lit.len() >= MIN_RUN).then_some(vec![(lit, Place::Whole)]);
+    }
+    let anchored = anchor_run(n).filter(|run| run.len() >= MIN_RUN);
+    let anywhere = required_run(n).filter(|run| run.len() >= MIN_RUN);
+    match (anchored, anywhere) {
+        (Some(run), None) => Some(vec![(run, Place::Start)]),
+        (Some(start), Some(run)) if start.len() >= run.len() => Some(vec![(start, Place::Start)]),
+        (_, Some(run)) => Some(vec![(run, Place::Any)]),
+        (None, None) => None,
+    }
+}
+
+/// The longest literal run every match of `n` begins with. Unlike [`required_run`], which may
+/// pick a run from the middle of the pattern, this one is anchored: it is what lets a candidate
+/// be confirmed by walking only the match rather than the line it sits on.
+fn anchor_run(n: &Node) -> Option<Vec<u8>> {
+    if let Some(lit) = pure_literal(n) {
+        return (!lit.is_empty()).then_some(lit);
+    }
+    match n {
+        Node::Concat(parts) => {
+            let mut run = Vec::new();
+            for part in parts {
+                match pure_literal(part) {
+                    Some(bytes) => run.extend_from_slice(&bytes),
+                    // The run gathered so far still begins every match; a literal run at the
+                    // start of this part extends it, and anything else ends it.
+                    None => match anchor_run(part) {
+                        Some(inner) => run.extend_from_slice(&inner),
+                        None => return (!run.is_empty()).then_some(run),
+                    },
+                }
+            }
+            (!run.is_empty()).then_some(run)
+        }
+        // Every iteration is complete, so a repetition that runs at least once begins with its
+        // own run. A fixed count repeats it; an open one keeps one copy.
+        Node::Repeat(inner, min, _, _) if *min > 0 => {
+            let run = anchor_run(inner)?;
+            Some(match *min {
+                1 => run,
+                n => run.repeat(n.min(16) as usize),
+            })
+        }
+        Node::Group(_, inner) => anchor_run(inner),
+        _ => None,
+    }
+}
+
+/// The first byte of the line holding `at`.
+fn line_start(hay: &[u8], at: usize) -> usize {
+    crate::bytes::rfind_byte(hay, b'\n', at).map_or(0, |i| i + 1)
+}
+
+/// One past the last byte of the line holding `at`, newline excluded.
+fn line_end(hay: &[u8], at: usize) -> usize {
+    crate::bytes::find_byte(hay, b'\n', at).unwrap_or(hay.len())
+}
+
+/// True when a candidate scan may replace the plain byte walk of a haystack: the pattern reads
+/// no assertion (or a slice would answer for a different text), permits no newline (or a match
+/// could straddle the line bounds it works from), and cannot match empty (or a matching line
+/// would hold no run at all).
+fn candidates_are_sound(n: &Node, prog: &[Inst<ByteSet>]) -> bool {
+    !has_assertion(n)
+        && !prog
+            .iter()
+            .any(|inst| matches!(inst, Inst::Set(set) if set.permits(b'\n')))
+        && !closure(prog, &[], 0).1
+}
+
+/// Runs shorter than this are the byte prefilter's job: a one-byte scan is no cheaper than the
+/// automaton step it would replace.
+const MIN_RUN: usize = 2;
 
 /// The longest substring of `first` that every haystack in `rest` also contains.
 fn common_run(first: &[u8], rest: &[Vec<u8>]) -> Vec<u8> {
@@ -3201,6 +3394,92 @@ mod tests {
         assert_eq!(run("[a-z][0-9]"), None);
         // A folded pattern holds no literal bytes to look for.
         assert_eq!(run("(?i)needle"), None);
+    }
+
+    /// Lines the block scan reports, and the same walk done with the exact per-line search.
+    /// The block path only has to name the right lines, in order, so that is what is compared:
+    /// a match may be found by a different route, never on a line the line-at-a-time scan does
+    /// not report, and never missing one.
+    fn block_lines(re: &Regex, hay: &[u8]) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while let Some(end) = re.accept_end(hay, pos) {
+            let at = end.saturating_sub(1).max(pos);
+            let line = line_of(hay, at);
+            if out.last() != Some(&line) {
+                out.push(line);
+            }
+            pos = line_end(hay, at) + 1;
+            if pos > hay.len() {
+                break;
+            }
+        }
+        out
+    }
+
+    fn line_lines(re: &Regex, hay: &[u8]) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while let Some(m) = re.find_at(hay, pos) {
+            let line = line_of(hay, m.start);
+            if out.last() != Some(&line) {
+                out.push(line);
+            }
+            pos = line_end(hay, m.start) + 1;
+            if pos > hay.len() {
+                break;
+            }
+        }
+        out
+    }
+
+    fn line_of(hay: &[u8], at: usize) -> usize {
+        hay[..at].iter().filter(|&&b| b == b'\n').count()
+    }
+
+    /// The candidate scan is the block entry point now, so it has to answer exactly what the
+    /// line scan answers, at every offset and across line boundaries.
+    #[test]
+    fn the_candidate_scan_agrees_with_the_line_scan() {
+        let pats = [
+            r"[A-Z][a-zA-Z0-9_]*\.go",
+            r"func [a-z]+\(",
+            r"GO[A-Z]+_[a-z]+",
+            r"ab|cd",
+            r"Node|Parser",
+            r"x?abc",
+            r"a{3}b",
+            r"[a-z]+_[a-z]+",
+            r"Xq[a-z]*Zzy",
+        ];
+        let hays = [
+            "package main\n\nfunc visitNode(n *node) {}\n// see Parser.go\nvar x_y = 1\n",
+            "\n\nNode.go\nParser\nNodeParser.go\n",
+            "no candidates here at all\njust words\n",
+            "abcabc abcd ab\nXZzy\naaaab a{3}b\n",
+            "Ǝé Node.go\nplain\n",
+        ];
+        for pat in pats {
+            let re = Regex::new(pat).unwrap();
+            for hay in hays {
+                let hay = hay.as_bytes();
+                assert_eq!(
+                    block_lines(&re, hay),
+                    line_lines(&re, hay),
+                    "{pat:?} on {:?}",
+                    String::from_utf8_lossy(hay)
+                );
+                // Every offset has to agree on whether a match is there at all.
+                for from in 0..=hay.len() {
+                    assert_eq!(
+                        re.accept_end(hay, from).is_some(),
+                        re.find_at(hay, from).is_some(),
+                        "{pat:?} from {from} on {:?}",
+                        String::from_utf8_lossy(hay)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
