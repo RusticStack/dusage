@@ -2679,3 +2679,67 @@ fn fixed_strings_is_literal_for_every_pattern_source() {
     let out = found(&["search", "-F", "-i", "-e", "a.b"]);
     assert_eq!(out.lines().count(), 2, "{out}");
 }
+
+#[test]
+fn find_ls_prints_finds_columns_and_a_link_target() {
+    let (_f, dir) = expr_tree("expr_ls");
+    let target = dir.join("b.md");
+    let link = dir.join("link.md");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&target, &link).unwrap();
+
+    let out = stdout(&find_at(&dir, &["-name", "a.rs", "-ls"]));
+    let line = out.lines().next().unwrap_or_default();
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    // inode, blocks, mode, links, user, group, size, month, day, time, path.
+    assert!(fields.len() >= 11, "find's column layout: {line}");
+    assert_eq!(fields[2].len(), 10, "a mode column: {line}");
+    assert!(
+        fields[7..10].iter().all(|f| !f.is_empty()),
+        "a date split over three columns: {line}"
+    );
+    assert!(line.ends_with(&shown(&dir, "a.rs")), "{line}");
+
+    let linked = stdout(&find_at(&dir, &["-name", "link.md", "-ls"]));
+    // The target's spelling belongs to the platform (Windows can hand back a verbatim
+    // prefix), so the assertion is on the field and the name it ends with.
+    let (_, target) = linked
+        .rsplit_once(" -> ")
+        .unwrap_or_else(|| panic!("a symlink names what it points at: {linked}"));
+    assert!(
+        target.trim_end().ends_with("b.md"),
+        "the target is the file it points at: {linked}"
+    );
+    // Windows exposes no POSIX permission bits, so the mode column there is `l---------`;
+    // what both platforms have to say is that it is ten characters and starts with `l`.
+    let mode = linked.split_whitespace().nth(2).unwrap_or_default();
+    assert_eq!(mode.len(), 10, "a mode column: {linked}");
+    assert!(
+        mode.starts_with('l'),
+        "a symlink's mode starts with l: {linked}"
+    );
+    #[cfg(unix)]
+    assert_eq!(mode, "lrwxrwxrwx", "{linked}");
+}
+
+#[test]
+fn find_lname_matches_the_link_target() {
+    let (_f, dir) = expr_tree("expr_lname");
+    let target = dir.join("b.md");
+    let link = dir.join("link.md");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&target, &link).unwrap();
+
+    let hit = stdout(&find_at(&dir, &["-lname", "*.md"]));
+    assert!(hit.contains(&shown(&dir, "link.md")), "{hit}");
+    // `-lname` is about links, so a regular file with the same name never matches.
+    assert!(!hit.contains(&shown(&dir, "b.md")), "{hit}");
+    let folded = stdout(&find_at(&dir, &["-ilname", "*.MD"]));
+    assert!(folded.contains(&shown(&dir, "link.md")), "{folded}");
+    let plain = stdout(&find_at(&dir, &["-lname", "*.MD"]));
+    assert!(plain.is_empty(), "case matters without the i: {plain}");
+}
