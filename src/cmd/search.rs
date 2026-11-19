@@ -48,6 +48,7 @@ OPTIONS:
         --include-zero     with -c, also print files that matched nothing
         --count-matches    print the number of individual matches per file
     -o, --only-matching    print only the matching part of each line
+    -z, --search-zip       expand gzip files and search their contents
     -U, --multiline        let a match span lines: the file is searched whole
         --multiline-dotall with -U, also let '.' match a newline
     -r, --replace TEXT     print each line with its matches replaced by TEXT;
@@ -109,6 +110,10 @@ Prefix with ! to exclude instead. Use --fixed for a plain substring match on the
 
 OPTIONS:
     -F, --fixed            match the pattern as a substring of the path
+    -i, --ignore-case      match the glob without case
+    --name                 match the glob against the file name only
+    --full-path            match the glob against the whole relative path
+    --mindepth N           skip anything fewer than N levels below a root
     -t, --type NAME        restrict to a type (see `dusage search --help` for the list)
     --ext rs,md            restrict to these extensions
     --size +10M            at least 10M; -10M at most; 10M within 5%; repeatable
@@ -373,6 +378,8 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "-U",
     "--multiline",
     "--multiline-dotall",
+    "-z",
+    "--search-zip",
     "--type-list",
     "--json",
     "--color",
@@ -578,12 +585,17 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--older",
                 "--newer",
                 "--max-depth",
+                "--mindepth",
                 "--sort",
                 "--sortr",
             ],
             &[
                 "-F",
                 "--fixed",
+                "-i",
+                "--ignore-case",
+                "--name",
+                "--full-path",
                 "--dirs",
                 "--files",
                 "--long",
@@ -803,6 +815,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.no_ignore_parent = a.flag("--no-ignore-parent") || a.flag("--no-ignore-files");
     o.follow = a.flag("--follow");
     o.multiline = a.flag("-U") || a.flag("--multiline");
+    o.search_zip = a.flag("-z") || a.flag("--search-zip");
     let json = a.flag("--json");
     let color = color_enabled(color_mode.as_deref());
     // Colour, the JSON report and `--column` all need each match located inside its line.
@@ -893,11 +906,15 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             // The walk takes every path the filters allow; the positional glob decides
             // which of them are results (`--fixed` matches a substring instead).
             let fixed = a.flag("-F") || a.flag("--fixed");
+            let fold = a.flag("-i") || a.flag("--ignore-case");
             let glob = if fixed {
                 None
             } else {
-                Some(Glob::new(&pattern_text)?)
+                Some(Glob::new_with(&pattern_text, fold)?)
             };
+            let name_only = a.flag("--name");
+            let full_path = a.flag("--full-path");
+            let mindepth = unsigned("--mindepth")?.unwrap_or(0);
             o.pattern = Pattern::new(&pattern_text, true, false, false)?;
             o.details = json
                 || a.flag("--long")
@@ -916,13 +933,33 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             // A type filter asks for files: `find -t js` never lists directories.
             let files_only = a.flag("--files") || (!dirs_only && !type_globs.is_empty());
             r.paths.retain(|c| {
+                // `--mindepth` counts levels below the root, so a file in the root is 1.
+                if mindepth > 0 && c.rel.split('/').count() < mindepth {
+                    return false;
+                }
+                let subject = match (name_only, full_path) {
+                    (true, _) => c.rel.rsplit('/').next().unwrap_or(&c.rel),
+                    (false, true) => c.rel.as_str(),
+                    // Without a hint a pattern with no `/` is a name and one with a `/` is a
+                    // path, which is the rule `Glob` already applies.
+                    (false, false) => c.rel.as_str(),
+                };
                 if let Some(g) = &glob {
-                    if !g.matches(&c.rel, c.is_dir) {
+                    if !g.matches(subject, c.is_dir) {
                         return false;
                     }
                 }
-                if fixed && !c.rel.contains(&pattern_text) {
-                    return false;
+                if fixed {
+                    let hit = if fold {
+                        subject
+                            .to_lowercase()
+                            .contains(&pattern_text.to_lowercase())
+                    } else {
+                        subject.contains(&pattern_text)
+                    };
+                    if !hit {
+                        return false;
+                    }
                 }
                 if dirs_only && !c.is_dir || files_only && c.is_dir {
                     return false;
@@ -962,8 +999,11 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             if errs > 0 && !a.flag("--no-messages") {
                 eprintln!("dusage: {errs} path(s) could not be read");
             }
-            return if r.paths.is_empty() {
-                Err(Fail(if errs > 0 { 2 } else { 1 }, String::new()))
+            // An error is exit 2 even when something was found, which is grep's contract.
+            return if errs > 0 {
+                Err(Fail(2, String::new()))
+            } else if r.paths.is_empty() {
+                Err(Fail(1, String::new()))
             } else {
                 Ok(())
             };
@@ -992,10 +1032,15 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     if stats {
         eprintln!("dusage: {}", report::stats_line(&report));
     }
-    if report.any_match {
+    // A path that could not be read makes the whole run an error, whatever else matched:
+    // exit 2 is grep's answer for "something went wrong", and sets it apart from "nothing
+    // matched", which is 1.
+    if errs > 0 {
+        Err(Fail(2, String::new()))
+    } else if report.any_match {
         Ok(())
     } else {
-        Err(Fail(if errs > 0 { 2 } else { 1 }, String::new()))
+        Err(Fail(1, String::new()))
     }
 }
 

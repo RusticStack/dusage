@@ -114,6 +114,8 @@ pub struct SearchOptions {
     pub follow: bool,
     /// Let a match span lines (`-U`): the file is searched whole rather than line by line.
     pub multiline: bool,
+    /// Expand gzip files before searching them (`-z`).
+    pub search_zip: bool,
 }
 
 /// One piece of a `-r` replacement: text to print, or a group of the match it came from.
@@ -184,6 +186,7 @@ impl SearchOptions {
             no_ignore_parent: false,
             follow: false,
             multiline: false,
+            search_zip: false,
         }
     }
 }
@@ -894,6 +897,21 @@ fn scan_file_with(
     if n == 0 {
         return finished(path, o, stats, Scanner::new(o), false);
     }
+    // A compressed file has no lines to stream: it is expanded whole first, and what is
+    // searched is the expansion. The first block is already read, so the magic costs a
+    // comparison against bytes a scan would have read anyway.
+    if o.search_zip && crate::archive::is_gzip(&buf[..n]) {
+        let mut packed = buf[..n].to_vec();
+        f.read_to_end(&mut packed)?;
+        stats.bytes_scanned += packed.len() as u64;
+        let data = crate::archive::gunzip(&packed).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {e}", path.display()),
+            )
+        })?;
+        return scan_expanded(path, &data, o, stats);
+    }
     // A file that needs transcoding is read whole: UTF-16 code units straddle the block
     // boundary, so there is nothing to stream. Everything else keeps the streaming path.
     let binary = bytes::is_binary(&buf[..n], BINARY_SCAN.min(n));
@@ -950,6 +968,28 @@ fn scan_file_with(
     finished(path, o, stats, sc, binary)
 }
 
+/// Search bytes that did not come from the file as they lie: a gzip file's expansion.
+fn scan_expanded(
+    path: &Path,
+    data: &[u8],
+    o: &SearchOptions,
+    stats: &mut Stats,
+) -> io::Result<Option<FileHits>> {
+    stats.bytes_scanned += data.len() as u64;
+    let binary = bytes::is_binary(data, BINARY_SCAN.min(data.len()));
+    if binary && binary_by_name_only(o) {
+        stats.files_binary += 1;
+        let found = o.pattern.find_at(data, 0).is_some();
+        return Ok(binary_hit(path, o, stats, found));
+    }
+    let mut sc = Scanner::pooled(o);
+    if binary {
+        stats.files_binary += 1;
+    }
+    sc.feed(data);
+    finished(path, o, stats, sc, binary)
+}
+
 /// Search a whole file at once, so a match may span lines (`-U`). The bytes have to be in
 /// memory for that, which is the price of the mode; every other mode streams.
 fn scan_multiline(
@@ -962,6 +1002,15 @@ fn scan_multiline(
     let mut data = Vec::new();
     f.read_to_end(&mut data)?;
     stats.bytes_scanned += data.len() as u64;
+    if o.search_zip && crate::archive::is_gzip(&data) {
+        data = crate::archive::gunzip(&data).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {e}", path.display()),
+            )
+        })?;
+        stats.bytes_scanned += data.len() as u64;
+    }
     let found = o.pattern.find_all(&data, usize::MAX);
     let name = || path.to_string_lossy().into_owned();
     if found.is_empty() {
