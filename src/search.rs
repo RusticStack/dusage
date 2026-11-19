@@ -2026,7 +2026,13 @@ impl<'a> Scanner<'a> {
 
     /// The lines of one block that hold a match, each reported once with the spans of the
     /// matches on it. Returns the line number the block ends on.
+    ///
+    /// Line numbers cost a count of the bytes between one reported line and the next, which is
+    /// a second pass over the file however little output it produces. A mode that keeps no
+    /// lines at all (`-c`, `-l`) has nowhere to print one, so it skips the count; anything
+    /// that does keep lines counts them, whether or not it prints them.
     fn block_lines(&mut self, body: &[u8], base: u64) -> u64 {
+        let numbers = self.want_lines;
         let mut line_no = base;
         let mut line_start = 0;
         let mut pos = 0;
@@ -2064,7 +2070,9 @@ impl<'a> Scanner<'a> {
                 Some(i) => i,
                 None => body.len(),
             };
-            line_no += bytes::count_byte(&body[line_start..ls], b'\n') as u64 + 1;
+            if numbers {
+                line_no += bytes::count_byte(&body[line_start..ls], b'\n') as u64 + 1;
+            }
             self.matches += 1;
             let line = strip_cr(&body[ls..le]);
             if self.o.count_matches {
@@ -2098,6 +2106,9 @@ impl<'a> Scanner<'a> {
             // One line is reported once however many matches it holds.
             pos = le + 1;
             line_start = pos;
+        }
+        if !numbers {
+            return base;
         }
         base + bytes::count_byte(body, b'\n') as u64 + 1
     }
