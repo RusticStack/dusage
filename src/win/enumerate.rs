@@ -1327,21 +1327,33 @@ mod tests {
         }
     }
 
+    /// The Windows-only situation: these assertions run on a Windows host only (the parser is
+    /// `cfg(windows)`), so the offsets they lean on are the ones the `const` layout assertions
+    /// above already pinned at compile time — `file_name` at 88 for `FILE_ID_EXTD_DIR_INFO`
+    /// and 104 for `FILE_ID_BOTH_DIR_INFO`, `end_of_file` at 40, `file_attributes` at 56.
     #[test]
     fn a_name_or_a_record_past_the_buffer_is_rejected() {
         for l in [&EXTD, &BOTH] {
             let mut out = Vec::new();
             let full = rec(l, 0, "ab", 4);
-            // FileNameLength runs past the end of the batch.
-            assert!(parse(&full, l, &mut out).is_err(), "name past the buffer");
-            // The batch ends in the middle of the name.
+            // The same record parses while its name fits, so everything below is about the
+            // bound: `name_end = file_name + FileNameLength` against the length of the batch.
+            parse(&full, l, &mut out).unwrap();
+            assert_eq!(out.len(), 1);
+            out.clear();
+            // FileNameLength claims 1000 bytes of name, far past the end of the batch.
+            assert!(
+                parse(&rec(l, 0, "ab", 1000), l, &mut out).is_err(),
+                "name past the buffer"
+            );
+            // The batch ends in the middle of the name: 2 of the record's 4 name bytes.
             assert!(
                 parse(&full[..l.name + 2], l, &mut out).is_err(),
                 "truncated name"
             );
-            // The batch ends in the middle of EndOfFile.
+            // The batch ends in the middle of FileAttributes.
             assert!(
-                parse(&full[..l.eof + 4], l, &mut out).is_err(),
+                parse(&full[..l.attrs + 2], l, &mut out).is_err(),
                 "truncated header"
             );
             // FileNameLength ends between two UTF-16 code units.
@@ -1349,7 +1361,8 @@ mod tests {
                 parse(&rec(l, 0, "a", 3), l, &mut out).is_err(),
                 "odd length"
             );
-            assert!(out.is_empty());
+            // No rejected record may leave an entry behind, named from bytes it does not own.
+            assert!(out.is_empty(), "a rejected record appended {}", out.len());
         }
     }
 
