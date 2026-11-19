@@ -384,6 +384,22 @@ mod tests {
         Pattern::new(s, false, false, false).unwrap()
     }
 
+    /// `-i` folds every atom, so the pattern has no run to jump between and the scan steps the
+    /// bytes: a repeated part must still match however many times it repeats.
+    #[test]
+    fn a_folded_repetition_matches_every_length() {
+        let ci = Pattern::new("ne+dle", false, true, false).unwrap();
+        assert_eq!(
+            ci.find_at(b"NEEEEEDLE", 0),
+            Some(Match { start: 0, end: 9 })
+        );
+        assert_eq!(
+            ci.find_at(b"a Neeeedle b", 0),
+            Some(Match { start: 2, end: 10 })
+        );
+        assert!(ci.is_match(b"neeeeedle"));
+    }
+
     #[test]
     fn unicode_case_folding_for_literals() {
         let ci = Pattern::new("café", false, true, false).unwrap();

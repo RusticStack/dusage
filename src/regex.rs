@@ -303,9 +303,6 @@ pub struct Regex {
     /// The byte program, always present: it runs on ASCII haystacks, where it is exact
     /// for a pattern that needs Unicode semantics elsewhere.
     prog: Vec<Inst<ByteSet>>,
-    /// The byte program of the pattern read backwards, which is how a DFA search finds
-    /// where a match starts.
-    rprog: Vec<Inst<ByteSet>>,
     /// The character program, present when the pattern needs Unicode semantics.
     cprog: Option<Vec<Inst<CharClass>>>,
     flags: Flags,
@@ -325,6 +322,11 @@ pub struct Regex {
     /// The runs a block scan jumps between, when a byte walk can rely on them: the pattern
     /// holds no assertion, cannot match a newline, and cannot match the empty string.
     cand: Option<Candidates>,
+    /// The run every match begins with, when the pattern has one and cannot match empty. An
+    /// automaton in its start state may jump to the next occurrence of it, since a match
+    /// cannot begin anywhere else, and a four-byte run is far rarer than the byte the
+    /// automaton would otherwise leave the start state on.
+    start_run: Option<crate::simd::Prefilter>,
     /// No `^`, `$`, `\b` or `\B` anywhere in the pattern.
     assertion_free: bool,
     /// The assertion context bits the byte program reads, which is what decides how many
@@ -375,9 +377,6 @@ impl Regex {
             }
             false => None,
         };
-        let mut rprog = Vec::new();
-        compile(&reverse_node(&node), &mut rprog, byte_symbols, false);
-        rprog.push(Inst::Match);
         // The capture programs keep the group boundaries, which every other program drops.
         let (cap_bytes, cap_chars) = if parsed.groups > 0 {
             let mut cap = Vec::new();
@@ -415,11 +414,16 @@ impl Regex {
                 false => None,
             },
         };
+        let start_run = match parsed.folded || closure(&prog, &[], 0).1 {
+            true => None,
+            false => anchor_run(&node)
+                .filter(|run| run.len() >= MIN_RUN)
+                .and_then(|run| crate::simd::Prefilter::new(vec![run])),
+        };
         let ctx_mask = ctx_mask(&prog);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         Ok(Regex {
             prog,
-            rprog,
             cprog,
             groups: parsed.groups,
             cap_bytes,
@@ -429,6 +433,7 @@ impl Regex {
             required,
             run,
             cand,
+            start_run,
             ctx_mask,
             id,
             assertion_free: !has_assertion(&node),
@@ -505,7 +510,9 @@ impl Regex {
         if let Some((_, finder)) = &self.run {
             finder.find_from(hay, from)?;
         }
-        match with_dfa(self, |c| c.forward_end(&self.prog, hay, from)) {
+        match with_dfa(self, |c| {
+            c.forward_end(&self.prog, hay, from, self.anchor())
+        }) {
             Some(Some(Some(end))) => Some(end),
             // The automaton proved there is no match; that is an answer, not a fallback.
             Some(Some(None)) => None,
@@ -525,7 +532,9 @@ impl Regex {
                 Place::Whole => return Some(Some(end)),
                 // The match starts where the run does: an anchored walk from there is exactly
                 // the match, and stops at its end.
-                Place::Start => match with_dfa(self, |c| c.forward_end(&self.prog, &hay[p..], 0)) {
+                Place::Start => match with_dfa(self, |c| {
+                    c.forward_end(&self.prog, &hay[p..], 0, self.anchor())
+                }) {
                     Some(Some(Some(end))) => return Some(Some(p + end)),
                     Some(Some(None)) => at = p + 1,
                     _ => return None,
@@ -537,7 +546,9 @@ impl Regex {
                 // report, exactly as in the plain byte walk.
                 Place::Any => {
                     let (ls, le) = (line_start(hay, p).max(from), line_end(hay, p));
-                    match with_dfa(self, |c| c.forward_end(&self.prog, &hay[ls..le], 0)) {
+                    match with_dfa(self, |c| {
+                        c.forward_end(&self.prog, &hay[ls..le], 0, self.anchor())
+                    }) {
                         Some(Some(Some(end))) => return Some(Some(ls + end)),
                         Some(Some(None)) => at = le + 1,
                         _ => return None,
@@ -608,11 +619,16 @@ impl Regex {
                 }
             }
         }
-        match with_dfa(self, |c| c.find(&self.prog, &self.rprog, hay, start)) {
+        match with_dfa(self, |c| c.find(&self.prog, hay, start, self.anchor())) {
             // The DFA answered; its `None` is a real answer, not a fallback.
             Some(Some(found)) => found,
             _ => self.run(&self.prog, hay, start),
         }
+    }
+
+    /// The run every match begins with, for an automaton to jump between.
+    fn anchor(&self) -> Option<&crate::simd::Prefilter> {
+        self.start_run.as_ref()
     }
 
     /// True when the pattern matches anywhere in `hay`.
@@ -626,7 +642,9 @@ impl Regex {
             }
         }
         if self.cprog.is_none() || hay.is_ascii() {
-            if let Some(Some(found)) = with_dfa(self, |c| c.is_match(&self.prog, hay, 0)) {
+            if let Some(Some(found)) =
+                with_dfa(self, |c| c.is_match(&self.prog, hay, 0, self.anchor()))
+            {
                 return found;
             }
         }
@@ -1416,12 +1434,15 @@ fn anchor_run(n: &Node) -> Option<Vec<u8>> {
             for part in parts {
                 match pure_literal(part) {
                     Some(bytes) => run.extend_from_slice(&bytes),
-                    // The run gathered so far still begins every match; a literal run at the
-                    // start of this part extends it, and anything else ends it.
-                    None => match anchor_run(part) {
-                        Some(inner) => run.extend_from_slice(&inner),
-                        None => return (!run.is_empty()).then_some(run),
-                    },
+                    // A part that is not a fixed string can consume past the run it begins
+                    // with — `e+` is one `e` or ten — so nothing after it joins this run. Its
+                    // own run still begins every match, so the run ends there.
+                    None => {
+                        if let Some(inner) = anchor_run(part) {
+                            run.extend_from_slice(&inner);
+                        }
+                        return (!run.is_empty()).then_some(run);
+                    }
                 }
             }
             (!run.is_empty()).then_some(run)
@@ -1521,21 +1542,26 @@ fn rarest_byte(lit: &[u8]) -> Option<u8> {
 // read are kept, so a pattern that reads none — most patterns — has one context and pays
 // nothing for this.
 //
-// A DFA finds where a match *starts*, not where it ends: leftmost-first preference is a
+// A DFA finds where a match *ends*, not where it starts: leftmost-first preference is a
 // property of thread priority, which subset construction throws away (`ab|a` and `a|ab`
-// accept the same language and end differently on `ab`). So a search is three steps:
+// accept the same language and end differently on `ab`). So a search is two steps:
 //
-//   1. walk the forward DFA to the first position where a match ends — the leftmost match
-//      ends there or later, and the walk stops at that position;
-//   2. walk a DFA built from the *reversed* pattern leftwards from the end of the haystack,
-//      which accepts at `p` exactly when a match starts at `p`, and keep the last accept:
-//      that is the leftmost start;
-//   3. run the Pike VM anchored at that start, which costs one match length rather than one
-//      haystack length and settles the exact end by priority.
+//   1. walk the forward DFA to the first position where a match ends. The start state is
+//      re-entered at every position, so an empty set — the state the walk is in when no
+//      thread from an earlier start survives — is what "nothing is alive" looks like, and the
+//      last position the walk passed in it is a position no match can begin before;
+//   2. run the Pike VM from there. Its answer is the leftmost-first one by definition, and
+//      it costs the bytes from that position to the end of the match rather than the whole
+//      haystack — which on a whole-file `-U` search is the difference between one pass over
+//      the file and one pass per match.
 //
-// Step 2 scans the whole remainder of the haystack, so it only runs on lines step 1 already
-// found a match on. Lines that need the character program never get here: they stay on the
-// VM, which is exact for code points and is not where the bytes are.
+// The walk also jumps while it sits in a start state: to the next occurrence of the run every
+// match begins with when the pattern has one, and otherwise to the next byte that leaves the
+// start state. Every position a jump passes over begins no match, so this is free and it is
+// what keeps a search over a large buffer close to the cost of the prefilter scan itself.
+//
+// Lines that need the character program never get here: they stay on the VM, which is exact
+// for code points and is not where the bytes are.
 //
 // A pattern that reads no assertions has one context, and for those a state's transitions are
 // also kept densely by byte (`Dfa::dense`): the walk is then a single indexed load per byte
@@ -1918,39 +1944,11 @@ fn strip_groups(n: &Node) -> Node {
     }
 }
 
-/// The pattern that matches a string backwards: the same language read right to left.
-/// Alternation and repetition order is kept because only the language matters here — the VM
-/// settles leftmost-first — and a character outside ASCII stays as it is: it consumes no
-/// byte in the byte program, so it can neither match nor anchor anything there.
-///
-/// Assertions are kept as they are, including `^`, `$`, `\A` and `\z`: the walk reads the
-/// haystack leftwards but keeps counting in haystack offsets, so `\z` still asks about the
-/// text end and must stay `\z`. Flipping the text anchors into each other, as this once did,
-/// hid the start of every match that reaches the end of the haystack.
-fn reverse_node(n: &Node) -> Node {
-    match n {
-        Node::Empty => Node::Empty,
-        Node::Byte(b) => Node::Byte(*b),
-        Node::Set(s) => Node::Set(*s),
-        Node::Char(c) => Node::Char(*c),
-        Node::CharSet(cc) => Node::CharSet(cc.clone()),
-        Node::Dot(m) => Node::Dot(*m),
-        Node::Concat(parts) => Node::Concat(parts.iter().rev().map(reverse_node).collect()),
-        Node::Alt(branches) => Node::Alt(branches.iter().map(reverse_node).collect()),
-        Node::Repeat(inner, min, max, greedy) => {
-            Node::Repeat(Box::new(reverse_node(inner)), *min, *max, *greedy)
-        }
-        Node::Group(i, inner) => Node::Group(*i, Box::new(reverse_node(inner))),
-        Node::Assert(a) => Node::Assert(*a),
-    }
-}
-
 /// One thread's DFA for one pattern. Patterns are shared by every worker thread and a
 /// `Regex` is immutable, so the states a scan discovers have to be cached per thread.
 struct DfaCache {
     id: u64,
     fwd: Dfa,
-    rev: Dfa,
     /// The dense context bits a byte contributes as the byte before a position and as the
     /// byte at it; index 256 is "no byte there". Adding the two gives the position's context
     /// index without a branch.
@@ -2005,8 +2003,7 @@ impl DfaCache {
         let (before_bits, cur_bits) = ctx_tables(&fold);
         DfaCache {
             id: re.id,
-            fwd: Dfa::new(nctx, raw.clone(), &re.prog),
-            rev: Dfa::new(nctx, raw, &re.rprog),
+            fwd: Dfa::new(nctx, raw, &re.prog),
             before_bits,
             cur_bits,
             skip: None,
@@ -2027,9 +2024,9 @@ impl DfaCache {
     fn find(
         &mut self,
         prog: &[Inst<ByteSet>],
-        rprog: &[Inst<ByteSet>],
         hay: &[u8],
         start: usize,
+        run: Option<&crate::simd::Prefilter>,
     ) -> Option<Option<Match>> {
         if self.off {
             return None;
@@ -2038,35 +2035,23 @@ impl DfaCache {
         if self.start_only && start > 0 {
             return Some(None);
         }
-        let Some(end) = self.forward(prog, hay, start) else {
+        // `floor` comes back as the last position the walk found nothing alive at: no match
+        // can begin before it, so the span is resolved from there rather than from the start
+        // of the haystack.
+        let mut floor = start;
+        let Some(end) = self.forward(prog, hay, start, run, &mut floor) else {
             self.off = true;
             return None;
         };
-        let Some(end) = end else {
+        if end.is_none() {
             return Some(None);
-        };
-        // A match ending at `start` cannot have begun anywhere else.
-        let begin = if end == start {
-            start
-        } else {
-            match self.reverse(rprog, hay, start) {
-                None => {
-                    self.off = true;
-                    return None;
-                }
-                Some(Some(begin)) => begin,
-                // A forward accept always has a start; anything else is a disagreement the
-                // VM should answer rather than something to guess at.
-                Some(None) => {
-                    self.off = true;
-                    return None;
-                }
-            }
-        };
-        if let Some(m) = run_vm(prog, hay, begin, true) {
-            return Some(Some(m));
         }
-        Some(run_vm(prog, hay, start, false))
+        // The walk narrowed the match to one that cannot have begun before `floor`; the VM
+        // answers the exact span from there, and its answer is the leftmost-first one by
+        // definition. On a line-at-a-time search `floor` is the line's first byte and this is
+        // the whole line; on a whole-buffer search it is wherever the automaton last ran out
+        // of threads, which is what keeps the work off the size of the buffer.
+        Some(run_vm(prog, hay, floor, false))
     }
 
     /// The end of the first match, from the forward automaton only.
@@ -2075,6 +2060,7 @@ impl DfaCache {
         prog: &[Inst<ByteSet>],
         hay: &[u8],
         start: usize,
+        run: Option<&crate::simd::Prefilter>,
     ) -> Option<Option<usize>> {
         if self.off {
             return None;
@@ -2082,7 +2068,8 @@ impl DfaCache {
         if self.start_only && start > 0 {
             return Some(None);
         }
-        let end = self.forward(prog, hay, start);
+        let mut floor = start;
+        let end = self.forward(prog, hay, start, run, &mut floor);
         if end.is_none() {
             self.off = true;
         }
@@ -2090,11 +2077,18 @@ impl DfaCache {
     }
 
     /// True when the pattern matches anywhere in `hay`.
-    fn is_match(&mut self, prog: &[Inst<ByteSet>], hay: &[u8], start: usize) -> Option<bool> {
+    fn is_match(
+        &mut self,
+        prog: &[Inst<ByteSet>],
+        hay: &[u8],
+        start: usize,
+        run: Option<&crate::simd::Prefilter>,
+    ) -> Option<bool> {
         if self.off {
             return None;
         }
-        match self.forward(prog, hay, start) {
+        let mut floor = start;
+        match self.forward(prog, hay, start, run, &mut floor) {
             Some(found) => Some(found.is_some()),
             None => {
                 self.off = true;
@@ -2103,12 +2097,17 @@ impl DfaCache {
         }
     }
 
-    /// Walk the forward DFA to the first position where a match ends.
+    /// Walk the forward DFA to the first position where a match ends, leaving in `floor` the
+    /// last position the walk passed with nothing alive: the start state is re-entered at
+    /// every position, so an empty set there says no thread from an earlier start survives,
+    /// and no match can begin before it.
     fn forward(
         &mut self,
         prog: &[Inst<ByteSet>],
         hay: &[u8],
         start: usize,
+        run: Option<&crate::simd::Prefilter>,
+        floor: &mut usize,
     ) -> Option<Option<usize>> {
         let hopeless = self.start_only;
         // Past the end there is nothing to consume and nothing to find.
@@ -2119,24 +2118,27 @@ impl DfaCache {
             self.skip = Some(self.fwd.skip_set(prog));
         }
         if self.fwd.nctx == 1 {
-            return self.forward_dense(prog, hay, start, hopeless);
+            return self.forward_dense(prog, hay, start, run, hopeless, floor);
         }
         let slot = self.slot(
             0,
             start.checked_sub(1).map(|i| hay[i]),
             hay.get(start).copied(),
         );
-        self.forward_slots(prog, hay, start, slot, hopeless)
+        self.forward_slots(prog, hay, start, run, slot, hopeless, floor)
     }
 
     /// The forward walk over a program with one context: a state's row is fetched once and
     /// every byte in it is one indexed load, until the byte that leaves the state.
+    #[allow(clippy::too_many_arguments)]
     fn forward_dense(
         &mut self,
         prog: &[Inst<ByteSet>],
         hay: &[u8],
         start: usize,
+        run: Option<&crate::simd::Prefilter>,
         hopeless: bool,
+        floor: &mut usize,
     ) -> Option<Option<usize>> {
         let mut at = start;
         let mut state = 0u32;
@@ -2148,6 +2150,7 @@ impl DfaCache {
                     .sum::<usize>()
                     <= MAX_DENSE_SKIP_BYTES
         });
+        let mut jumped = false;
         'states: loop {
             let mut stop = self.fwd.stop[state as usize];
             if stop == STOP_UNBUILT {
@@ -2162,20 +2165,26 @@ impl DfaCache {
             if stop & STOP_SINK != 0 && hopeless {
                 return Some(None);
             }
-            if state == 0 && !hopeless {
-                if let Some(ranges) = skip {
-                    match crate::bytes::find_in_ranges(hay, ranges, at) {
-                        Some(next) if next > at => {
+            if state == 0 {
+                // Every byte the jump passes over leaves the state empty, so it is a run of
+                // positions a match cannot begin within. A position just jumped to is where
+                // the walk starts, not another start state to look ahead from.
+                *floor = at;
+                if !hopeless && !jumped {
+                    match skip_to(hay, at, run, skip.map_or(&[][..], Vec::as_slice)) {
+                        Ahead::Jump(next) => {
                             at = next;
+                            jumped = true;
                             continue 'states;
                         }
-                        Some(_) => {}
-                        None => return Some(None),
+                        Ahead::Step => {}
+                        Ahead::Nothing => return Some(None),
                     }
                 }
             }
+            jumped = false;
             let Some(row) = self.fwd.dense.get(state as usize) else {
-                return self.forward_slots(prog, hay, at, state as usize, hopeless);
+                return self.forward_slots(prog, hay, at, run, state as usize, hopeless, floor);
             };
             loop {
                 let Some(&byte) = hay.get(at) else {
@@ -2193,15 +2202,19 @@ impl DfaCache {
 
     /// The forward walk over the class-keyed table, for a program with several contexts and
     /// for the states past the dense cap.
+    #[allow(clippy::too_many_arguments)]
     fn forward_slots(
         &mut self,
         prog: &[Inst<ByteSet>],
         hay: &[u8],
         start: usize,
+        run: Option<&crate::simd::Prefilter>,
         mut slot: usize,
         hopeless: bool,
+        floor: &mut usize,
     ) -> Option<Option<usize>> {
         let mut at = start;
+        let mut jumped = false;
         loop {
             if !self.fwd.prepare(prog, slot) {
                 return None;
@@ -2219,116 +2232,68 @@ impl DfaCache {
             // In a start state only a byte that leaves it can begin a match: jump to the
             // next one instead of stepping through the rest. Pointless when nothing may
             // begin past the text start: the next position is already a dead end.
-            if !hopeless && slot < self.fwd.nctx {
-                if let Some(ranges) = &self.skip {
-                    if !ranges.is_empty() {
-                        match crate::bytes::find_in_ranges(hay, ranges, at) {
-                            Some(next) if next > at => {
-                                slot = self.slot(
-                                    0,
-                                    hay.get(next - 1).copied(),
-                                    hay.get(next).copied(),
-                                );
-                                at = next;
-                                continue;
-                            }
-                            Some(_) => {}
-                            None => return Some(None),
-                        }
+            if slot < self.fwd.nctx {
+                *floor = at;
+            }
+            if !hopeless && !jumped && slot < self.fwd.nctx {
+                let ranges = self.skip.as_ref().map_or(&[][..], Vec::as_slice);
+                match skip_to(hay, at, run, ranges) {
+                    Ahead::Jump(next) => {
+                        slot = self.slot(0, hay.get(next - 1).copied(), hay.get(next).copied());
+                        at = next;
+                        jumped = true;
+                        continue;
                     }
+                    Ahead::Step => {}
+                    Ahead::Nothing => return Some(None),
                 }
             }
+            jumped = false;
             let next =
                 self.fwd.trans[slot * self.fwd.nclass + self.fwd.class[byte as usize] as usize];
             at += 1;
             slot = self.slot(next, Some(byte), hay.get(at).copied());
         }
     }
+}
 
-    /// Walk the reverse DFA leftwards from the end of the haystack, keeping the last
-    /// position where a match starts.
-    fn reverse(
-        &mut self,
-        rprog: &[Inst<ByteSet>],
-        hay: &[u8],
-        floor: usize,
-    ) -> Option<Option<usize>> {
-        if self.rev.nctx == 1 {
-            return self.reverse_dense(rprog, hay, floor);
-        }
-        let at = hay.len();
-        let slot = self.slot(0, at.checked_sub(1).map(|i| hay[i]), None);
-        self.reverse_slots(rprog, hay, floor, at, slot)
+/// What an automaton in its start state found ahead of it.
+enum Ahead {
+    /// A position a match could begin at, after bytes no match can begin within.
+    Jump(usize),
+    /// The start state here has bytes to step through as usual.
+    Step,
+    /// No position ahead has anything that could begin a match.
+    Nothing,
+}
+
+/// Look ahead from a start state, which stands for "nothing is alive but the start itself":
+/// the next occurrence of the run every match begins with is the next position worth walking,
+/// and failing that a run, the next byte that leaves the start state. Either way every
+/// position the jump passes over begins no match.
+fn skip_to(
+    hay: &[u8],
+    at: usize,
+    run: Option<&crate::simd::Prefilter>,
+    ranges: &[(u8, u8)],
+) -> Ahead {
+    if let Some(finder) = run {
+        return match finder.find_from(hay, at) {
+            Some(next) if next > at => Ahead::Jump(next),
+            Some(_) => Ahead::Step,
+            None => Ahead::Nothing,
+        };
     }
-
-    /// The reverse walk over a program with one context, the mirror of `forward_dense`. A
-    /// state accepts at every position it covers, so a run of one state reports the leftmost
-    /// position it reaches, which is the one it leaves at.
-    fn reverse_dense(
-        &mut self,
-        rprog: &[Inst<ByteSet>],
-        hay: &[u8],
-        floor: usize,
-    ) -> Option<Option<usize>> {
-        let mut at = hay.len();
-        let mut state = 0u32;
-        let mut leftmost = None;
-        'states: loop {
-            let mut stop = self.rev.stop[state as usize];
-            if stop == STOP_UNBUILT {
-                if !self.rev.prepare(rprog, state as usize) {
-                    return None;
-                }
-                stop = self.rev.stop[state as usize];
-            }
-            let accepts = stop & STOP_ACCEPT != 0;
-            let Some(row) = self.rev.dense.get(state as usize) else {
-                return self.reverse_slots(rprog, hay, floor, at, state as usize);
-            };
-            while at > floor {
-                let next = row[hay[at - 1] as usize];
-                at -= 1;
-                if next != state {
-                    if accepts {
-                        leftmost = Some(at + 1);
-                    }
-                    state = next;
-                    continue 'states;
-                }
-            }
-            if accepts {
-                leftmost = Some(at);
-            }
-            return Some(leftmost);
-        }
-    }
-
-    /// The reverse walk over the class-keyed table.
-    fn reverse_slots(
-        &mut self,
-        rprog: &[Inst<ByteSet>],
-        hay: &[u8],
-        floor: usize,
-        mut at: usize,
-        mut slot: usize,
-    ) -> Option<Option<usize>> {
-        let mut leftmost = None;
-        loop {
-            if !self.rev.prepare(rprog, slot) {
-                return None;
-            }
-            if self.rev.stop[slot] & STOP_ACCEPT != 0 {
-                leftmost = Some(at);
-            }
-            if at == floor {
-                return Some(leftmost);
-            }
-            let byte = hay[at - 1];
-            let next =
-                self.rev.trans[slot * self.rev.nclass + self.rev.class[byte as usize] as usize];
-            at -= 1;
-            slot = self.slot(next, at.checked_sub(1).map(|i| hay[i]), Some(byte));
-        }
+    let next = match ranges {
+        [] => return Ahead::Step,
+        // One byte is the fast one-byte scan; ranges are the slow fallback.
+        [(lo, hi)] if lo == hi => crate::bytes::find_byte(hay, *lo, at),
+        ranges => crate::bytes::find_in_ranges(hay, ranges, at),
+    };
+    match next {
+        Some(next) if next > at => Ahead::Jump(next),
+        Some(_) => Ahead::Step,
+        None => Ahead::Nothing,
     }
 }
 
@@ -3563,6 +3528,74 @@ mod tests {
         }
     }
 
+    /// `find_at` with the DFA and its prefilter in front, against the VM answering alone: the
+    /// automaton leads a whole-buffer search now — it jumps between the run every match begins
+    /// with and resolves the span from the last position it found nothing alive at — so the
+    /// sequence it produces has to be the VM's sequence, span for span.
+    #[test]
+    fn the_whole_buffer_scan_agrees_with_the_vm() {
+        // Matches of every shape the mode has to handle: dense ones, ones that cross lines,
+        // a run that occurs more often than it matches, and one nothing matches.
+        let mut hay = Vec::new();
+        for i in 0..4000 {
+            hay.extend_from_slice(b"func (c *Config) Handle(p *Reader) Error {\n");
+            if i % 7 == 0 {
+                hay.extend_from_slice(b"\treturn errors.New(\"short buffer\")\n}\n\n");
+            }
+            if i % 11 == 0 {
+                hay.extend_from_slice(b"start aaaa\nbbbb\ncccc end\n");
+            }
+        }
+        for pat in [
+            r"func .{0,40}Error",
+            r"(?s)start.*?end",
+            r"type [A-Z]\w* struct",
+            r"errors\.New",
+            r"[Z]{6}[a-z]{9}",
+            r"b+",
+            r"a*",
+        ] {
+            let re = Regex::new(pat).unwrap();
+            let mut at = 0;
+            while at <= hay.len() {
+                let got = re.find_at(&hay, at);
+                let want = run_vm(&re.prog, &hay[..], at, false);
+                assert_eq!(got, want, "{pat} at {at}");
+                match got {
+                    Some(m) => at = m.end.max(m.start + 1),
+                    None => break,
+                }
+            }
+        }
+    }
+
+    /// A run that every match begins with lets the start state jump over the bytes between its
+    /// occurrences. A buffer with no occurrence at all is answered without walking it, and the
+    /// empty haystack keeps the empty match a nullable pattern has there.
+    #[test]
+    fn the_anchored_jump_skips_only_bytes_no_match_can_begin_with() {
+        let hay = b"ff ff func x Error, ff func y Error, ff ff".repeat(200);
+        let re = Regex::new(r"func .{0,40}Error").unwrap();
+        assert_eq!(re.find(&hay), Some(Match { start: 6, end: 35 }));
+        // The run ends where a part that is not a fixed string begins: `ne+dle` starts with
+        // "ne" and not with "nedle", so a match whose `e+` is longer than one byte is still
+        // found where the run itself is not.
+        let open = Regex::new("ne+dle").unwrap();
+        assert_eq!(open.find(b"neeeeedle"), Some(Match { start: 0, end: 9 }));
+        assert_eq!(
+            open.find_at(b"a neeeeedle", 1),
+            Some(Match { start: 2, end: 11 })
+        );
+        let none = b"ff".repeat(100_000);
+        assert_eq!(Regex::new(r"func .*Error").unwrap().find(&none), None);
+        let star = Regex::new(r"b*").unwrap();
+        assert_eq!(star.find(b""), Some(Match { start: 0, end: 0 }));
+        assert_eq!(star.find(b"a"), Some(Match { start: 0, end: 0 }));
+        // A pattern that can match empty gets no run to jump between: the empty match at the
+        // start is still the answer.
+        assert_eq!(star.find(b"abb"), Some(Match { start: 0, end: 0 }));
+    }
+
     #[test]
     fn utf8_characters_match_as_bytes() {
         assert_eq!(m("é", "café"), Some((3, 5)));
@@ -3983,6 +4016,31 @@ mod tests {
         assert_eq!(re.find(b"xabc"), Some(Match { start: 1, end: 4 }));
         assert_eq!(re.find(b"xabc\n"), None);
         with_dfa(&re, |c| assert!(!c.off, "the reverse walk found the start")).unwrap();
+    }
+
+    /// The run a pattern begins with ends at the first part that is not a fixed string: `ne+dle`
+    /// begins with "ne", and the `e+` after it may be one `e` or ten. A run computed through the
+    /// repetition — "nedle" — is a string no match of `neeeeedle` contains, so a scan that jumps
+    /// between its occurrences finds nothing at all.
+    #[test]
+    fn a_run_ends_where_a_repeated_part_begins() {
+        let re = Regex::new("ne+dle").unwrap();
+        assert_eq!(re.find(b"neeeeedle"), Some(Match { start: 0, end: 9 }));
+        assert_eq!(
+            re.find(b"a\nneeeeedle\nb"),
+            Some(Match { start: 2, end: 11 }),
+            "a match whose run starts a line is found like any other"
+        );
+        assert_eq!(re.find(b"nee dle"), None);
+        // A run after a repetition of its own, and a pattern with no anchored run at all.
+        assert_eq!(
+            Regex::new("x+ne+dle").unwrap().find(b"xxneeeeedle"),
+            Some(Match { start: 0, end: 11 })
+        );
+        assert_eq!(
+            Regex::new(".*ne+dle").unwrap().find(b"ab neeeeedle"),
+            Some(Match { start: 0, end: 12 })
+        );
     }
 
     #[test]
