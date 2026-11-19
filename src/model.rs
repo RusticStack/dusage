@@ -2,7 +2,7 @@
 //! Owned by the skeleton; lanes may add fields only through the merge step.
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Aggregated counters for a subtree, an extension, or the whole scan.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +37,114 @@ pub struct BigFile {
     pub path: String,
     pub bytes: u64,
     pub alloc: u64,
+}
+
+/// What kind of object an entry is, in the classes `find -type` names.
+///
+/// Every platform produces all of them; the ones a platform cannot report simply never
+/// occur (Windows has no fifo or socket behind a directory record), which is why the enum
+/// itself carries no `#[cfg]`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Dir,
+    Symlink,
+    Fifo,
+    Socket,
+    Char,
+    Block,
+    #[default]
+    Other,
+}
+
+impl Kind {
+    /// The letter `find -printf %y` prints, and what `-type`/`-xtype` accept.
+    pub fn letter(self) -> char {
+        match self {
+            Kind::File => 'f',
+            Kind::Dir => 'd',
+            Kind::Symlink => 'l',
+            Kind::Fifo => 'p',
+            Kind::Socket => 's',
+            Kind::Char => 'c',
+            Kind::Block => 'b',
+            Kind::Other => '?',
+        }
+    }
+
+    pub fn from_letter(c: char) -> Kind {
+        match c {
+            'f' => Kind::File,
+            'd' => Kind::Dir,
+            'l' => Kind::Symlink,
+            'p' => Kind::Fifo,
+            's' => Kind::Socket,
+            'c' => Kind::Char,
+            'b' => Kind::Block,
+            _ => Kind::Other,
+        }
+    }
+}
+
+/// One entry's `lstat` data, in a shape both platforms fill: the POSIX fields where the
+/// platform has them, and zeros where it does not.
+///
+/// `blocks` is `st_blocks` (512-byte units, what find's `%b` prints) and `0` on Windows,
+/// which has no such number. `mode`, `uid`, `gid` and `links` are `0` on Windows: a
+/// directory record reports none of them, and reading them would mean opening every file.
+/// A caller that needs to tell "no mode bits" from "mode 0" asks
+/// `crate::native::enumerate::POSIX_FIELDS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stat {
+    pub kind: Kind,
+    /// End-of-file size: the bytes a file holds, or a directory's own record size (which is
+    /// why a scan reports a directory's size as 0). `find -size` and `%s` compare this.
+    pub size: u64,
+    pub blocks: u64,
+    pub mtime: SystemTime,
+    pub atime: SystemTime,
+    pub ctime: SystemTime,
+    pub links: u64,
+    pub inode: u64,
+    pub dev: u64,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl Default for Stat {
+    fn default() -> Stat {
+        Stat {
+            kind: Kind::Other,
+            size: 0,
+            blocks: 0,
+            mtime: UNIX_EPOCH,
+            atime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            links: 0,
+            inode: 0,
+            dev: 0,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+        }
+    }
+}
+
+impl Stat {
+    /// Allocated bytes on disk (`st_blocks * 512`); 0 where the platform has no block count.
+    pub fn alloc(&self) -> u64 {
+        self.blocks * 512
+    }
+
+    /// The hardlink identity `dev << 64 | ino`, the 128-bit stand-in for a Windows file id.
+    pub fn file_id(&self) -> u128 {
+        (self.dev as u128) << 64 | self.inode as u128
+    }
+
+    pub fn modified(&self) -> SystemTime {
+        self.mtime
+    }
 }
 
 /// Per-category error counters; a scan or prune never aborts on these.

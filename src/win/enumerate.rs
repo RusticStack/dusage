@@ -5,7 +5,8 @@
 //! `io::ErrorKind::InvalidData`; a failed `read` may leave partial entries in `out`.
 
 use super::sys::{self, HANDLE};
-use crate::model::ErrorCounts;
+use crate::model::{ErrorCounts, Kind, Stat};
+use std::collections::HashMap;
 use std::ffi::{c_void, OsString};
 use std::io;
 use std::os::windows::ffi::OsStringExt;
@@ -70,6 +71,8 @@ struct Win32FindStreamData {
 /// Field offsets of one directory-info class, so one parser serves both.
 struct Layout {
     next: usize,
+    creation: usize,
+    last_access: usize,
     last_write: usize,
     change: usize,
     eof: usize,
@@ -93,6 +96,8 @@ macro_rules! off {
 
 const EXTD: Layout = Layout {
     next: off!(FileIdExtdDirInfo, next_entry_offset),
+    creation: off!(FileIdExtdDirInfo, creation_time),
+    last_access: off!(FileIdExtdDirInfo, last_access_time),
     last_write: off!(FileIdExtdDirInfo, last_write_time),
     change: off!(FileIdExtdDirInfo, change_time),
     eof: off!(FileIdExtdDirInfo, end_of_file),
@@ -108,6 +113,8 @@ const EXTD: Layout = Layout {
 
 const BOTH: Layout = Layout {
     next: off!(FileIdBothDirInfo, next_entry_offset),
+    creation: off!(FileIdBothDirInfo, creation_time),
+    last_access: off!(FileIdBothDirInfo, last_access_time),
     last_write: off!(FileIdBothDirInfo, last_write_time),
     change: off!(FileIdBothDirInfo, change_time),
     eof: off!(FileIdBothDirInfo, end_of_file),
@@ -136,6 +143,8 @@ pub struct Entry {
     /// FILETIME as 100ns ticks since 1601.
     pub last_write: u64,
     pub change_time: u64,
+    pub creation_time: u64,
+    pub last_access_time: u64,
 }
 
 impl Entry {
@@ -153,20 +162,40 @@ impl Entry {
     }
 }
 
-/// One entry's inode data, filled from the batched directory query so no extra syscall is
-/// needed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Stat {
-    pub size: u64,
-    pub alloc: u64,
-    pub file_id: u128,
-    pub dev: u64,
-    modified: SystemTime,
+/// Windows reports none of the POSIX owner, mode or link-count fields through a directory
+/// record, and reading them would mean opening every file: `-perm`, `-uid`, `-links` and
+/// friends answer from the zeros in [`Stat`] (`-perm` refuses, see `src/findexpr.rs`).
+pub const POSIX_FIELDS: bool = false;
+
+/// What kind of entry a directory record describes. A reparse point is reported as a
+/// symlink: it is the one "do not follow" class here, junctions included.
+fn kind_of(e: &Entry) -> Kind {
+    if e.is_reparse() {
+        Kind::Symlink
+    } else if e.is_dir() {
+        Kind::Dir
+    } else {
+        Kind::File
+    }
 }
 
-impl Stat {
-    pub fn modified(&self) -> SystemTime {
-        self.modified
+/// The [`Stat`] a batched directory record already carries: size, allocation, times and
+/// file id, with no syscall of its own.
+fn stat_of(e: &Entry) -> Stat {
+    Stat {
+        kind: kind_of(e),
+        size: e.size,
+        // `st_blocks` is 512-byte units; NTFS allocation is in clusters.
+        blocks: e.alloc / 512,
+        mtime: filetime_to_system_time(e.last_write),
+        atime: filetime_to_system_time(e.last_access_time),
+        ctime: filetime_to_system_time(e.change_time),
+        links: 0,
+        inode: e.file_id as u64,
+        dev: 0,
+        mode: 0,
+        uid: 0,
+        gid: 0,
     }
 }
 
@@ -190,7 +219,19 @@ impl Lite {
         self.is_link
     }
 
-    pub fn stat(&self, _path: &Path) -> io::Result<Stat> {
+    pub fn kind(&self) -> Kind {
+        if self.is_link {
+            Kind::Symlink
+        } else if self.is_dir {
+            Kind::Dir
+        } else {
+            Kind::File
+        }
+    }
+
+    /// The record's own data. Unlike Linux there is nothing to defer: the batch already
+    /// carried it, so a walk that never asks for a field pays nothing anyway.
+    pub fn stat(&self) -> io::Result<Stat> {
         match self.stat.get() {
             Some(s) => Ok(s),
             None => Err(io::Error::new(
@@ -211,13 +252,7 @@ pub fn list(dir: &Path, out: &mut Vec<Lite>, errs: &mut ErrorCounts) -> io::Resu
         out.push(Lite {
             is_dir: e.is_dir(),
             is_link: e.is_reparse(),
-            stat: std::cell::Cell::new(Some(Stat {
-                size: e.size,
-                alloc: e.alloc,
-                file_id: e.file_id,
-                dev: 0,
-                modified: e.modified(),
-            })),
+            stat: std::cell::Cell::new(Some(stat_of(&e))),
             name: e.name,
         });
     }
@@ -294,6 +329,8 @@ fn parse(buf: &[u8], l: &Layout, out: &mut Vec<Entry>) -> io::Result<()> {
                 file_id,
                 last_write: rd::<i64>(buf, off + l.last_write)?.max(0) as u64,
                 change_time: rd::<i64>(buf, off + l.change)?.max(0) as u64,
+                creation_time: rd::<i64>(buf, off + l.creation)?.max(0) as u64,
+                last_access_time: rd::<i64>(buf, off + l.last_access)?.max(0) as u64,
             });
         }
         if next == 0 {
@@ -543,6 +580,70 @@ pub fn file_id_of(path: &Path) -> io::Result<u128> {
 }
 
 #[cfg(test)]
+mod stat_tests {
+    use super::*;
+
+    #[test]
+    fn info_layouts_match_the_documented_structs() {
+        // FILE_ID_EXTD_DIR_INFO: the four FILETIMEs follow the two u32 fields.
+        assert_eq!(std::mem::offset_of!(FileIdExtdDirInfo, creation_time), 8);
+        assert_eq!(
+            std::mem::offset_of!(FileIdExtdDirInfo, last_access_time),
+            16
+        );
+        assert_eq!(std::mem::offset_of!(FileIdExtdDirInfo, last_write_time), 24);
+        assert_eq!(std::mem::offset_of!(FileIdExtdDirInfo, change_time), 32);
+        assert_eq!(std::mem::offset_of!(FileIdExtdDirInfo, file_id), 56);
+        // FILE_BASIC_INFO is 4 ticks and an attribute word, 40 bytes with its padding.
+        assert_eq!(std::mem::offset_of!(BasicInfo, file_attributes), 32);
+        assert_eq!(std::mem::size_of::<BasicInfo>(), 40);
+        // FILE_STANDARD_INFO: two i64 sizes, then the link count and two flags.
+        assert_eq!(std::mem::offset_of!(StandardInfo, number_of_links), 16);
+        assert_eq!(std::mem::size_of::<StandardInfo>(), 24);
+        assert_eq!(std::mem::size_of::<AttributeTagInfo>(), 8);
+    }
+
+    #[test]
+    fn lstat_and_stat_describe_a_file() {
+        let dir = std::env::temp_dir().join(format!("dusage_stat_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), vec![0u8; 5000]).unwrap();
+        let s = lstat(&dir.join("a.txt")).unwrap();
+        let d = lstat(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(s.kind, Kind::File);
+        assert_eq!(s.size, 5000);
+        assert_eq!(s.links, 1, "one name, so one link");
+        assert!(s.inode != 0, "the handle knows the file id");
+        assert!(s.blocks * 512 >= 5000, "allocation covers the file");
+        assert!(s.mtime > UNIX_EPOCH);
+        assert_eq!((d.kind, d.links), (Kind::Dir, 1));
+        // The POSIX fields the platform does not have stay zero.
+        assert_eq!((s.mode, s.uid, s.gid, s.dev), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_record_stat_matches_the_handle() {
+        let dir = std::env::temp_dir().join(format!("dusage_rec_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), vec![0u8; 5000]).unwrap();
+        let mut ents = Vec::new();
+        DirReader::new()
+            .read(&dir, &mut ents, &mut ErrorCounts::default())
+            .unwrap();
+        let rec = stat_of(&ents[0]);
+        let h = lstat(&dir.join("a.txt")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((rec.kind, rec.size), (h.kind, h.size));
+        assert_eq!(rec.blocks, h.blocks);
+        assert_eq!(rec.inode, h.inode);
+        assert_eq!(rec.mtime, h.mtime);
+    }
+}
+
+#[cfg(test)]
 mod file_id_tests {
     use super::*;
 
@@ -598,8 +699,10 @@ pub fn read_plain(dir: &Path, out: &mut Vec<Entry>, errs: &mut ErrorCounts) -> i
             size: md.len(),
             alloc: 0,
             file_id: 0,
-            last_write: 0,
+            last_write: md.last_write_time(),
             change_time: 0,
+            creation_time: md.creation_time(),
+            last_access_time: md.last_access_time(),
         });
     }
     Ok(())
@@ -616,6 +719,130 @@ pub fn is_unsupported(e: &io::Error) -> bool {
 pub fn is_denied(e: &io::Error) -> bool {
     e.raw_os_error() == Some(sys::ERROR_ACCESS_DENIED)
         || e.kind() == io::ErrorKind::PermissionDenied
+}
+
+/// FILE_BASIC_INFO (winbase.h): the four FILETIMEs and the attributes.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct BasicInfo {
+    creation_time: i64,
+    last_access_time: i64,
+    last_write_time: i64,
+    change_time: i64,
+    file_attributes: u32,
+}
+
+/// FILE_STANDARD_INFO (winbase.h): allocation, end of file and the link count.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct StandardInfo {
+    allocation_size: i64,
+    end_of_file: i64,
+    number_of_links: u32,
+    delete_pending: u8,
+    directory: u8,
+}
+
+/// FILE_ATTRIBUTE_TAG_INFO (winbase.h).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AttributeTagInfo {
+    file_attributes: u32,
+    reparse_tag: u32,
+}
+
+const FILE_BASIC_INFO_CLASS: i32 = 0;
+const FILE_STANDARD_INFO_CLASS: i32 = 1;
+
+/// `lstat` one path: the handle is opened on the link itself, so a reparse point is
+/// described, never followed.
+pub fn lstat(path: &Path) -> io::Result<Stat> {
+    stat_handle(path, true)
+}
+
+/// `stat` one path, following a reparse point (what `-follow` turns a link into).
+pub fn stat(path: &Path) -> io::Result<Stat> {
+    stat_handle(path, false)
+}
+
+/// One `GetFileInformationByHandle` worth of data on an opened handle: the basic times and
+/// attributes, the standard sizes and link count, and the 128-bit file id.
+///
+/// `mode`, `uid` and `gid` stay 0 — Windows has none — and `dev` stays 0 too, so a path
+/// stat and a batched record describe the same entry the same way. The link count is the
+/// one field the handle knows and a directory record does not.
+fn stat_handle(path: &Path, nofollow: bool) -> io::Result<Stat> {
+    let flags = sys::FILE_FLAG_BACKUP_SEMANTICS
+        | if nofollow {
+            sys::FILE_FLAG_OPEN_REPARSE_POINT
+        } else {
+            0
+        };
+    let h = sys::open(path, sys::FILE_READ_ATTRIBUTES, flags)?;
+    let raw = h.as_raw_handle() as HANDLE;
+    let mut basic = BasicInfo::default();
+    let mut standard = StandardInfo::default();
+    let mut tag = AttributeTagInfo::default();
+    let mut id = FileIdInfo {
+        volume_serial_number: 0,
+        file_id: [0; 16],
+    };
+    // SAFETY: `raw` is a live handle opened for FILE_READ_ATTRIBUTES, and each out-pointer
+    // names a writable struct of exactly the size passed.
+    unsafe {
+        sys::check(sys::GetFileInformationByHandleEx(
+            raw,
+            FILE_BASIC_INFO_CLASS,
+            &mut basic as *mut _ as *mut c_void,
+            std::mem::size_of::<BasicInfo>() as u32,
+        ))?;
+        sys::check(sys::GetFileInformationByHandleEx(
+            raw,
+            FILE_STANDARD_INFO_CLASS,
+            &mut standard as *mut _ as *mut c_void,
+            std::mem::size_of::<StandardInfo>() as u32,
+        ))?;
+        sys::check(sys::GetFileInformationByHandleEx(
+            raw,
+            sys::FILE_ATTRIBUTE_TAG_INFO_CLASS,
+            &mut tag as *mut _ as *mut c_void,
+            std::mem::size_of::<AttributeTagInfo>() as u32,
+        ))?;
+        sys::check(sys::GetFileInformationByHandleEx(
+            raw,
+            sys::FILE_ID_INFO_CLASS,
+            &mut id as *mut _ as *mut c_void,
+            std::mem::size_of::<FileIdInfo>() as u32,
+        ))?;
+    }
+    let ticks = |t: i64| t.max(0) as u64;
+    let kind = if tag.file_attributes & sys::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        Kind::Symlink
+    } else if standard.directory != 0 {
+        Kind::Dir
+    } else {
+        Kind::File
+    };
+    Ok(Stat {
+        kind,
+        size: standard.end_of_file.max(0) as u64,
+        blocks: standard.allocation_size.max(0) as u64 / 512,
+        mtime: filetime_to_system_time(ticks(basic.last_write_time)),
+        atime: filetime_to_system_time(ticks(basic.last_access_time)),
+        ctime: filetime_to_system_time(ticks(basic.change_time)),
+        links: u64::from(standard.number_of_links),
+        inode: u128::from_le_bytes(id.file_id) as u64,
+        dev: 0,
+        mode: 0,
+        uid: 0,
+        gid: 0,
+    })
+}
+
+/// Windows knows a filesystem name only per volume, and the walk carries no device for an
+/// entry, so `-fstype` answers nothing here.
+pub fn filesystem_types() -> HashMap<u64, String> {
+    HashMap::new()
 }
 
 /// Device id for the `--one-filesystem` boundary; Windows mount points are reparse

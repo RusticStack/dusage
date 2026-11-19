@@ -77,9 +77,13 @@ pub const STATX_BASIC_STATS: u32 = 0x7ff;
 
 // st_mode file types (sys/stat.h).
 pub const S_IFMT: u16 = 0o170_000;
+pub const S_IFIFO: u16 = 0o010_000;
+pub const S_IFCHR: u16 = 0o020_000;
 pub const S_IFDIR: u16 = 0o040_000;
+pub const S_IFBLK: u16 = 0o060_000;
 pub const S_IFREG: u16 = 0o100_000;
 pub const S_IFLNK: u16 = 0o120_000;
+pub const S_IFSOCK: u16 = 0o140_000;
 
 /// `struct statx_timestamp` (linux/stat.h).
 #[repr(C)]

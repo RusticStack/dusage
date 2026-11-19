@@ -16,16 +16,16 @@
 //! continues; only an unreadable directory is returned as `Err`.
 
 use super::sys;
-use crate::model::ErrorCounts;
+use crate::model::{ErrorCounts, Kind, Stat};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
-use std::ffi::{CStr, CString, OsStr, OsString};
+use std::collections::{HashMap, HashSet};
+use std::ffi::{c_int, CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Bytes per `getdents64` call. One 64 KiB batch covers a thousand dense records, and the
@@ -49,11 +49,15 @@ const DIRENT_RECLEN: usize = std::mem::offset_of!(LinuxDirent64, d_reclen);
 const DIRENT_TYPE: usize = std::mem::offset_of!(LinuxDirent64, d_type);
 const DIRENT_NAME: usize = std::mem::offset_of!(LinuxDirent64, d_name);
 
-// `d_type` (dirent.h). Anything unlisted is a socket, fifo, device or whiteout.
+// `d_type` (dirent.h). `DT_WHT` and anything unlisted is "some other object".
 const DT_UNKNOWN: u8 = 0;
+const DT_FIFO: u8 = 1;
+const DT_CHR: u8 = 2;
 const DT_DIR: u8 = 4;
+const DT_BLK: u8 = 6;
 const DT_REG: u8 = 8;
 const DT_LNK: u8 = 10;
+const DT_SOCK: u8 = 12;
 
 /// One directory entry: the Unix shape of `win::enumerate::Entry`.
 pub struct Entry {
@@ -85,89 +89,54 @@ impl Entry {
 }
 
 /// The `dirent` type, which is exact and free: `getdents64` reports it, so neither `list`
-/// nor a walk that only needs names pays a syscall for it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kind {
-    Dir,
-    File,
-    Link,
-    Other,
-    /// The filesystem did not say: one `statx` answers it, as `read_dir` does on `DT_UNKNOWN`.
-    Unknown,
+/// nor a walk that only needs names pays a syscall for it. `None` is `DT_UNKNOWN`, where
+/// only one `statx` can answer.
+fn kind_of_dtype(t: u8) -> Option<Kind> {
+    Some(match t {
+        DT_DIR => Kind::Dir,
+        DT_REG => Kind::File,
+        DT_LNK => Kind::Symlink,
+        DT_FIFO => Kind::Fifo,
+        DT_CHR => Kind::Char,
+        DT_BLK => Kind::Block,
+        DT_SOCK => Kind::Socket,
+        DT_UNKNOWN => return None,
+        _ => Kind::Other,
+    })
 }
 
-impl Kind {
-    fn of_dtype(t: u8) -> Kind {
-        match t {
-            DT_DIR => Kind::Dir,
-            DT_REG => Kind::File,
-            DT_LNK => Kind::Link,
-            DT_UNKNOWN => Kind::Unknown,
-            _ => Kind::Other,
-        }
-    }
-
-    fn of_mode(mode: u16) -> Kind {
-        match mode & sys::S_IFMT {
-            sys::S_IFDIR => Kind::Dir,
-            sys::S_IFLNK => Kind::Link,
-            sys::S_IFREG => Kind::File,
-            _ => Kind::Other,
-        }
-    }
-
-    fn of_type(t: fs::FileType) -> Kind {
-        if t.is_dir() {
-            Kind::Dir
-        } else if t.is_symlink() {
-            Kind::Link
-        } else if t.is_file() {
-            Kind::File
-        } else {
-            Kind::Other
-        }
+fn kind_of_mode(mode: u16) -> Kind {
+    match mode & sys::S_IFMT {
+        sys::S_IFDIR => Kind::Dir,
+        sys::S_IFREG => Kind::File,
+        sys::S_IFLNK => Kind::Symlink,
+        sys::S_IFIFO => Kind::Fifo,
+        sys::S_IFSOCK => Kind::Socket,
+        sys::S_IFCHR => Kind::Char,
+        sys::S_IFBLK => Kind::Block,
+        _ => Kind::Other,
     }
 }
 
-/// What one `lstat` reports, as [`Lite::stat`] hands it over.
-#[derive(Clone, Copy)]
-pub struct Stat {
-    pub size: u64,
-    pub alloc: u64,
-    pub file_id: u128,
-    pub dev: u64,
-    kind: Kind,
-    modified: SystemTime,
-}
+/// Linux has every field of [`Stat`].
+pub const POSIX_FIELDS: bool = true;
 
-impl Stat {
-    pub fn modified(&self) -> SystemTime {
-        self.modified
-    }
-
-    fn of_statx(s: &sys::Statx) -> Stat {
-        let kind = Kind::of_mode(s.mode);
-        let dev = sys::make_dev(s.dev_major, s.dev_minor);
-        Stat {
-            size: if kind == Kind::Dir { 0 } else { s.size },
-            alloc: s.blocks * 512,
-            file_id: (dev as u128) << 64 | s.ino as u128,
-            dev,
-            kind,
-            modified: time_of(s.mtime),
-        }
-    }
-
-    fn of_metadata(md: &fs::Metadata) -> Stat {
-        let dev = md.dev();
-        Stat {
-            size: if md.is_dir() { 0 } else { md.len() },
-            alloc: md.blocks() * 512,
-            file_id: (dev as u128) << 64 | md.ino() as u128,
-            dev,
-            kind: Kind::of_type(md.file_type()),
-            modified: md.modified().unwrap_or(UNIX_EPOCH),
-        }
+/// One `struct statx` as the shared [`Stat`]: the POSIX fields a directory record cannot
+/// carry, and the kind the file mode names.
+fn stat_of_statx(s: &sys::Statx) -> Stat {
+    Stat {
+        kind: kind_of_mode(s.mode),
+        size: s.size,
+        blocks: s.blocks,
+        mtime: time_of(s.mtime),
+        atime: time_of(s.atime),
+        ctime: time_of(s.ctime),
+        links: u64::from(s.nlink),
+        inode: s.ino,
+        dev: sys::make_dev(s.dev_major, s.dev_minor),
+        mode: u32::from(s.mode),
+        uid: s.uid,
+        gid: s.gid,
     }
 }
 
@@ -180,8 +149,35 @@ fn time_of(t: sys::StatxTimestamp) -> SystemTime {
     }
 }
 
-fn stat_of(p: &Path) -> io::Result<Stat> {
-    Ok(Stat::of_metadata(&fs::symlink_metadata(p)?))
+/// `lstat` one path: the root, a `--follow` target, or a `-newerXY` reference file. The
+/// walk itself never comes through here — it stats names against its open directory.
+pub fn lstat(p: &Path) -> io::Result<Stat> {
+    stat_path(p, sys::AT_SYMLINK_NOFOLLOW)
+}
+
+/// `stat` one path, following a symlink (what `-follow` and `-L` turn an entry into).
+pub fn stat(p: &Path) -> io::Result<Stat> {
+    stat_path(p, 0)
+}
+
+fn stat_path(p: &Path, flags: c_int) -> io::Result<Stat> {
+    let path = c_path(p.as_os_str())?;
+    // SAFETY: `path` is NUL-terminated and outlives the call, and `stx` is a live
+    // `struct statx` of exactly the size declared.
+    let mut stx = sys::Statx::default();
+    let rc = unsafe {
+        sys::statx(
+            sys::AT_FDCWD,
+            path.as_ptr(),
+            flags,
+            sys::STATX_BASIC_STATS,
+            &mut stx,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(stat_of_statx(&stx))
 }
 
 fn malformed() -> io::Error {
@@ -210,7 +206,7 @@ fn stat_at(fd: RawFd, name: &CStr) -> io::Result<Stat> {
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(Stat::of_statx(&stx))
+    Ok(stat_of_statx(&stx))
 }
 
 /// `n` bytes at `off`: the callers have already checked the record is that long.
@@ -225,7 +221,8 @@ struct Rec<'a> {
     name: &'a [u8],
     /// The same name NUL-terminated, which `statx` takes and `OsStr` does not.
     cname: &'a CStr,
-    kind: Kind,
+    /// `None` when `d_type` was `DT_UNKNOWN`.
+    kind: Option<Kind>,
 }
 
 /// Where a pass over one directory stopped.
@@ -238,7 +235,8 @@ enum Pass {
 
 /// An open directory, read in `getdents64` batches.
 struct Batch<'a> {
-    fd: OwnedFd,
+    /// Shared with the entries a [`Lite`] caller keeps: they stat their names against it.
+    fd: Rc<OwnedFd>,
     buf: &'a mut [u8],
     /// Bytes of the current batch in `buf`, and how far the parse has got.
     len: usize,
@@ -264,7 +262,7 @@ impl<'a> Batch<'a> {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: `raw` is a descriptor this call just opened and nothing else will close.
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let fd = Rc::new(unsafe { OwnedFd::from_raw_fd(raw) });
         Ok(Batch {
             fd,
             buf,
@@ -346,11 +344,11 @@ impl<'a> Batch<'a> {
             }
             let cname = CStr::from_bytes_with_nul(&tail[..=nul]).map_err(|_| malformed())?;
             sink.push(
-                fd,
+                &self.fd,
                 &Rec {
                     name,
                     cname,
-                    kind: Kind::of_dtype(dtype),
+                    kind: kind_of_dtype(dtype),
                 },
             );
         }
@@ -384,8 +382,8 @@ fn fill(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
 
 /// Where one directory's records go.
 trait Sink {
-    /// Take one record from the directory open as `fd`, which `stat_at` resolves names in.
-    fn push(&mut self, fd: RawFd, rec: &Rec<'_>);
+    /// Take one record from the directory open as `dir`, which `stat_at` resolves names in.
+    fn push(&mut self, dir: &Rc<OwnedFd>, rec: &Rec<'_>);
     /// Drop everything pushed so far, for the second read of a directory that changed.
     fn clear(&mut self);
 }
@@ -423,14 +421,25 @@ fn read_dir_raw<S: Sink + ?Sized>(dir: &Path, sink: &mut S) -> io::Result<()> {
     })
 }
 
+// One reused name buffer per thread, so naming a file to `statx` costs a copy, not an
+// allocation.
+thread_local! {
+    static NAME_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
 /// One name from a directory, as cheaply as the kernel gives it up: a name, a type that
-/// came with the `dirent`, and an empty slot for the `lstat` data.
+/// came with the `dirent`, the directory it was read from, and an empty slot for its
+/// `lstat` data.
 ///
 /// `stat` is the only thing that costs a syscall, and it runs once: the entry remembers the
-/// answer, so a size asked for in a filter and again in the output is one `lstat`.
+/// answer, so a size asked for in a filter and again in the output is one `statx`. It
+/// resolves the name against the open directory (`statx(dirfd, name,
+/// AT_SYMLINK_NOFOLLOW)`), never the full path, which is what find's `fstatat` does.
 pub struct Lite {
     pub name: OsString,
     kind: Kind,
+    /// The directory this name came from, alive as long as any entry listed with it.
+    dir: Rc<OwnedFd>,
     stat: Cell<Option<Stat>>,
 }
 
@@ -440,21 +449,30 @@ impl Lite {
     }
 
     pub fn is_reparse(&self) -> bool {
-        self.kind == Kind::Link
+        self.kind == Kind::Symlink
     }
 
-    /// `lstat` this entry at `path`, its full path in the directory just listed. The result
-    /// is cached: a second call is free. Exact, never a shortcut — the scan and prune paths
-    /// decide on size and mtime from it.
-    pub fn stat(&self, path: &Path) -> io::Result<Stat> {
-        match self.stat.get() {
-            Some(s) => Ok(s),
-            None => {
-                let s = stat_of(path)?;
-                self.stat.set(Some(s));
-                Ok(s)
-            }
+    /// The kind the `dirent` reported: exact, and free.
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// `lstat` this entry. The result is cached: a second call is free. Exact, never a
+    /// shortcut — the scan and prune paths decide on size and mtime from it.
+    pub fn stat(&self) -> io::Result<Stat> {
+        if let Some(s) = self.stat.get() {
+            return Ok(s);
         }
+        let s = NAME_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            buf.clear();
+            buf.extend_from_slice(self.name.as_bytes());
+            buf.push(0);
+            let name = CStr::from_bytes_with_nul(&buf).map_err(|_| malformed())?;
+            stat_at(self.dir.as_raw_fd(), name)
+        })?;
+        self.stat.set(Some(s));
+        Ok(s)
     }
 }
 
@@ -464,22 +482,23 @@ struct LiteSink<'a> {
 }
 
 impl Sink for LiteSink<'_> {
-    fn push(&mut self, fd: RawFd, rec: &Rec<'_>) {
+    fn push(&mut self, dir: &Rc<OwnedFd>, rec: &Rec<'_>) {
         let kind = match rec.kind {
             // One `statx` answers a type the filesystem left out, exactly as `read_dir`
             // does; an entry that vanished meanwhile is counted and dropped.
-            Kind::Unknown => match stat_at(fd, rec.cname) {
+            None => match stat_at(dir.as_raw_fd(), rec.cname) {
                 Ok(s) => s.kind,
                 Err(err) => {
                     self.errs.record(&err);
                     return;
                 }
             },
-            kind => kind,
+            Some(kind) => kind,
         };
         self.out.push(Lite {
             name: OsString::from_vec(rec.name.to_vec()),
             kind,
+            dir: Rc::clone(dir),
             stat: Cell::new(None),
         });
     }
@@ -511,18 +530,19 @@ struct EntrySink<'a> {
 }
 
 impl Sink for EntrySink<'_> {
-    fn push(&mut self, fd: RawFd, rec: &Rec<'_>) {
+    fn push(&mut self, dir: &Rc<OwnedFd>, rec: &Rec<'_>) {
         // `statx` is `lstat`: a symlink is described, not followed.
-        match stat_at(fd, rec.cname) {
+        match stat_at(dir.as_raw_fd(), rec.cname) {
             Ok(s) => self.out.push(Entry {
                 name: OsString::from_vec(rec.name.to_vec()),
                 is_dir: s.kind == Kind::Dir,
-                is_link: s.kind == Kind::Link,
-                size: s.size,
-                alloc: if self.detail { s.alloc } else { 0 },
-                file_id: if self.detail { s.file_id } else { 0 },
+                is_link: s.kind == Kind::Symlink,
+                // A directory's size is its own bookkeeping, not its contents.
+                size: if s.kind == Kind::Dir { 0 } else { s.size },
+                alloc: if self.detail { s.alloc() } else { 0 },
+                file_id: if self.detail { s.file_id() } else { 0 },
                 dev: if self.detail { s.dev } else { 0 },
-                modified: s.modified,
+                modified: s.mtime,
             }),
             Err(err) => {
                 self.errs.record(&err);
@@ -580,8 +600,8 @@ pub fn read_plain(dir: &Path, out: &mut Vec<Entry>, errs: &mut ErrorCounts) -> i
 /// Err when `path` is itself a symlink: scanning or pruning it would silently act on
 /// its target instead.
 pub fn refuse_reparse_root(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_symlink() => Err(io::Error::new(
+    match lstat(path) {
+        Ok(s) if s.kind == Kind::Symlink => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "{} is a reparse point (symlink); pass its target",
@@ -594,8 +614,7 @@ pub fn refuse_reparse_root(path: &Path) -> io::Result<()> {
 
 /// Identity of one inode, stable across hardlinks: `dev << 64 | ino`.
 pub fn file_id_of(path: &Path) -> io::Result<u128> {
-    let md = fs::symlink_metadata(path)?;
-    Ok((md.dev() as u128) << 64 | md.ino() as u128)
+    Ok(lstat(path)?.file_id())
 }
 
 /// Unix has no named data streams. `--streams` therefore reports 0 bytes.
@@ -605,7 +624,30 @@ pub fn named_stream_bytes(_path: &Path) -> io::Result<u64> {
 
 /// Device id of a directory, used to recognise mount points.
 pub fn dev_of(path: &Path) -> io::Result<u64> {
-    Ok(fs::metadata(path)?.dev())
+    Ok(stat(path)?.dev)
+}
+
+/// Filesystem type names by device, for `-fstype`. Linux records which type is mounted
+/// where in `/proc/self/mountinfo`; a device that file does not name simply has no entry.
+pub fn filesystem_types() -> HashMap<u64, String> {
+    let Ok(text) = fs::read_to_string("/proc/self/mountinfo") else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for line in text.lines() {
+        // device mount-point options [optional...] `-` fstype source super-options
+        let mut parts = line.split(' ');
+        let dev = parts.nth(2).and_then(|d| {
+            let (major, minor) = d.split_once(':')?;
+            Some(sys::make_dev(major.parse().ok()?, minor.parse().ok()?))
+        });
+        let Some(dev) = dev else { continue };
+        let name = parts.skip_while(|f| *f != "-").nth(1);
+        if let Some(name) = name {
+            out.insert(dev, name.to_string());
+        }
+    }
+    out
 }
 
 /// True when `e` lives on a different filesystem than `root_dev` (a mount point).
@@ -638,6 +680,7 @@ pub fn os_from_bytes(b: &[u8]) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Instant;
@@ -795,7 +838,7 @@ mod tests {
         list(&f.0, &mut v, &mut errs).unwrap();
         for e in &v {
             let p = f.0.join(&e.name);
-            let s = e.stat(&p).unwrap();
+            let s = e.stat().unwrap();
             let md = fs::symlink_metadata(&p).unwrap();
             assert_eq!(
                 s.size,
@@ -803,17 +846,17 @@ mod tests {
                 "{:?}",
                 e.name
             );
-            assert_eq!(s.alloc, md.blocks() * 512, "{:?}", e.name);
+            assert_eq!(s.alloc(), md.blocks() * 512, "{:?}", e.name);
             assert_eq!(s.dev, md.dev(), "{:?}", e.name);
-            assert_eq!(s.file_id, (md.dev() as u128) << 64 | md.ino() as u128);
+            assert_eq!(s.file_id(), (md.dev() as u128) << 64 | md.ino() as u128);
             assert_eq!(s.modified(), md.modified().unwrap(), "{:?}", e.name);
-            // Cached: the same answer, and the same copy, on a second call.
-            let again = e.stat(&f.0.join("does-not-exist")).unwrap();
-            assert_eq!(again.size, s.size);
+            // Cached: the same answer, byte for byte, on a second call.
+            assert_eq!(e.stat().unwrap(), s);
         }
         // A link stats as itself: its own length, not its target's 5000 bytes.
         let lone = v.iter().find(|e| e.name == "lnk").unwrap();
-        assert_ne!(lone.stat(&f.0.join("lnk")).unwrap().size, 5000);
+        assert_eq!(lone.stat().unwrap().kind, Kind::Symlink);
+        assert_ne!(lone.stat().unwrap().size, 5000);
     }
 
     #[test]
@@ -823,8 +866,92 @@ mod tests {
         let mut v = Vec::new();
         let mut errs = ErrorCounts::default();
         list(&f.0, &mut v, &mut errs).unwrap();
-        let gone = f.0.join("vanished");
-        assert!(v[0].stat(&gone).is_err());
+        fs::remove_file(f.0.join("a")).unwrap();
+        assert!(v[0].stat().is_err());
+    }
+
+    /// `Lite::stat` resolves the name against the director the entry was read from, so it
+    /// keeps working when the path it was reached by no longer leads there — the whole
+    /// point of `fstatat(dirfd, name)` over a path-resolving `lstat`.
+    #[test]
+    fn lite_stat_survives_the_path_being_renamed() {
+        let f = Fixture::new("moved");
+        fs::create_dir(f.0.join("real")).unwrap();
+        fs::write(f.0.join("real/a"), b"12345").unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0.join("real"), &mut v, &mut errs).unwrap();
+        fs::rename(f.0.join("real"), f.0.join("moved")).unwrap();
+        assert!(!f.0.join("real/a").exists());
+        let s = v[0].stat().unwrap();
+        assert_eq!(s.size, 5);
+        assert_eq!(s.kind, Kind::File);
+    }
+
+    #[test]
+    fn kinds_come_from_the_dirent_and_the_mode() {
+        assert_eq!(kind_of_dtype(DT_FIFO), Some(Kind::Fifo));
+        assert_eq!(kind_of_dtype(DT_CHR), Some(Kind::Char));
+        assert_eq!(kind_of_dtype(DT_BLK), Some(Kind::Block));
+        assert_eq!(kind_of_dtype(DT_SOCK), Some(Kind::Socket));
+        assert_eq!(kind_of_dtype(DT_DIR), Some(Kind::Dir));
+        assert_eq!(kind_of_dtype(DT_UNKNOWN), None);
+        // The `statx` mode names the same classes when `d_type` was missing.
+        assert_eq!(kind_of_mode(sys::S_IFIFO | 0o644), Kind::Fifo);
+        assert_eq!(kind_of_mode(sys::S_IFCHR | 0o600), Kind::Char);
+        assert_eq!(kind_of_mode(sys::S_IFBLK | 0o600), Kind::Block);
+        assert_eq!(kind_of_mode(sys::S_IFSOCK | 0o755), Kind::Socket);
+        assert_eq!(kind_of_mode(sys::S_IFLNK | 0o777), Kind::Symlink);
+    }
+
+    #[test]
+    fn stat_carries_the_posix_fields_std_reports() {
+        let f = Fixture::new("posix");
+        fs::write(f.0.join("a"), vec![0u8; 7000]).unwrap();
+        fs::hard_link(f.0.join("a"), f.0.join("b")).unwrap();
+        let md = fs::symlink_metadata(f.0.join("a")).unwrap();
+        let s = lstat(&f.0.join("a")).unwrap();
+        assert_eq!(s.mode, md.mode());
+        assert_eq!((s.uid, s.gid), (md.uid(), md.gid()));
+        assert_eq!(s.links, md.nlink());
+        assert_eq!(s.inode, md.ino());
+        assert_eq!(s.blocks, md.blocks());
+        assert_eq!(s.atime, md.accessed().unwrap());
+        // `statx` carries the nanoseconds `MetadataExt::ctime` drops, so compare seconds.
+        assert_eq!(
+            s.ctime.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            md.ctime()
+        );
+        assert_eq!(
+            lstat(&f.0.join("a")).unwrap().file_id(),
+            lstat(&f.0.join("b")).unwrap().file_id()
+        );
+        // `stat` follows a link, `lstat` describes it.
+        std::os::unix::fs::symlink(f.0.join("a"), f.0.join("lnk")).unwrap();
+        assert_eq!(stat(&f.0.join("lnk")).unwrap().size, 7000);
+        assert_eq!(lstat(&f.0.join("lnk")).unwrap().kind, Kind::Symlink);
+        // A directory's `lstat` size is its own record (find compares it for `-size`);
+        // the eager `Entry` the scan uses reports 0, because that is not its contents.
+        let d = lstat(&f.0).unwrap();
+        assert_eq!(d.kind, Kind::Dir);
+        let mut eager = Vec::new();
+        DirReader::new()
+            .read(&f.0, &mut eager, &mut ErrorCounts::default())
+            .unwrap();
+        assert!(eager.iter().all(|e| !e.is_dir || e.size == 0));
+        assert!(other_filesystem(
+            &Entry {
+                name: OsString::new(),
+                is_dir: false,
+                is_link: false,
+                size: 0,
+                alloc: 0,
+                file_id: 0,
+                dev: d.dev + 1,
+                modified: UNIX_EPOCH,
+            },
+            d.dev
+        ));
     }
 
     /// Enumeration cost over a real tree, eager versus cheap. Ignored: it needs a big
@@ -883,7 +1010,7 @@ mod tests {
                     st.clear();
                     st.push(d);
                     st.push(&e.name);
-                    if e.stat(&st).is_ok() {
+                    if e.stat().is_ok() {
                         k += 1;
                     }
                 }
@@ -1008,7 +1135,7 @@ mod tests {
     struct Collected(Vec<String>);
 
     impl Sink for Collected {
-        fn push(&mut self, _fd: RawFd, rec: &Rec<'_>) {
+        fn push(&mut self, _dir: &Rc<OwnedFd>, rec: &Rec<'_>) {
             self.0.push(String::from_utf8(rec.name.to_vec()).unwrap());
         }
 
