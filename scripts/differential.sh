@@ -773,27 +773,26 @@ find_expr_case find_expr_combined expr size '( -name *.txt -o -name *.bin ) ! -p
 
 say ""
 say "== du: dusage du vs GNU du (size/)"
-# The GNU side asks for `--apparent-size` throughout: that is dusage's documented unit, and
-# the allocation default is the catalogue entry `du-allocation` instead of a rewrite of
-# these numbers. `-b` implies apparent size and `--inodes` ignores size, so neither row
-# passes it. Paths, units and the `total` label are compared exactly; only the sort is
-# applied, because the two tools print post-order in their own traversal order.
-du_case du_default eq . size '' '--apparent-size'
-du_case du_all eq . size '-a' '-a --apparent-size'
-du_case du_summarize eq . size '-s' '-s --apparent-size'
-du_case du_total eq . size '-c' '-c --apparent-size'
-du_case du_max_depth_1 eq . size '-d 1' '-d 1 --apparent-size'
+# Both tools default to allocated blocks, so neither side passes a size switch except where
+# the case names one: `-b` implies apparent size, and `--inodes` ignores size entirely.
+# Paths, units and the `total` label are compared exactly; only the sort is applied, because
+# the two tools print post-order in their own traversal order.
+du_case du_default eq . size '' ''
+du_case du_all eq . size '-a' '-a '
+du_case du_summarize eq . size '-s' '-s '
+du_case du_total eq . size '-c' '-c '
+du_case du_max_depth_1 eq . size '-d 1' '-d 1 '
 du_case du_bytes eq . size '-b' '-b'
-du_case du_kib eq . size '-k' '-k --apparent-size'
-du_case du_mib eq . size '-m' '-m --apparent-size'
-du_case du_human eq . size '-h' '-h --apparent-size'
-du_case du_si eq . size '--si' '--si --apparent-size'
+du_case du_kib eq . size '-k' '-k '
+du_case du_mib eq . size '-m' '-m '
+du_case du_human eq . size '-h' '-h '
+du_case du_si eq . size '--si' '--si '
 du_case du_inodes eq . size '--inodes' '--inodes'
-du_case du_separate_dirs eq . size '-S' '-S --apparent-size'
-du_case du_threshold eq . size '-t 2K' '-t 2K --apparent-size'
-du_case du_threshold_neg eq . size '-t -3K' '-t -3K --apparent-size'
-du_case du_exclude eq . size '--exclude *.log' '--exclude=*.log --apparent-size'
-du_case du_exclude_dir eq . size '--exclude excl' '--exclude=excl --apparent-size'
+du_case du_separate_dirs eq . size '-S' '-S '
+du_case du_threshold eq . size '-t 2K' '-t 2K '
+du_case du_threshold_neg eq . size '-t -3K' '-t -3K '
+du_case du_exclude eq . size '--exclude *.log' '--exclude=*.log '
+du_case du_exclude_dir eq . size '--exclude excl' '--exclude=excl '
 # One hardlink pair under -a: the directory is one inode's worth (4096 bytes, not 8192) and
 # only one of the two names is listed, which is what both tools do with a deduplicated pair.
 du_case du_hardlinks eq . size/hl '-a -b' '-a -b'
@@ -812,7 +811,7 @@ du_case du_allocation known:du-allocation . size '' ''
 du_case du_dir_inode known:du-dir-inode . many '' ''
 # Sizes below 1 KiB: dusage rounds each file up into its block, GNU rounds the subtree total
 # once, so 4 files of 3..9 bytes are 4 blocks here and 1 there.
-du_case du_block_rounding known:du-block-rounding . rounding '' '--apparent-size'
+du_case du_block_rounding known:du-block-rounding . rounding '' ''
 
 say ""
 say "== -z: dusage search -z vs rg -z (zip/)"
