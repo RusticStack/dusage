@@ -262,6 +262,20 @@ fn help_lists_search_and_find() {
         "--only-matching",
         "--context",
         "--glob",
+        "--vimgrep",
+        "--trim",
+        "-M, --max-columns",
+        "--path-separator",
+        "--field-match-separator",
+        "--field-context-separator",
+        "--context-separator",
+        "--no-context-separator",
+        "--engine",
+        "--crlf",
+        "--stop-on-nonmatch",
+        "--mmap",
+        "--no-mmap",
+        "--no-heading",
     ] {
         assert!(h.contains(flag), "{flag} missing from search help");
     }
@@ -1513,4 +1527,314 @@ fn pre_runs_a_command_per_file() {
     // A command that fails on a file is an error, reported like an unreadable path.
     let broken = run(&["search", "--pre", "false", "needle"], &dir);
     assert_eq!(code(&broken), 2);
+}
+
+#[test]
+fn vimgrep_prints_a_row_per_match() {
+    let f = Fixture::new("vimgrep");
+    let dir = f.root.join("vg");
+    fs::create_dir_all(&dir).unwrap();
+    let pos = dir.join("pos.txt");
+    fs::write(&pos, "alpha foo beta foo\nlast\na foo\n").unwrap();
+    let p = pos.display().to_string();
+
+    // ripgrep 14.1 prints the whole line once per match, with the match's own column:
+    //   $ rg --vimgrep foo pos.txt
+    //   pos.txt:1:7:alpha foo beta foo
+    //   pos.txt:1:16:alpha foo beta foo
+    //   pos.txt:3:3:a foo
+    let o = run(&["search", "--vimgrep", "foo"], &pos);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        format!("{p}:1:7:alpha foo beta foo\n{p}:1:16:alpha foo beta foo\n{p}:3:3:a foo\n")
+    );
+
+    // `-o` keeps the row count and trades the line for the match alone:
+    //   $ rg --vimgrep -o foo pos.txt
+    //   pos.txt:1:7:foo
+    let o = run(&["search", "--vimgrep", "-o", "foo"], &pos);
+    assert_eq!(
+        stdout(&o),
+        format!("{p}:1:7:foo\n{p}:1:16:foo\n{p}:3:3:foo\n")
+    );
+
+    // A context row keeps the path and the line number and has no column:
+    //   $ rg --vimgrep -A1 HIT one.txt
+    //   one.txt:2:1:HIT
+    //   one.txt-3-3
+    let one = dir.join("one.txt");
+    fs::write(&one, "1\nHIT\n3\n").unwrap();
+    let c = one.display().to_string();
+    let o = run(&["search", "--vimgrep", "-A1", "HIT"], &one);
+    assert_eq!(stdout(&o), format!("{c}:2:1:HIT\n{c}-3-3\n"));
+
+    // `-c` still counts lines, not rows.
+    let o = run(&["search", "--vimgrep", "-c", "foo"], &pos);
+    assert_eq!(stdout(&o), format!("{p}:2\n"));
+}
+
+#[test]
+fn trim_drops_leading_whitespace() {
+    let f = Fixture::new("trim");
+    let dir = f.root.join("trim");
+    fs::create_dir_all(&dir).unwrap();
+    let long = dir.join("long.txt");
+    fs::write(&long, "     needle\n     xx\n").unwrap();
+    let p = long.display().to_string();
+
+    // Indentation goes; the column still counts from the start of the line, as
+    // `rg --trim --column` answers `1:6:needle` for this file, and `-h` keeps the name off
+    // the row.
+    let o = run(&["search", "-h", "-n", "--trim", "needle"], &long);
+    assert_eq!(stdout(&o), "1:needle\n");
+
+    let o = run(&["search", "--trim", "--column", "-n", "needle"], &long);
+    assert_eq!(stdout(&o), "1:6:needle\n");
+    let named = run(
+        &["search", "-H", "--trim", "--column", "-n", "needle"],
+        &long,
+    );
+    assert_eq!(stdout(&named), format!("{p}:1:6:needle\n"));
+
+    // `--max-columns` measures the trimmed line, so a line that is only long because of its
+    // indentation is no longer cut. ripgrep omits a long line instead of cutting it, which
+    // this tool has always done differently (docs/SEARCH.md, §1.1).
+    let cut = run(&["search", "-h", "-n", "-M", "8", "needle"], &long);
+    assert_eq!(stdout(&cut), "1:     nee\n");
+    let kept = run(
+        &["search", "-h", "-n", "-M", "8", "--trim", "needle"],
+        &long,
+    );
+    assert_eq!(stdout(&kept), "1:needle\n");
+
+    // `-M` is `--max-columns`, so the two spellings agree.
+    let long_form = run(
+        &["search", "-h", "-n", "--max-columns", "8", "needle"],
+        &long,
+    );
+    assert_eq!(long_form.stdout, cut.stdout);
+}
+
+#[test]
+fn crlf_terminator_and_anchors() {
+    let f = Fixture::new("crlf");
+    let dir = f.root.join("crlf");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("dos.txt");
+    fs::write(&file, b"one\r\nneedle\r\nthree\r\n").unwrap();
+    let p = file.display().to_string();
+
+    // `$` matches before the `\r` and the `\r` is not printed, with the flag or without it:
+    // this scanner has always read `\r\n` as one terminator. ripgrep only does so under
+    // `--crlf`, and it prints the `\r` back out:
+    //   $ rg --crlf '^needle$' dos.txt | od -c   ->   n e e d l e \r \n
+    let o = run(&["search", "-h", "-n", "--crlf", "^needle$"], &file);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert_eq!(stdout(&o), "2:needle\n");
+    let o = run(&["search", "-h", "-n", "^needle$"], &file);
+    assert_eq!(stdout(&o), "2:needle\n");
+
+    // The row a vimgrep prints for it holds no `\r` either.
+    let o = run(&["search", "--vimgrep", "--crlf", "^needle$"], &file);
+    assert_eq!(stdout(&o), format!("{p}:2:1:needle\n"));
+}
+
+#[test]
+fn separators_between_fields_and_groups() {
+    let f = Fixture::new("separators");
+    let dir = f.root.join("sep");
+    fs::create_dir_all(&dir).unwrap();
+    let ctx = dir.join("ctx.txt");
+    fs::write(&ctx, "1\nHIT\n3\n4\n5\nHIT\n7\n").unwrap();
+
+    // ripgrep 14.1:
+    //   $ rg -n -A1 --field-match-separator '|' --field-context-separator '~' \
+    //        --context-separator '==' HIT ctx.txt
+    //   2|HIT
+    //   3~3
+    //   ==
+    //   6|HIT
+    //   7-7
+    let o = run(
+        &[
+            "search",
+            "-n",
+            "-A1",
+            "--field-match-separator",
+            "|",
+            "--field-context-separator",
+            "~",
+            "--context-separator",
+            "==",
+            "HIT",
+        ],
+        &ctx,
+    );
+    assert_eq!(stdout(&o), "2|HIT\n3~3\n==\n6|HIT\n7~7\n");
+
+    // grep's `--group-separator` is the same switch as `--context-separator`.
+    let o = run(
+        &["search", "-n", "-A1", "--group-separator", "==", "HIT"],
+        &ctx,
+    );
+    assert_eq!(stdout(&o), "2:HIT\n3-3\n==\n6:HIT\n7-7\n");
+
+    // `--no-context-separator` prints nothing between the groups, and an empty separator is a
+    // blank line, which is what ripgrep does with each.
+    let o = run(
+        &["search", "-n", "-A1", "--no-context-separator", "HIT"],
+        &ctx,
+    );
+    assert_eq!(stdout(&o), "2:HIT\n3-3\n6:HIT\n7-7\n");
+    let o = run(
+        &["search", "-n", "-A1", "--context-separator", "", "HIT"],
+        &ctx,
+    );
+    assert_eq!(stdout(&o), "2:HIT\n3-3\n\n6:HIT\n7-7\n");
+}
+
+#[test]
+fn path_separator_rewrites_printed_paths() {
+    let f = Fixture::new("pathsep");
+    let dir = f.root.join("ps");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("sub/f.txt"), "foo\n").unwrap();
+
+    // ripgrep rewrites `/` and `\\` alike, so the given separator is the only one left:
+    //   $ rg --path-separator '%' -n foo sub
+    //   sub%f.txt:1:foo
+    let file = dir.join("sub").join("f.txt").display().to_string();
+    let pct = |path: &str| path.replace(['/', '\\'], "%");
+    let plain = run(&["search", "-n", "foo"], &dir);
+    assert_eq!(stdout(&plain), format!("{file}:1:foo\n"));
+    let o = run(&["search", "-n", "--path-separator", "%", "foo"], &dir);
+    assert_eq!(stdout(&o), format!("{}:1:foo\n", pct(&file)));
+    assert!(
+        !stdout(&o).contains(std::path::MAIN_SEPARATOR),
+        "the only separator left is the given one: {}",
+        stdout(&o)
+    );
+    let o = run(
+        &["search", "--vimgrep", "--path-separator", "%", "foo"],
+        &dir,
+    );
+    assert_eq!(stdout(&o), format!("{}:1:1:foo\n", pct(&file)));
+
+    // A separator is one byte, as in ripgrep, which refuses anything longer.
+    let bad = run(&["search", "--path-separator", "::", "foo"], &dir);
+    assert_eq!(code(&bad), 2);
+    assert!(
+        stderr(&bad).contains("--path-separator"),
+        "{}",
+        stderr(&bad)
+    );
+}
+
+#[test]
+fn engine_chooses_the_matcher() {
+    let f = Fixture::new("engine");
+    let dir = f.root.join("eng");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.txt");
+    fs::write(&file, "HIT\nMISS\nHIT\n").unwrap();
+
+    // A pattern the Thompson/Pike engine cannot express: only the backtracking engine has it.
+    let auto = run(&["search", "-h", "--engine", "auto", "H(?=I)"], &file);
+    assert_eq!(code(&auto), 0, "{}", stderr(&auto));
+    let pcre = run(&["search", "-h", "--engine", "pcre2", "H(?=I)"], &file);
+    assert_eq!(stdout(&pcre), stdout(&auto), "pcre2 is -P");
+    let forced = run(&["search", "-h", "--engine", "default", "H(?=I)"], &file);
+    assert_eq!(code(&forced), 2, "{}", stdout(&forced));
+    assert!(
+        stderr(&forced).contains("backtracking engine"),
+        "{}",
+        stderr(&forced)
+    );
+
+    // The default engine answers a pattern it can express, unchanged.
+    let plain = run(&["search", "-h", "-n", "--engine", "default", "HIT"], &file);
+    assert_eq!(stdout(&plain), "1:HIT\n3:HIT\n");
+
+    // An engine name that does not exist is bad arguments, not a silent fallback.
+    let bogus = run(&["search", "--engine", "backtrack", "HIT"], &file);
+    assert_eq!(code(&bogus), 2);
+    assert!(
+        stderr(&bogus).contains("unrecognized regex engine"),
+        "{}",
+        stderr(&bogus)
+    );
+}
+
+#[test]
+fn mmap_flags_are_accepted_and_change_nothing() {
+    let f = Fixture::new("mmap");
+    let dir = f.root.join("mm");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "alpha needle beta\nsecond line\n").unwrap();
+    fs::write(dir.join("b.txt"), "needle again\n").unwrap();
+
+    let plain = run(&["search", "-n", "needle"], &dir);
+    assert_eq!(code(&plain), 0);
+    for flag in ["--mmap", "--no-mmap"] {
+        let o = run(&["search", "-n", flag, "needle"], &dir);
+        assert_eq!(code(&o), 0, "{flag}: {}", stderr(&o));
+        assert_eq!(o.stdout, plain.stdout, "{flag} must not change the output");
+    }
+}
+
+#[test]
+fn stop_on_nonmatch_ends_the_file_after_the_first_miss() {
+    let f = Fixture::new("stop");
+    let dir = f.root.join("stop");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("s.txt");
+    fs::write(&file, "a\nHIT one\nb\nc\nd\ne\nf\ng\nHIT two\nh\n").unwrap();
+
+    // ripgrep 14.1 stops the file at the first line after a match that does not match, and
+    // that line still prints while the `-A` window lasts:
+    //   $ rg -n -A5 --stop-on-nonmatch HIT s.txt
+    //   2:HIT one
+    //   3-b
+    // so the second match, eleven lines down, never appears.
+    let o = run(&["search", "-n", "-A5", "--stop-on-nonmatch", "HIT"], &file);
+    assert_eq!(stdout(&o), "2:HIT one\n3-b\n");
+
+    // With no window there is no context to print, and the stop is at the same line.
+    let o = run(&["search", "-n", "--stop-on-nonmatch", "HIT"], &file);
+    assert_eq!(stdout(&o), "2:HIT one\n");
+
+    // A line before the first match does not stop anything.
+    let leading = dir.join("lead.txt");
+    fs::write(&leading, "b\nHIT\n").unwrap();
+    let o = run(&["search", "-n", "--stop-on-nonmatch", "HIT"], &leading);
+    assert_eq!(stdout(&o), "2:HIT\n");
+}
+
+#[test]
+fn no_heading_is_the_last_spelling_that_wins() {
+    let f = Fixture::new("heading");
+    let dir = f.root.join("hd");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "HIT a\n").unwrap();
+    fs::write(dir.join("b.txt"), "HIT b\n").unwrap();
+
+    let (a, b) = (
+        dir.join("a.txt").display().to_string(),
+        dir.join("b.txt").display().to_string(),
+    );
+    let plain = stdout(&run(&["search", "-n", "HIT"], &dir));
+    assert_eq!(plain, format!("{a}:1:HIT a\n{b}:1:HIT b\n"));
+
+    let off = stdout(&run(
+        &["search", "--heading", "--no-heading", "-n", "HIT"],
+        &dir,
+    ));
+    assert_eq!(off, plain, "--no-heading after --heading prints no heading");
+
+    let on = stdout(&run(
+        &["search", "--no-heading", "--heading", "-n", "HIT"],
+        &dir,
+    ));
+    assert_eq!(on, format!("{a}\n1:HIT a\n\n{b}\n1:HIT b\n"));
 }
