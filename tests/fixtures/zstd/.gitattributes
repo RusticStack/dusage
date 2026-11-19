@@ -1,0 +1,4 @@
+# Compressed frames and the plaintexts they must expand to are bytes, not lines: a
+# checkout that rewrites LF would corrupt a frame and silently change a plaintext.
+*.bin binary
+*.zst binary
