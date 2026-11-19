@@ -113,11 +113,11 @@ the sequential walker.
 | Case | dusage | reference | dusage vs it |
 | --- | --- | --- | --- |
 | scan `/usr`, 180k files | **330** | `du -sb` 620 | **1.9x faster** |
-| search, frequent literal `-c` | **125** | `rg` 175 / `grep -rI` 150 | **1.4x faster than rg** |
-| search, rare literal `-c` | 120 | `rg` 100 | 1.2x slower |
-| search, case-insensitive `-c` | 130 | `rg -i` 95 | 1.35x slower |
+| search, frequent literal `-c` | **110** | `rg` 150 / `grep -rI` 150 | **1.35x faster than rg** |
+| search, rare literal `-c` | **90** | `rg` 90 | parity |
+| search, case-insensitive `-c` | **100** | `rg -i` 95 | parity (1.05x) |
 | search, regex `-c` | 190 | `rg` 95 / `grep -rIE` 200 | 2x slower than rg, level with grep |
-| search `-l` | **136** | `rg -l` 141 | **1.04x faster** |
+| search `-l` | **104** | `rg -l` 141 | **1.35x faster** |
 | find `*.go` over `/usr` | 359 | `find -name` 345 | parity (1.04x) |
 
 The last three rows moved with the vector scan: `bytes::find_byte`, the anchor search behind
