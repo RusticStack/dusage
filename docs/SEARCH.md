@@ -235,12 +235,15 @@ Three deviations from GNU find survive, and one cost.
   way: `findexpr::ExecRequest` carries the command and the terminator, not which
   predicate asked for it. `-execdir` alone behaves as find's does (measured: the
   same per-directory batches, different order).
-- **The walk is sequential.** The expression path costs 0.81–0.83 s for
-  `find /usr -name '*.go'` against findutils 4.9.0's 0.21–0.31 s on this 2-vCPU
-  box, while the glob form (`dusage find '*.go' /usr`) takes 0.26–0.36 s. The
-  expression form streams and stays at 5.7 MB resident against find's 4.8 MB;
-  the glob form is at parity with find but holds 69 MB because its output is the
-  sorted candidate list. Use the glob form when the glob can express the query.
+- **The walk is sequential.** Benchmarks do not have a case for the expression
+  form, so this is a one-off measurement rather than a table row: on this 2-vCPU
+  box at commit 547f955, `find /usr -name '*.go'` took 0.37–0.40 s at 6.8 MB
+  resident against findutils 4.9.0's 0.21–0.25 s at 4.8 MB, while the glob form
+  (`dusage find '*.go' /usr`) took 0.29–0.37 s but held 69 MB, because its output
+  is the sorted candidate list (`find-name` in `docs/BENCHMARKS.md` is that row).
+  The expression form streams and pays about 1.7x find's clock for it; the glob
+  form pays memory instead. Use the glob form when the glob can express the
+  query, and re-measure both before quoting a ratio.
 
 `-regextype` is accepted and validated against findutils' names but does not
 change the dialect (`-regex` always uses this crate's syntax), symbolic `-perm`
@@ -635,17 +638,19 @@ Three paths, chosen at compile time of the pattern:
   loop. That is the one input class that costs an extra full-file copy.
 
 A file that is still unfinished after one 64 KiB block switches to 1 MiB reads,
-and a file marked binary is scanned for one match instead of line by line,
-which is what keeps a 550 MB executable at 3.3 MB resident
-(`docs/BENCHMARKS.md`, Memory).
+and a file marked binary is scanned for one match instead of line by line rather
+than held as lines, which is why a large binary costs a few megabytes resident
+rather than its own size.
 
 ### 5.3 Parallelism and output order
 
 `par_for_each` (`src/queue.rs`) runs the work across `--threads` workers. The
 default is `available_parallelism()` clamped to **4..16**, with 8 as the
 fallback when the platform will not say (`src/cli.rs`). `docs/BENCHMARKS.md`
-records the sweep: on a 4-vCPU box 16 threads cost 15–30% over 4 on both
-`scan /usr` and `search -F 'func '`, so one-per-core is a measured choice.
+records the sweep in the `threads-scan-*` and `threads-search-*` rows: one
+thread is the slow row, the gain flattens at the core count, and past it the
+clock goes up on both `scan /usr` and `search -F 'func '`. Read the shape of
+those rows on your own box; the absolute milliseconds move with the machine.
 
 Each result is stored in a pre-allocated slot indexed by its position in the
 sorted list, and stats are aggregated under the same mutex. Output is therefore
@@ -666,13 +671,14 @@ scans sequentially so it can stop early.
   longer than 8 MiB (`CARRY_MAX`) is matched in pieces, so a `-w` boundary at
   such a split is not a real boundary.
 - **Every hit is copied and kept.** Peak memory therefore scales with total
-  output size, not with a fixed window: `docs/BENCHMARKS.md` measures 43 MB peak
-  RSS for a full-output search against ripgrep's 11 MB and grep's 4.6 MB. `-c`,
-  `-l`, `-L` and `-q` avoid this by discarding line data.
-- **`find` keeps every path.** Its output *is* the candidate list: 68 MB over
-  `/usr` against `find(1)`'s 4.8 MB (`docs/BENCHMARKS.md`, Memory). Sorting at
-  the end from a stream is the change that would close it; `search` no longer
-  has this shape.
+  output size, not with a fixed window: the RSS columns of the warm table in
+  `docs/BENCHMARKS.md` show the output-heavy search rows carrying the widest
+  dusage/reference gap, and `-c`, `-l`, `-L` and `-q` avoid it by discarding
+  line data.
+- **`find`'s glob form keeps every path.** Its output *is* the sorted candidate
+  list, which is why its RSS row is the widest in `docs/BENCHMARKS.md`. Sorting
+  at the end from a stream is the change that would close it; `search` no longer
+  has this shape, and the expression form streams instead.
 - **A repeated `-e` becomes one alternation.** The patterns are joined into a
   single regex, escaped first under `-F`, so five terms cost one walk instead of
   five — but a repeated `-e` also loses the literal fast path that a single
@@ -682,44 +688,42 @@ scans sequentially so it can stop early.
   memory, and a compressed member is expanded before it is scanned; every other
   mode streams in blocks.
 
-### 5.5 Measured versus asserted
+### 5.5 Where the numbers live
 
-The performance numbers in this project live in `docs/BENCHMARKS.md`, produced
-by `bench/run.sh` on a 2-vCPU box against the shipped 0.5.0 binary. They are
-quoted here as they stand, not re-measured:
+`docs/BENCHMARKS.md` is the document of record for performance. Every figure it
+prints is the output of `bench/summary.sh` over `bench/results.json`, regenerated
+by `bench/run.sh`, so a ratio there is only as current as the commit named in its
+header. Nothing in this document restates one as if it were stable. What is worth
+carrying here is the direction of each gap and the case that measures it:
 
-| Case | dusage | reference | dusage vs it |
-| --- | --- | --- | --- |
-| search, frequent literal (`-F 'func '`, print) | **139 ms** | `rg` 153 / `grep -rI` 134 | 1.1x faster than rg, level with grep |
-| search, rare literal (`-F asyncpreemptoff`) | **95 ms** | `rg` 88 | parity |
-| search, case-insensitive (`-i memmove`) | **108 ms** | `rg -i` 104 | parity |
-| search, general regex (`[A-Z][a-zA-Z0-9_]*\.go`) | 241 ms | `rg` 89 / `grep -rIE` 224 | 2.7x slower than rg, level with grep |
-| search, regex that never matches | **80 ms** | `rg` 90 | 1.1x faster |
-| search `-l` | **109 ms** | `rg -l` 149 | 1.37x faster |
-| find `*.go` over `/usr` | 351 ms | `find -name` 323 | parity |
+- **Literals are at parity or ahead** in the warm pass (`search-rare`,
+  `search-common`, `search-ci`, `search-count`, `search-files-with-matches` in
+  the warm table).
+- **A general regex still loses**: at the commit the tables were last generated
+  at (547f955) the warm `search-regex` row is 1.42x ripgrep's time, which is
+  down from the 3x this gap was at two commits earlier. The paragraph in
+  `docs/BENCHMARKS.md` explains why, and the reverse automaton that would close
+  it is open work in `docs/ROADMAP.md`.
+- **`-o` and `-U` are the expensive output modes** (`search-only-matching`,
+  `search-multiline`), and their RSS columns are the widest in the search block.
+- **`find`'s glob form is about 1.6x find's wall clock** at the same commit
+  (`find-name`), and its RSS is the widest row in the table.
+- **`du` is ahead of GNU du** on the same tree (`du-s`, `du`), and the totals are
+  byte-identical, which is what §6's du paragraph rests on.
 
-Sources: the Summary table in `docs/BENCHMARKS.md`; trees are `/usr/local/go`
-(244 MB, 15,657 text files) for the content cases and `/usr` (7.9 GB, 180k
-files) for `find`. The one case that still loses is a general regex, and the
-document's own explanation is that it runs the line-at-a-time path — closing it
-needs a reverse automaton, which `docs/ROADMAP.md` tracks as open work.
+To re-measure any of the above on your own machine:
 
-`du` has no row in that document, so I measured it here on the same 2-vCPU
-container, warm cache, alternating runs:
-
-```
-$ /usr/bin/time -f 'du %e' du -s /usr            # 0.32, 0.33 s
-$ /usr/bin/time -f 'dusage-du %e' dusage du -s /usr   # 0.19, 0.22, 0.22 s
-$ du -s /usr   -> 8172786 KiB      $ dusage du -s /usr -> 8172786 KiB
-$ du -sb /usr  -> 7879049167 B     $ dusage du -b -s /usr -> 7879049167 B
+```console
+$ cargo build --release
+$ bash bench/run.sh && bash bench/summary.sh
+$ bash scripts/perf-guard.sh
 ```
 
 **No Windows number in this repository is a measurement of the shipped search
 code.** The Windows CI job runs `cargo fmt --check`, clippy, `cargo test` and a
-release build — it checks that the code compiles and its tests pass, and
-nothing about speed. The Windows figures in the README come from one
-development PC and are not reproducible from CI; treat them as provenance, not
-as a benchmark.
+release build — it checks that the code compiles and its tests pass, and nothing
+about speed. The Windows figures in the README come from one development PC and
+are not reproducible from CI; treat them as provenance, not as a benchmark.
 
 ## 6. Can it replace X
 
@@ -748,8 +752,9 @@ with time keys, `--type-add`/`--type-clear`/`--type-list`, `--vimgrep`,
 remain are listed in §1.3 and are narrow but real: `--no-unicode`,
 `--glob-case-insensitive`, the five-name `--encoding` set, terminal hyperlinks
 and diagnostics, and the `-L`/`-E`/`-I` letter collisions — plus speed: a
-general regex costs 2.7x ripgrep's time (`docs/BENCHMARKS.md`), so a
-regex-heavy interactive search still feels slower. Keep rg for UTF-32 or
+general regex costs about 1.4x ripgrep's time in the last recorded run (warm
+`search-regex`, commit 547f955), so a regex-heavy interactive search still feels
+slower. Keep rg for UTF-32 or
 legacy-encoding trees and for patterns that need ripgrep's exact Unicode
 matching.
 
@@ -758,7 +763,7 @@ matching.
 `-perm`, `-newer`, `-maxdepth` and parentheses all run, and the comparisons above
 agree with findutils 4.9.0 on what they select. What differs is order (sorted per
 directory instead of readdir order), `-ls`'s date column, the sequential walk
-(0.8 s against 0.23 s over `/usr`, §1.4), and the refusals: `-delete` in every
+(about 1.7x find's clock over `/usr` at commit 547f955, §1.4), and the refusals: `-delete` in every
 spelling, `-exec`/`-execdir` without `--allow-exec`, symbolic `-perm`, `-ok`, and
 a `-regextype` that changes the dialect. The glob form is faster than the
 expression walk and its globs cover `**`, anchored paths and `{a,b}` — reach for

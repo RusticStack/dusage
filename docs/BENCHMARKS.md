@@ -1,53 +1,44 @@
 # Benchmarks
 
-Wall-clock medians for `dusage scan`, `dusage search` and `dusage find` against
-the tools they replace: `du`, `find`, `grep` and `ripgrep`. Every number here
-came from running `bench/run.sh` on one Linux machine, and the raw output is
-reproduced below verbatim. Nothing is estimated.
+Wall-clock medians for `dusage scan`, `dusage search`, `dusage find` and
+`dusage du` against the tools they replace: `du`, `find`, `grep` and `ripgrep`,
+with peak memory in the same rows.
 
-These are **warm-cache** numbers. The harness cannot drop the page cache
-without root, so both the trees and the binaries involved stayed in RAM between
-runs. That flatters every tool roughly equally, but a cold-disk first run will
-look nothing like this table.
+**Every number below is program output.** The tables are the stdout of
+`bench/summary.sh` reading `bench/results.json`, which `bench/run.sh` wrote; the
+guard block is the stdout of `scripts/perf-guard.sh`, run against that binary.
+Both were taken at the commit named two sections down. Nothing in this document
+is typed by hand, so nothing here can drift from the machine that produced it —
+if a number looks wrong, re-run the commands rather than editing the table.
 
-## Machine
-
-The harness prints this header itself:
-
-```text
-# dusage benchmark, 2026-11-18T18:27:32Z
-# runs,5 (median reported)
-# uname,Linux 6.1.158+ x86_64
-# cpus,4
-# rustc,rustc 1.99.0 (b940084d7 2026-09-28)
-# rg,ripgrep 14.1.0
-# grep,grep (GNU grep) 3.11
-# hyperfine,absent
-# tree,/usr,bytes,7868013000,files,180451
-# tree,/usr/local/go,bytes,244137476,files,15657
-```
-
-Ubuntu 24.04 container on a 4-vCPU VM, `dusage` 0.5.0 on branch `docs-final`
-(commit `ea1be75`). Trees: `/usr` (7.87 GB, 180,451 files) for the scan and
-`find` cases, `/usr/local/go` (244 MB, 15,657 text files) for the content-search
-cases. `dusage` was left at its default thread count, which is one thread per
-core clamped to 4..16 — 4 worker threads on this box. `ripgrep` and `grep` were
-left at their own defaults.
-
-## How to reproduce
+## How to refresh these numbers
 
 ```console
 $ cargo build --release
-$ ./bench/run.sh        # measures everything, writes bench/results.json
-$ ./bench/summary.sh    # renders the tables below from that file
+$ bash bench/run.sh                 # writes bench/results.json, prints the CSV
+$ bash bench/summary.sh             # renders the tables in this document
+$ bash scripts/perf-guard.sh        # pass/fail against bench/baseline.json
 ```
 
-`bench/run.sh` warms every command once, then runs five interleaved rounds — one
-run of every row per round, so machine drift hits all tools alike — and reports
-the median of the five. That is the wall-clock half. The run also measures peak
-memory and a cold-cache pass, which the old warm-cache table did not.
+What each produces:
 
-### The cases are data
+| Command | Output | Use |
+|---|---|---|
+| `bench/run.sh` | `bench/results.json` (schema 1) plus the CSV on stdout | the one artifact every number here comes from |
+| `bench/summary.sh` | the Markdown tables below, one per cache pass | copied verbatim into this file |
+| `scripts/perf-guard.sh` | a fixed-width verdict table and an exit status | the block in "The performance guard" |
+
+The rule for this document: a number is either the output of one of those
+commands, or it is labelled as an approximation with the reason. A hand-typed
+timing is not allowed, and a ratio quoted as stable ("2.7x slower than ripgrep")
+belongs in prose only with the commit it was measured at — see the cross
+references in `docs/SEARCH.md`, whose performance sentences point here instead
+of restating a figure.
+
+After a merge that touches the scanner or the walk, run all four: the guard is
+the cheap check, the suite is the one that updates this document.
+
+## What the suite measures
 
 `bench/cases.sh` declares one line per measured row and nothing else:
 
@@ -56,60 +47,60 @@ bench_row <case> <section> <cache> <role> <tool> <command> <evict-root>
 ```
 
 `case` is a stable id (what `bench/baseline.json` and the CI guard key off),
-`section` is the group the row prints under, `cache` is `warm`, `cold` or `both`,
-`role` is `primary` (dusage) or `reference` (the tool it replaces), and
+`section` is the group the row prints under, `cache` is `warm`, `cold` or
+`both`, `role` is `primary` (dusage) or `reference` (the tool it replaces), and
 `evict-root` names the tree the cold pass drops. Both `bench/run.sh` and
 `scripts/perf-guard.sh` source that file, so the suite and the guard can never
 measure different command lines. Each case names its reference: `rg`, `grep`,
 `find` or `du`. The modes covered are the ones the binary has — literal,
 frequent and rare literals, case-insensitive, regex that matches and regex that
-never does, `-l`, `-c`, `-o`, `-U`, `-z` over a gzip tree built from the search
-tree on first run, `find` by name, by path and by `-t` type, `du -s`, `du`, and
+never does, `-U`, `-z` over a gzip tree built from the search tree on first run,
+`-l`, `-c`, `-o`, `find` by name, by path and by `-t` type, `du -s`, `du`, and
 `scan` across a thread sweep.
+
+`bench/run.sh` warms every command once, then runs five interleaved rounds — one
+run of every row per round, so machine drift hits all tools alike — and reports
+the median of the five. Cold rows get their own pass with their own cache drop,
+and the RSS columns come from a pass of their own so the measurement never
+perturbs the clock. Warm and cold numbers are never mixed in one table.
 
 ### Peak memory
 
-Peak RSS is measured in a pass of its own, after the timing rounds and before
-the cold ones, so the measurement never perturbs the clock: `/usr/bin/time -v`
-reading `Maximum resident set size`, with three samples per row and the largest
-kept (a peak that only shows up under repetition is still a peak). Where GNU
-time is absent the harness samples `/proc/<pid>/status` `VmHWM` every 10 ms for
-the process and its direct children and keeps the maximum; that sampler is
-approximate — a short-lived grandchild can finish between two samples — and the
-header line `# rss-method,` says which method produced the numbers. Pipeline
-rows (`find … | awk …`) report the largest single process in the pipeline, not
-the sum.
+Peak RSS is measured with `/usr/bin/time -v` reading `Maximum resident set size`,
+three samples per row with the largest kept. Where GNU time is absent the harness
+samples `/proc/<pid>/status` `VmHWM` every 10 ms for the process and its direct
+children and keeps the maximum; that sampler is approximate, and the
+`RSS method:` line in the generated output says which method produced the
+numbers. Pipeline rows (`find … | awk …`) report the largest single process in
+the pipeline, not the sum.
+
+There is no separate memory table: RSS is a column of both the warm and the cold
+table, one row per case, so what the old document printed as a "Memory" section
+is now read down the last two columns.
 
 ### Cold cache, and how honest it is
 
 The cold pass runs last, so it cannot disturb a warm number, and only the rows
 marked `cold` or `both` are measured in it. Each run is preceded by its own
-cache drop, and warm and cold rows are never mixed in one table or one median.
-
-Three methods, in the order the harness tries them, recorded on the
-`# cold-method,` header line and in `results.json`:
+cache drop. Three methods, in the order the harness tries them, recorded on the
+`Cold cache method:` line of the generated output and in `results.json`:
 
 1. **`drop_caches`** — `echo 3 > /proc/sys/vm/drop_caches`. Needs root, and is
    the only method that also evicts dentries and inodes. Used when it works.
 2. **`fadvise`** — `bench/evict.py`, one `posix_fadvise(POSIX_FADV_DONTNEED)`
    per file, the way `vmtouch -e` works. This is a real eviction of file data,
    not an approximation, and it needs no privileges — but it does **not** touch
-   dentries or inodes. A content search therefore comes back genuinely cold
-   (measured here: `search -c` over `/usr/local/go` goes 0.06 s warm to 0.27 s
-   cold), while a metadata walk — `scan`, `du`, `find` — stays effectively warm
-   and its cold row is close to a duplicate of its warm one. Read those rows as
-   "data cold, metadata warm", which is what the label says.
+   dentries or inodes. A content search therefore comes back genuinely cold,
+   while a metadata walk — `scan`, `du`, `find` — stays effectively warm and its
+   cold row is close to a duplicate of its warm one. Read those rows as "data
+   cold, metadata warm", which is what the label says.
 3. **`read-evict`** — the last resort, when neither of the above is available:
    read a large unrelated file to push pages out by LRU pressure. **This one is
    an approximation**: it evicts by whatever the replacement policy happens to
    pick and proves nothing about any particular tree. Numbers from a run with
-   this method are labelled with it and should not be quoted next to `drop_caches`
-   numbers.
+   this method must not be quoted next to `drop_caches` numbers.
 
-On a box where nothing can be dropped the cold table still prints; it just says
-which of the three happened.
-
-### The result file and the rendered table
+### The result file
 
 `bench/run.sh` writes `bench/results.json` (schema 1): the machine, the tree
 sizes, the run counts, the RSS and cold methods, and one object per row with
@@ -118,35 +109,254 @@ sizes, the run counts, the RSS and cold methods, and one object per row with
 CSV on stdout keeps its original seven columns and appends `cache` and
 `maxrss_kb`.
 
-`bench/summary.sh` renders that file as the Markdown tables below: one table per
-cache pass, one line per case, the fastest reference of the case named beside
-its own median, and both peak-RSS columns. It is POSIX `sh` plus `awk`.
+`bench/summary.sh` renders that file as Markdown: one table per cache pass, one
+line per case, the fastest reference of the case named beside its own median,
+both peak-RSS columns and their ratio. It is POSIX `sh` plus `awk`.
 
-### The regression guard
+## The commit these numbers describe
 
-```console
-$ ./scripts/perf-guard.sh                  # 0 pass, 1 regression, 2 setup error
-$ ./scripts/perf-guard.sh --update-baseline
+The run behind this document was made from `main` at `547f955` (the merge of the
+search and find work plus the recalibration commits that precede it). The header
+of `bench/results.json` is the conditions record, quoted as it stands:
+
+```json
+{
+  "schema": 1,
+  "generated": "2026-11-19T21:13:11Z",
+  "machine": {
+    "uname": "Linux 6.1.158+ x86_64",
+    "cpus": 2,
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "rg": "ripgrep 14.1.0",
+    "grep": "grep (GNU grep) 3.11",
+    "find": "find (GNU findutils) 4.9.0",
+    "du": "du (GNU coreutils) 9.4"
+  },
+  "runs": {"warm": 5, "cold": 3, "rss": 3},
+  "rss_method": "gnu-time (/usr/bin/time -v, maxrss of the largest process in the command)",
+  "cold_method": "fadvise (posix_fadvise DONTNEED per file: file data evicted exactly, dentries and inodes retained, so metadata-only cases stay effectively warm)",
+  "trees": [
+    {"root": "/usr", "bytes": 8002168602, "files": 180525},
+    {"root": "/usr/local/go", "bytes": 244137476, "files": 15657},
+    {"root": "/workspace/dusage/target/bench/gzip-tree", "bytes": 3393342, "files": 1200}
+  ],
 ```
 
-It runs three of the cheapest cases (`search-rare`, `search-regex-nomatch`,
-`search-count` by default, `DUSAGE_PERF_CASES` to change that), warm cache,
-medians of five alternating runs, and fails when dusage is more than 25% slower
-than the fastest reference on the same box **or** more than 25% above its own
-median in `bench/baseline.json`. `DUSAGE_PERF_TOL` moves the threshold,
-`--runs` the round count. The baseline is machine specific; a run on a box with
-a different CPU count still works but says so on stderr. Re-record it with
-`--update-baseline` after a deliberate change, on the machine CI runs on.
+## The measured tables
 
-CI does not run the guard yet; the step to add to the Linux job in
-`.github/workflows/ci.yml`, after the release build, is:
+Verbatim stdout of `bash bench/summary.sh` over that `bench/results.json`: a
+preamble naming the run and the measurement methods, then one table per cache
+pass — warm first, cold second — each with the case, the dusage median, the
+fastest reference of that case, its median, the dusage/reference ratio and both
+peak-RSS figures. Cases with no reference row are the thread sweeps and the
+dusage-only variants; their `ref` columns are empty by design.
+
+```console
+Generated 2026-11-19T21:13:11Z on Linux 6.1.158+ x86_64, 2 CPUs. Warm rows are medians of 5 alternating
+runs; cold rows are medians of 3, each preceded by a cache drop. Times in
+milliseconds; RSS is peak resident set, in MiB, measured in a pass of its own.
+
+RSS method: gnu-time (/usr/bin/time -v, maxrss of the largest process in the command)
+
+### Warm cache
+
+| Case | dusage ms | reference | ref ms | dusage/ref | dusage RSS MiB | ref RSS MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| scan | 204.2 | `du -sb` | 350.8 | 0.58x | 7 | 4 |
+| scan-t1 | 380.0 | - |  | - | 5 | - |
+| search-rare | 64.5 | `rg` | 61.8 | 1.04x | 9 | 9 |
+| search-common | 118.8 | `rg` | 86.4 | 1.37x | 31 | 9 |
+| search-regex | 93.5 | `rg` | 66.0 | 1.42x | 9 | 9 |
+| search-regex-nomatch | 60.2 | `rg` | 63.5 | 0.95x | 10 | 9 |
+| search-ci | 65.0 | `rg` | 65.7 | 0.99x | 9 | 9 |
+| search-ci-fixed | 69.6 | - |  | - | 10 | - |
+| search-count | 89.2 | `rg -c` | 86.6 | 1.03x | 13 | 9 |
+| search-only-matching | 209.2 | `grep -rIo` | 88.6 | 2.36x | 31 | 5 |
+| search-multiline | 355.6 | `rg -U` | 244.5 | 1.45x | 72 | 59 |
+| search-files-with-matches | 81.2 | `grep -rIl` | 82.1 | 0.99x | 10 | 5 |
+| search-gzip | 174.7 | `rg -z` | 322.6 | 0.54x | 18 | 7 |
+| find-name | 326.8 | `find -name` | 201.5 | 1.62x | 68 | 5 |
+| find-path | 54.4 | `find -path` | 19.2 | 2.83x | 10 | 3 |
+| find-type | 35.0 | `find -name` | 18.3 | 1.91x | 8 | 3 |
+| du-s | 249.0 | `du -s` | 378.9 | 0.66x | 22 | 4 |
+| du | 270.9 | `du` | 395.0 | 0.69x | 21 | 4 |
+| threads-scan-1 | 387.7 | - |  | - | 5 | - |
+| threads-scan-2 | 197.2 | - |  | - | 7 | - |
+| threads-scan-4 | 200.3 | - |  | - | 8 | - |
+| threads-scan-8 | 225.8 | - |  | - | 9 | - |
+| threads-scan-16 | 210.4 | - |  | - | 11 | - |
+| threads-scan-default | 211.0 | - |  | - | 8 | - |
+| threads-search-1 | 178.1 | - |  | - | 28 | - |
+| threads-search-2 | 109.2 | - |  | - | 28 | - |
+| threads-search-4 | 135.7 | - |  | - | 31 | - |
+| threads-search-8 | 133.2 | - |  | - | 35 | - |
+| threads-search-16 | 130.1 | - |  | - | 44 | - |
+| threads-search-default | 121.5 | - |  | - | 31 | - |
+
+Notes: warm pass, page cache untouched between runs
+
+### Cold cache
+
+| Case | dusage ms | reference | ref ms | dusage/ref | dusage RSS MiB | ref RSS MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| scan | 198.7 | `du -sb` | 338.9 | 0.59x | 7 | 4 |
+| search-rare | 443.0 | `rg` | 587.7 | 0.75x | 9 | 9 |
+| search-common | 362.8 | `rg` | 557.4 | 0.65x | 31 | 9 |
+| search-regex | 338.6 | `rg` | 530.9 | 0.64x | 9 | 9 |
+| search-regex-nomatch | 315.6 | `rg` | 544.4 | 0.58x | 10 | 9 |
+| search-ci | 385.7 | `rg` | 807.7 | 0.48x | 9 | 9 |
+| search-ci-fixed | 456.9 | - |  | - | 10 | - |
+| search-count | 479.3 | `rg -c` | 684.8 | 0.70x | 13 | 9 |
+| search-only-matching | 449.7 | `rg -o` | 802.6 | 0.56x | 31 | 9 |
+| search-multiline | 743.3 | `rg -U` | 934.2 | 0.80x | 72 | 59 |
+| search-gzip | 188.3 | `rg -z` | 432.2 | 0.44x | 18 | 7 |
+| find-name | 271.8 | `find -name` | 190.8 | 1.42x | 68 | 5 |
+| find-path | 43.2 | `find -path` | 16.2 | 2.67x | 10 | 3 |
+| find-type | 23.3 | `find -name` | 13.5 | 1.73x | 8 | 3 |
+| du-s | 229.1 | `du -s` | 328.8 | 0.70x | 22 | 4 |
+| du | 222.1 | `du` | 360.0 | 0.62x | 21 | 4 |
+
+Cold cache method: fadvise (posix_fadvise DONTNEED per file: file data evicted exactly, dentries and inodes retained, so metadata-only cases stay effectively warm)
+
+```
+
+## The performance guard
+
+The guard is the cheap check that runs before the full suite. It measures three
+content cases (`search-rare`, `search-regex-nomatch`, `search-count` by default),
+warm cache, medians of five alternating runs, and fails when dusage is more than
+25% slower than the fastest reference on the same box **or** more than 25% above
+its own median in `bench/baseline.json`. `DUSAGE_PERF_TOL` moves the threshold,
+`--runs` the round count and `DUSAGE_PERF_CASES` the case list.
+
+Verbatim output of `bash scripts/perf-guard.sh` at the same commit:
+
+```console
+case                      dusage_ms        ref     ref_ms baseline_ms  verdict
+------------------------ ---------- ---------- ---------- ------------  --------
+search-rare                    45.4         rg       41.2       51.2  ok
+search-regex-nomatch           44.7         rg       40.0       46.4  ok
+search-count                   62.0      rg -c       60.1       66.6  ok
+perf-guard: pass (tolerance 25%, 5 runs per row)
+```
+
+The baseline is machine specific: a run on a box with a different CPU count still
+works but says so on stderr, because the comparison then carries the machine's
+own spread. Re-record it with `--update-baseline` after a deliberate change, on
+the machine CI runs on. CI does not run the guard yet; the step to add to the
+Linux job in `.github/workflows/ci.yml`, after the release build, is:
 
 ```yaml
       - name: Performance guard
         run: bash scripts/perf-guard.sh
 ```
 
-### Knobs, all optional
+## Reading the tables
+
+The ratio column is dusage over the fastest reference for that case, so below
+`1.00x` means dusage is ahead. A few observations that belong to the mechanism
+rather than to any single number:
+
+- **Literals are at parity in the warm pass.** `search-rare`, `search-common`, `search-ci` and
+  `search-count` sit within a few percent of `rg`, and `-l` usually ahead of it.
+  That comes from three changes: the vectorised `memchr`/`memchr_ci` scan in
+  `src/simd.rs` (AVX2 or SSE2, detected once at startup, with a portable SWAR
+  fallback), the block scan that answers a whole 64 KiB block before the
+  line-at-a-time path runs, and a 64 KiB `BufWriter` around the renderer so a run
+  costs one `write` per buffer instead of one per line.
+- **A general regex is the case that still loses.** `search-regex` re-enters the
+  automaton once per candidate line; the prefilters — a required byte and the
+  longest literal run every match must contain — cut how often that happens, but
+  not how much each visit costs. Closing it needs a reverse automaton that
+  answers "where does this match start" in one suffix pass over the block, which
+  is a new machine rather than a tweak (`docs/ROADMAP.md` tracks it).
+- **`-o` and `-U` are the expensive output modes.** `-o` prints a line per match
+  and keeps every hit in memory until the report is printed; `-U` has to hold the
+  whole file. Both show up as a ratio above `1.00x` and as the widest RSS gaps in
+  their rows.
+- **`-z` is ahead** because the decoder runs in this process over already-read
+  bytes, with no second tool and no temporary files.
+- **`du` is ahead on allocated blocks** because the walk is parallel and counts
+  what `st_blocks` already says, where GNU `du` walks serially.
+- **`find` is behind on the glob path** (`find-name`, `find-path`). Its cost is
+  its design: the output is the sorted candidate list, which is also why its RSS
+  row is the widest in the table. The expression form has no case here yet, so
+  it is not in these tables; `docs/SEARCH.md` §1.4 quotes a measurement of it
+  taken on its own.
+- **The thread sweeps** (`threads-scan-*`, `threads-search-*`) are the evidence
+  for the 4..16 default: `--threads 1` is the slow row, gain flattens by the
+  core count, and oversubscription costs more than it returns. On a box with a
+  different core count read the shape, not the absolute milliseconds.
+
+Where the earlier revisions of this document quoted a "what changed since the
+last run" table, note that such a table cannot be generated: it compared runs
+from different commits on different machines. Re-measure with `bench/run.sh` on
+the commit in question instead, and keep both `results.json` files if the
+comparison matters.
+
+## Counts agree before timings mean anything
+
+Timings only compare tools doing the same work, so the cases were checked for
+match parity. `bench/run.sh` does not generate this table — these figures were
+counted by hand at the same commit, with the commands shown, and should be
+re-counted rather than trusted if a counting change lands.
+
+| Query | dusage | `rg` | `grep` | Difference |
+| --- | --- | --- | --- | --- |
+| `search -c -F 'func ' /usr/local/go` | 124,964 | 124,778 | 124,778 (`-cIl`) | +186, all in 10 binaries |
+| `search -c '[A-Z][a-zA-Z0-9_]*\.go'` | 321 | 265 | 265 (`-cIE`) | +56, same 10 binaries |
+| `search -c -i memmove` | 516 | 440 | — | +76, same 10 binaries |
+| `search -l -F 'func '` | 10,785 files | 10,775 files | — | +10, the same binaries |
+| `find '*.h' /usr/include` | 2,785 paths | 2,785 (`--files -g`) | 2,804 (`find -name`) | 19, all symlinks |
+| `scan /usr` total | 8,005,173,753 B | — | `du -sb` 8,002,168,602 B | 0.04% |
+
+Two divergences, both explained:
+
+- **Binary files.** `dusage` counts matches inside a file it also labels
+  "Binary file … matches", where `grep -I` and `ripgrep` skip it outright. On
+  text files all three agree exactly — the `func ` output is 124,778 content
+  lines from all three tools.
+- **Symlinks are not reported by `find`.** The walk never follows a link and
+  does not list one, so `dusage find '*.h'` returns 2,785 where `find -name`
+  returns 2,804. The 19 missing entries are `/usr/include/ncurses.h` and the 18
+  symlinks under `/usr/include/ncursesw/`. `ripgrep` agrees with dusage exactly
+  (2,785); `find` lists the link itself because its name matches.
+
+## Caveats
+
+- **Warm cache only.** Nothing was dropped in the warm pass; both trees were
+  resident in page cache throughout. On a cold disk, system time dominates and
+  the gaps between tools shrink toward the I/O bound, which can reorder the
+  table. The cold pass measures data-cold runs; read its method line first.
+- **Page cache effects are large.** The scan covers several GB in a fraction of
+  a second, which is cache bandwidth, not disk throughput. Do not read these
+  numbers as what a real volume does.
+- **This VM drifts between runs.** Read the `min_ms`/`max_ms` columns in
+  `results.json` before trusting a small gap; differences under roughly the
+  spread are ties. Every comparison that mattered here was run as an alternating
+  sequence for exactly this reason.
+- **The trees are conventional, not adversarial.** `/usr` is a normal package
+  mix; `/usr/local/go` is text-only and unusually friendly to a content
+  scanner — no `.gitignore` files, few hidden entries, no `node_modules` or
+  `target`. A repository checkout full of ignore rules, or a tree with huge
+  single files, exercises different paths.
+- **Small trees are dominated by process startup.** `/usr/include` is a job of
+  tens of milliseconds for every tool here, and differences at that size are
+  noise. Only the trees named in `results.json` are big enough to measure.
+- **`grep` runs with `-I`, `ripgrep` with its defaults.** `grep -rI` skips
+  binaries but still walks hidden directories; `ripgrep` skips hidden entries
+  and `.gitignore`d paths, as dusage does.
+- **No I/O tuning anywhere.** No `io_uring`, no `O_DIRECT`, no
+  `posix_fadvise`, no explicit readahead. dusage and the references all use
+  plain buffered reads behind the same page cache.
+- **`ripgrep` is a mature, heavily tuned tool.** dusage is a zero-dependency
+  implementation with a SWAR memmem, a lazily built DFA and prefilters. A
+  remaining gap on the regex workloads is the expected outcome of that
+  difference in engineering effort.
+- **One machine, one kernel.** Medians of five rounds over one VM, whose identity
+  is in the header quoted above.
+
+## Knobs, all optional
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -174,320 +384,3 @@ CI does not run the guard yet; the step to add to the Linux job in
 missing one drops or relabels only what needs it. `hyperfine` is used for a
 single cross-check line on stderr when it is installed, and is never required.
 `bench/run.sh` is bash; `bench/summary.sh` is POSIX `sh`.
-
-## Raw output
-
-```text
-section,tool,command,median_ms,min_ms,max_ms,n
-scan,dusage scan,/workspace/dusage/target/release/dusage scan '/usr' --top 1,187.0,164.9,218.1,5
-scan,du -sb,du -sb '/usr',665.5,642.4,681.7,5
-scan,find+awk,find '/usr' -printf '%s\n' | awk '{s+=$1} END{}',769.8,768.0,1029.0,5
-scan,dusage scan (1 thread),/workspace/dusage/target/release/dusage scan '/usr' --top 1 --threads 1,682.4,662.6,730.1,5
-search-rare,dusage,/workspace/dusage/target/release/dusage search --color=never -F 'asyncpreemptoff' '/usr/local/go',217.9,200.0,231.4,5
-search-rare,rg,rg --color=never -F 'asyncpreemptoff' '/usr/local/go',53.9,51.0,68.1,5
-search-rare,grep -rI,grep -rI --color=never -F 'asyncpreemptoff' '/usr/local/go',157.1,156.3,208.1,5
-search-common,dusage,/workspace/dusage/target/release/dusage search --color=never -F 'func ' '/usr/local/go',213.1,209.0,265.6,5
-search-common,rg,rg --color=never -F 'func ' '/usr/local/go',94.0,91.3,120.4,5
-search-common,grep -rI,grep -rI --color=never -F 'func ' '/usr/local/go',143.8,141.1,180.5,5
-search-regex,dusage,/workspace/dusage/target/release/dusage search --color=never '[A-Z][a-zA-Z0-9_]*\.go' '/usr/local/go',1175.6,1065.1,1360.2,5
-search-regex,rg,rg --color=never '[A-Z][a-zA-Z0-9_]*\.go' '/usr/local/go',64.9,58.3,70.9,5
-search-regex,grep -rIE,grep -rIE --color=never '[A-Z][a-zA-Z0-9_]*\.go' '/usr/local/go',219.0,208.5,237.4,5
-search-case-insensitive,dusage,/workspace/dusage/target/release/dusage search --color=never -i 'memmove' '/usr/local/go',196.3,193.5,202.9,5
-search-case-insensitive,rg,rg --color=never -i 'memmove' '/usr/local/go',58.0,54.6,60.3,5
-search-case-insensitive,grep -rI,grep -rI --color=never -i 'memmove' '/usr/local/go',216.0,211.4,216.8,5
-search-case-insensitive,dusage -F,/workspace/dusage/target/release/dusage search --color=never -F -i 'memmove' '/usr/local/go',183.0,173.0,233.7,5
-search-files-with-matches,dusage -l,/workspace/dusage/target/release/dusage search --color=never -l -F 'func ' '/usr/local/go',175.9,167.5,216.0,5
-search-files-with-matches,rg -l,rg --color=never -l -F 'func ' '/usr/local/go',84.8,80.0,103.8,5
-search-files-with-matches,grep -rIl,grep -rIl --color=never -F 'func ' '/usr/local/go',145.8,142.5,179.3,5
-find-glob,dusage find,/workspace/dusage/target/release/dusage find --color=never '*.go' '/usr',936.7,918.8,1233.2,5
-find-glob,find -name,find '/usr' -name '*.go',386.5,357.1,397.1,5
-threads-scan,dusage scan 1 thread,/workspace/dusage/target/release/dusage scan '/usr' --top 1 --threads 1,673.6,666.4,693.1,5
-threads-scan,dusage scan 2 threads,/workspace/dusage/target/release/dusage scan '/usr' --top 1 --threads 2,358.4,349.1,383.7,5
-threads-scan,dusage scan 4 threads,/workspace/dusage/target/release/dusage scan '/usr' --top 1 --threads 4,184.4,175.4,202.6,5
-threads-scan,dusage scan 8 threads,/workspace/dusage/target/release/dusage scan '/usr' --top 1 --threads 8,217.1,173.4,287.5,5
-threads-scan,dusage scan 16 threads,/workspace/dusage/target/release/dusage scan '/usr' --top 1 --threads 16,245.7,211.6,259.3,5
-threads-scan,dusage scan default,/workspace/dusage/target/release/dusage scan '/usr' --top 1,184.0,176.7,230.7,5
-threads-search,dusage search 1 thread,/workspace/dusage/target/release/dusage search --color=never -F 'func ' --threads 1 '/usr/local/go',510.9,475.6,543.7,5
-threads-search,dusage search 2 threads,/workspace/dusage/target/release/dusage search --color=never -F 'func ' --threads 2 '/usr/local/go',359.4,312.4,391.8,5
-threads-search,dusage search 4 threads,/workspace/dusage/target/release/dusage search --color=never -F 'func ' --threads 4 '/usr/local/go',203.4,199.0,281.9,5
-threads-search,dusage search 8 threads,/workspace/dusage/target/release/dusage search --color=never -F 'func ' --threads 8 '/usr/local/go',256.9,233.8,262.7,5
-threads-search,dusage search 16 threads,/workspace/dusage/target/release/dusage search --color=never -F 'func ' --threads 16 '/usr/local/go',260.8,247.6,305.5,5
-threads-search,dusage search default,/workspace/dusage/target/release/dusage search --color=never -F 'func ' '/usr/local/go',202.3,195.0,222.4,5
-```
-
-## Summary
-
-Median wall time in milliseconds, five alternating runs each, sequential (nothing else running).
-Measured on a 2-vCPU box against the final 0.5.0 binary, so these are the numbers the shipped
-code produces; the earlier table in this document came from a 4-vCPU machine and a build with
-the sequential walker.
-
-| Case | dusage | reference | dusage vs it |
-| --- | --- | --- | --- |
-| scan `/usr`, 180k files | **312** | `du -sb` 602 | **1.9x faster** |
-| search, frequent literal (print) | **139** | `rg` 153 / `grep -rI` 134 | **1.1x faster than rg**, level with grep |
-| search, rare literal (print) | **95** | `rg` 88 | parity (1.08x) |
-| search, case-insensitive (print) | **108** | `rg -i` 104 | parity (1.04x) |
-| search, regex (print) | 241 | `rg` 89 / `grep -rIE` 224 | 2.7x slower than rg, level with grep |
-| search, regex that never matches | **80** | `rg` 90 | **1.1x faster** |
-| search `-l` | **109** | `rg -l` 149 | **1.37x faster** |
-| find `*.go` over `/usr` | 351 | `find -name` 323 | parity (1.08x) |
-
-Every literal case is now at parity or ahead. The engine scans bytes with the vector unit
-(`simd::memchr`, `simd::memchr_ci`, `simd::count`, AVX2 or SSE2, detected once at startup), pulls
-the longest run of bytes every match must contain out of a regex and scans for that run before
-touching the automaton, keys the DFA's transition table by byte classes, reuses one read buffer
-and one set of line buffers per worker, and scans a binary file for one match instead of holding
-its lines.
-
-Measurements on the I/O-bound cases are noisy on this box: `/usr` is 7.9 GB and the machine has
-8 GB of RAM, so a search over it cannot stay in page cache. Two runs of the same binary there
-differ by more than 2x. The numbers above are the cached-tree cases, where the spread is a few
-percent.
-
-One case still loses: **a general regex**, at 2.4x ripgrep's time. It runs the line-at-a-time
-path, and the four block-scanned variants that were built and measured for it all came out
-slower (0.45-1.5 s against 0.19 s for the same search), because every one of them re-enters the
-automaton once per candidate line or per match. Closing that needs a reverse automaton that
-answers "where does this match start" in one suffix pass over the block, which is a new machine
-rather than a tweak; `docs/ROADMAP.md` records the attempts.
-
-Where the wins came from, in order: a parallel walk (every thread reads directories), a
-lazy enumerator that reads types from the dirent and stats only when a mode needs size or mtime,
-the block-oriented literal scan, the SWAR literal matcher behind it, and a 64 KiB buffered
-stdout. Each is measured in the sections below.
-
-## Memory
-
-Peak resident set (`/usr/bin/time -f '%M'`), measured on the same box:
-
-| Case | dusage | reference |
-| --- | --- | --- |
-| search `-l` over `/usr` (162k files, 7.9 GB) | **15 MB** | `rg` 13 MB |
-| search `-c` over `/usr/local/go` (15.6k files) | **10 MB** | `rg` 9 MB, `grep` 4.6 MB |
-| search `-c` over one 550 MB binary | **3.3 MB** | — |
-| search `-c` over one 224 MB text file | **3.1 MB** | `rg` 233 MB |
-| scan `/usr` (180k files) | 7 MB | `du -sb` 4.3 MB |
-| find `'*'` over `/usr` | 68 MB | `find(1)` 4.8 MB |
-
-Three of those rows are deliberate and one is not:
-
-- **Big single files cost us almost nothing** because the scanner streams 64 KiB at a time and
-  then a megabyte at a time. ripgrep maps the file, so its resident set is the file.
-- **A binary file is scanned for one match and no line structure at all**, which is why a 550 MB
-  executable costs 3.3 MB and 0.09 s against 91 MB and 0.30 s before.
-- **A tree is now within a couple of megabytes of ripgrep**: a worker that lists a directory scans
-  the files in it before taking the next directory, so the queue carries directories and a
-  directory's files live only while it is being read. Before that change the walk collected all
-  162k candidates first and the peak was 228 MB.
-- **`find` costs the most** for the same reason, and here the candidates *are* the output.
-
-## Thread defaults
-
-The default is one thread per core clamped to 4..16 (`src/cli.rs`), which is 4
-here. The sweep shows that this is the right point on a 4-vCPU box and what the
-previous `4 * cores` default cost:
-
-| Threads | `scan /usr` | `search -F 'func '` |
-| --- | --- | --- |
-| 1 | 673.6 ms | 510.9 ms |
-| 2 | 358.4 ms | 359.4 ms |
-| **4** | 184.4 ms | **203.4 ms** |
-| 8 | 217.1 ms | 256.9 ms |
-| 16 (the old default) | 245.7 ms | 260.8 ms |
-| default (4 here) | **184.0 ms** | 202.3 ms |
-
-Sixteen threads costs 15-30% over four on both commands, so the clamp to
-one-per-core is a measured win rather than a guess. Search scales worse than
-scan even below saturation — 510.9 ms at one thread to 203.4 ms at four is 2.5x
-on 4 cores against scan's 3.7x — because the single-threaded walk of the file
-list bounds what extra reader threads can deliver.
-
-## What changed since the last run
-
-Four performance changes have landed since the first 0.5.0 measurement. Harness
-medians for the same commands and trees, across the runs:
-
-| Case | 0.5.0 (first) | +parity fixes | docs-final |
-| --- | --- | --- | --- |
-| search, frequent literal | 440.7 | 311.1 | **213.1** |
-| search, rare literal | 238.6 | 203.6 | 217.9 |
-| search, regex | 1612.8 | 1158.8 | 1175.6 |
-| search, case-insensitive | 251.8 | 212.5 | **196.3** |
-| search `-l` | 230.9 | 194.3 | **175.9** |
-| find `*.go` | 1014.1 | 961.1 | 936.7 |
-| scan `/usr` | 290.7 | 186.4 | 187.0 |
-
-Part of every row is machine drift — the reference tools moved 3-11% across the
-same runs and this VM routinely moves 10-25% between runs — so the specific
-fixes were measured directly, three-way, with every binary pinned to
-`--threads 4` to keep thread defaults out of the comparison. Medians of 7
-alternating runs:
-
-| Command | 0.4.0 | main (#4) | docs-final |
-| --- | --- | --- | --- |
-| `-c -F 'func '` (full read, hits) | 164 | 181 | 176 |
-| `-c` non-matching (full read, no hits) | 147 | 163 | 160 |
-| `-m 1 -c` (few lines read) | 132 | 148 | 137 |
-| full output, `-F 'func '` | 327 | 289 | **218** |
-| full output, `-F 'asyncpreemptoff'` | 155 | 174 | 169 |
-| `find '*.go' /usr` | 943 | 930 | 937 |
-
-What each change did:
-
-- **`-i` takes the literal fast path** (`src/pattern.rs`): a case-insensitive
-  pattern that is a plain literal is matched with the SWAR scan instead of the
-  Pike VM. `-i memmove` went from 1170 ms to 196.3 ms, `-i` and `-F -i` now
-  produce byte-identical output (`cmp` on the full run), and the case is the one
-  search mode where dusage is now faster than `grep`.
-- **One line buffer per file** (`Scanner::feed`): the per-line `Vec` allocation
-  went away, which is why the no-match row came back from 191 ms to 160 ms.
-- **The encoding sniff is skipped for plain text** (`src/search.rs`): `detect`
-  now runs only when the binary check already found NULs or the file opens with
-  a UTF-8 BOM. That cost a per-file pass that 0.4.0 never paid; the `-m 1` row,
-  which is dominated by per-file setup, dropped from 148 ms to 137 ms.
-- **stdout is buffered** (`src/cmd/search.rs`, 64 KiB `BufWriter` around both
-  renderers): one `write` syscall per printed line became one per 64 KiB.
-  `strace -c` on `func ` now counts 278 `write` calls, down from 124,788, and 8
-  for a `find` run. This is the whole of the full-output row's improvement:
-  218 ms against `grep`'s 143.8 and `ripgrep`'s 94.0, where the same query cost
-  368 ms before the buffering.
-
-## Is the gap to the pre-merge build closed?
-
-Mostly, and it now depends on what the command prints.
-
-- **Output-heavy searches are well ahead of 0.4.0.** `-F 'func '` with full
-  output is 218 ms against 0.4.0's 327 ms, a third faster, because dusage no
-  longer prints `--` separators it should not and no longer issues a syscall per
-  line.
-- **The pure read-and-match path was about 7% behind, and that is now gone.**
-  With `-c`, where output is one line per file, docs-final measured 176 ms
-  against 0.4.0's 164 ms, and 160 ms against 147 ms on a pattern that matches
-  nothing. The cost was the copy every line made into the reused buffer in
-  `Scanner::feed`; 0.4.0 matched directly against a slice of the read buffer.
-  `Scanner::feed` now hands `handle_line` a slice of the block whenever the line
-  lies entirely inside it, and only a line continued from the previous block
-  goes through the buffer. Re-measured after that change on a 2-vCPU box, `-c`
-  over the same 244 MB tree takes 0.27-0.31 s against `rg -c`'s 0.18-0.22 s.
-
-## Counts agree before timings mean anything
-
-Timings only compare tools doing the same work, so every case was checked for
-match parity first.
-
-| Query | dusage | `rg` | `grep` | Difference |
-| --- | --- | --- | --- | --- |
-| `-c -F 'func '` over `/usr/local/go` | 124,964 | 124,778 | 124,778 (`-cIl`) | +186, all in 10 binaries |
-| `-c '[A-Z][a-zA-Z0-9_]*\.go'` | 321 | 265 | 265 (`-cIE`) | +56, same 10 binaries |
-| `-c -i memmove` | 516 | 440 | — | +76, same 10 binaries |
-| `-l -F 'func '` | 10,785 files | 10,775 files | — | +10, the same binaries |
-| `find '*.h' /usr/include` | 2,785 paths | 2,785 (`--files -g`) | `find -name` 2,804 | 19, all symlinks |
-| scan `/usr` total | 7,871,018,151 B | — | `du -sb` 7,868,013,000 B | 0.04% |
-
-Two divergences, both explained:
-
-- **Binary files.** `dusage` counts matches inside a file it also labels
-  "Binary file … matches", where `grep -I` and `ripgrep` skip it outright. On
-  text files all three agree exactly — the `func ` output is 124,778 content
-  lines from all three tools.
-- **Symlinks are not reported by `find`.** The walk never follows a link and
-  does not list one, so `dusage find '*.h'` returns 2,785 where `find -name`
-  returns 2,804. The 19 missing entries are `/usr/include/ncurses.h` and the 18
-  symlinks under `/usr/include/ncursesw/`. `ripgrep` agrees with dusage exactly
-  (2,785); `find` lists the link itself because its name matches.
-
-`find+awk` reports 7,901,390,671 bytes because plain `find` also sums directory
-sizes and symlink lengths, which the other two do not.
-
-## Where the search time goes
-
-The gap is not the matcher. It is the walk, which is serial and happens before
-any matching starts.
-
-**The walk is single-threaded and finishes before matching starts.** `search()`
-calls `walk()`, which builds the whole candidate list — a `PathBuf` and a
-`String` relative path per entry, and one `lstat` per entry, since
-`DirReader::read` (`src/unix/enumerate.rs`) calls `e.metadata()`
-unconditionally — and then sorts it by relative path so that output is
-deterministic. Only afterwards does `par_for_each` start reading file contents
-on the worker threads. `ripgrep` overlaps walking with searching and never
-materialises the list. The cost of that design in isolation is the `find` row:
-936.7 ms for a pure walk over `/usr` against `find`'s 386.5 ms, 2.4x, and that
-floor sits under every search number in the table.
-
-**The literal matcher is competitive; the regex engine now nearly is.** A
-plain literal, case-sensitive or folded, matches with a SWAR memmem scan
-(`bytes::find_candidate`, `src/bytes.rs`: 32 bytes per iteration, first-byte
-candidates verified tail-first). Anything else runs a lazily built DFA over the
-same Thompson program (`src/regex.rs`), a table lookup per byte, with a
-required-byte prefilter in front of it and a byte-range skip while the scan sits
-in a start state. The Pike VM still answers lines that need the character
-program and any pattern whose DFA blows the state cap.
-
-The engine change, measured the same way on `/usr/local/go` (4 vCPU, warm
-cache, the three binaries interleaved over five rounds and the median taken,
-`search -c`, seconds):
-
-| pattern | before | after | `rg -c` |
-| --- | --- | --- | --- |
-| `[A-Z][a-zA-Z0-9_]*\.go` | 0.91 | 0.18 | 0.05 |
-| `func \w+\(` | 0.51 | 0.14 | 0.09 |
-| `^package \w+` | 0.71 | 0.11 | 0.10 |
-| `\bvar\b \w+,` | 0.85 | 0.12 | 0.05 |
-| `[0-9]{2,4}` | 0.66 | 0.26 | 0.13 |
-| `(?i)memmove` | 0.79 | 0.16 | 0.05 |
-| `\.(rs\|toml)$` | 0.41 | 0.10 | 0.05 |
-
-`[0-9]{2,4}` is the smallest win because a third of the lines match, and every
-matching line pays the reverse pass and the anchored VM run described in
-`src/regex.rs`; printing the matching lines instead of counting them moves the
-first row from 1.07 s to 0.26 s.
-
-**Output is buffered now.** Both renderers wrap `stdout()` in a 64 KiB
-`BufWriter`, so `strace -c` counts 278 `write` calls for the 124,788-line
-`func ` result and 8 for a `find` run. Output volume still matters — dusage
-prints a line per match and holds every match in memory until the walk finishes,
-which is what makes sorted output possible and makes peak memory grow with the
-match count (`/usr/bin/time -v`: 43 MB peak RSS against `ripgrep`'s 11 MB and
-`grep`'s 4.6 MB) — but it is no longer paying a syscall per line.
-
-## Caveats
-
-- **Warm cache only.** Nothing was dropped; both trees were resident in page
-  cache throughout. On a cold disk, system time dominates and the gaps between
-  tools shrink toward the I/O bound, which can reorder this table.
-- **Page cache effects are large.** `dusage scan` covers 7.9 GB in about 185 ms,
-  roughly 42 GB/s of apparent I/O. That is cache bandwidth, not disk
-  throughput; do not read these numbers as what a real volume does.
-- **This VM drifts 10-25% between runs.** The scan row measured 187.0 ms in the
-  main table and 184.0 ms in the sweep of the same run, but across runs the same
-  command has ranged 186-291 ms, and the rare-literal row moved from 203.6 to
-  217.9 ms between two runs with no relevant code change. Treat differences
-  under ~20% as ties and read the `min_ms`/`max_ms` columns before trusting a
-  small gap. Every comparison that mattered here was run as an alternating
-  sequence for exactly this reason.
-- **The trees are conventional, not adversarial.** `/usr` is a normal package
-  mix; `/usr/local/go` is text-only and unusually friendly to a content
-  scanner — no `.gitignore` files, 12 hidden entries, no `node_modules` or
-  `target`. A repository checkout full of ignore rules, or a tree with huge
-  single files, exercises different paths.
-- **Small trees are dominated by process startup.** `/usr/include` (37 MB,
-  3,363 files) is a 10-30 ms job for every tool here, and the differences at
-  that size are noise. Only the two trees above are big enough to measure.
-- **`grep` ran with `-I`, `ripgrep` with its defaults.** `grep -rI` skips
-  binaries but still walks hidden directories; `ripgrep` skips hidden entries
-  and `.gitignore`d paths, as dusage does. On these trees the difference is 12
-  hidden entries in `/usr/local/go` and nothing measurable in `/usr`. On a
-  checkout with a large `.git` it would not be negligible for `grep`.
-- **No I/O tuning anywhere.** No `io_uring`, no `O_DIRECT`, no
-  `posix_fadvise`, no explicit readahead. dusage and the references all use
-  plain buffered reads behind the same page cache, so a kernel-side I/O path
-  would not show up in this table at all.
-- **`ripgrep` is a mature, heavily tuned tool** using SIMD-assisted `memchr` and
-  a hybrid automaton. dusage is a zero-dependency implementation with a SWAR
-  memmem and a lazily built DFA. A 2-4x remaining gap on regex workloads is the
-  expected outcome of that difference in engineering effort; the 6x gap this
-  section used to report closed when the DFA replaced the per-line Pike VM.
-- **One machine, one kernel.** Five rounds per command with medians reported,
-  over a single 4-vCPU VM.

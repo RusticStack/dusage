@@ -314,38 +314,44 @@ ones in `docs/BENCHMARKS.md`.
   (`scripts/perf-guard.sh`) with a machine-specific baseline. The numbers and
   the caveats live in `docs/BENCHMARKS.md`.
 
-**Measured.**
-
-| Workload | dusage | reference | Source |
-|---|---|---|---|
-| search, frequent literal (print) | 139 ms | `rg` 153, `grep -rI` 134 | `docs/BENCHMARKS.md`, Summary |
-| search, rare literal | 95 ms | `rg` 88 | same |
-| search, case-insensitive | 108 ms | `rg -i` 104 | same |
-| search, general regex | 241 ms | `rg` 89, `grep -rIE` 224 | same |
-| search `-l` | 109 ms | `rg -l` 149 | same |
-| find `*.go` over `/usr` (glob form) | 351 ms, 69 MB | `find -name` 323 | same |
-| `find /usr -name '*.go'` (expression form) | 0.81–0.83 s, 5.7 MB | findutils 0.21–0.31 s, 4.8 MB | measured for this rewrite |
-| search `-o -F 'func '` over `/usr/local/go` | 0.17–0.18 s, 29 MB | `rg -o` 0.06–0.07 s, 9 MB | measured for this rewrite, alternating runs, warm cache |
-| `du -s /usr` | 0.19–0.22 s, 8,172,786 KiB | GNU du 0.32–0.33 s, same bytes | measured for this rewrite, warm cache |
+**Measured.** `docs/BENCHMARKS.md` is the document of record and prints only
+generated tables: `bench/summary.sh` over `bench/results.json`, plus the guard
+output. Read the case ids there — `search-rare`, `search-common`, `search-ci`,
+`search-regex`, `search-regex-nomatch`, `search-count`, `search-only-matching`,
+`search-multiline`, `search-gzip`, `search-files-with-matches`, `find-name`,
+`find-path`, `find-type`, `du-s`, `du`, `threads-scan-*`, `threads-search-*` —
+rather than a table copied here, because a copy goes stale at the next merge.
+At the commit the tables were last generated at (547f955, 2 vCPUs, warm cache):
+every literal search case is within a few percent of `rg` or ahead of it, `-l` is
+level, `search-regex` is 1.42x `rg`, `search-only-matching` is 2.36x its
+reference, `search-multiline` 1.45x, `search-gzip` 0.54x (ahead),
+`find-name` 1.62x `find -name`, and both `du` rows are ahead of GNU `du` with
+identical totals. `docs/SEARCH.md` §1.4 carries the one measurement the suite has
+no case for: the find expression walk, 0.37–0.40 s at 6.8 MB against find's
+0.21–0.25 s at the same commit.
 
 **Known limits, each an open item.**
 
-- **A general regex is still ~2.7x ripgrep's time** (241 ms against 89 ms on
-  `/usr/local/go`, `docs/BENCHMARKS.md`). The line-at-a-time path is not the
-  reason any more; what is left is entering the automaton once per line, and a
+- **A general regex is still behind ripgrep** — 1.42x its time in the warm
+  `search-regex` row at commit 547f955, down from 3x two commits earlier, with
+  the exact figure living in `docs/BENCHMARKS.md` because it moves with each
+  prefilter change. The line-at-a-time path is not the reason any more; what is left is entering the automaton once per line, and a
   bounded reverse walk was measured three times and lost. The fix is a reverse
   automaton that answers "where does this match start" in one suffix pass over
   the block — a new machine, not a tweak.
-- **`-o` is still behind**: 2.8x ripgrep's wall clock and 3x its peak RSS on the
-  same query (measured above; `docs/BENCHMARKS.md` has no `-o` row of its own).
-  The two costs are the per-line match loop and the rule that every hit is kept
-  until the whole report is printed.
-- **The expression walk is sequential and 3.5x find's time.** `search::walk_expr`
-  cannot use the worker pool, because `-prune` and `-depth` decide the next step
-  from the entry just seen: 0.81–0.83 s for `find /usr -name '*.go'` against
-  0.21–0.31 s, at 5.7 MB resident against 4.8 MB. It buys bounded memory for
-  3.5x the clock; parallelising it needs a per-directory evaluator that can defer
-  `-prune` decisions, not a thread-pool change.
+- **`-o` is still behind**: the `search-only-matching` row measures it against
+  `grep -rIo` (and `rg -o` in the cold pass), and at commit 547f955 it was 2.36x
+  the reference's clock with the widest RSS gap in the search block. The two
+  costs are the per-line match loop and the rule that every hit is kept until the
+  whole report is printed.
+- **The expression walk is sequential and about 1.7x find's clock.**
+  `search::walk_expr` cannot use the worker pool, because `-prune` and `-depth`
+  decide the next step from the entry just seen: 0.37–0.40 s for
+  `find /usr -name '*.go'` against findutils' 0.21–0.25 s at commit 547f955, at
+  6.8 MB resident against 4.8 MB. It buys bounded memory for the clock;
+  parallelising it needs a per-directory evaluator that can defer `-prune`
+  decisions, not a thread-pool change. There is no case for it in
+  `bench/cases.sh` yet, so that figure is a one-off measurement.
 - **Three deviations from find's output survive** and are documented in
   `docs/SEARCH.md` §1.4: per-directory sorted order instead of readdir order,
   `-ls`'s date column, and an expression holding both `-exec` and `-execdir`

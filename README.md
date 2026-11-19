@@ -360,37 +360,19 @@ table (about 2 GB/s here); parsing runs on up to 16 threads alongside the reads.
 Version 0.1 deleted each top-level candidate on a single thread. Version 0.2 spreads
 one big subtree, or one huge flat folder, across every worker.
 
-**Linux** (Ubuntu 24.04 container, Linux 6.1, 2 vCPU, overlayfs, release build, warm cache,
-`/usr` = 180,497 files / 7.99 GB, median of three runs):
+**Linux and the search suite** are benchmarked by the repository itself:
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) holds the generated tables from `bash bench/run.sh`
+plus `bash bench/summary.sh` — warm and cold passes, peak RSS per row, `scan` against `du` and
+`find`, `search` against `rg` and `grep` across literal, regex, `-c`, `-o`, `-U`, `-l` and
+`-z` cases, `find` against `find -name`, `du` against GNU `du`, and the thread sweep that
+justifies the 4..16 default. `bash scripts/perf-guard.sh` is the 25% regression check.
 
-| Workload | dusage | `du -sb` | `find -printf` + awk |
-|---|---|---|---|
-| Scan `/usr` | **0.31 s** | 0.62 s | 0.68 s |
-| Totals | 7,994,136,968 B, 180,497 files | 7,991,131,817 B (dedups hardlinks, counts directories) | 7,994,136,968 B |
-
-The three agree on the file count and on bytes once you account for `du` counting each inode
-once and adding directory sizes; `dusage --dedup-hardlinks` lands within directory-entry
-noise of `du`. Deleting 50,301 entries (300 folders × 100 files): **0.36 s** against 0.60 s for
-`rm -rf` on the same tree. A scan of `/` with `-x` covers this container's 251,816 files in
-about 1 s while skipping the 7 pseudo and nested mounts (`/proc`, `/sys`, `/dev`, `/run`, ...).
-
-**Search and `du`** (from [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), same box, medians, warm
-cache):
-
-| Workload | dusage | reference |
-|---|---|---|
-| search, frequent literal (`-F 'func '`, print) | **139 ms** | `rg` 153, `grep -rI` 134 |
-| search, rare literal | **95 ms** | `rg` 88 |
-| search, case-insensitive | **108 ms** | `rg -i` 104 |
-| search, general regex | 241 ms | `rg` 89, `grep -rIE` 224 |
-| search `-l` | **109 ms** | `rg -l` 149 |
-| find `*.go` over `/usr` | 351 ms | `find -name` 323 |
-| `dusage du -s /usr` | **0.19-0.22 s** | GNU `du` 0.32-0.33 s, same 8,172,786 KiB |
-
-Literals are at parity or ahead, a general regex is still about 2.7× ripgrep, and `-o` is
-about 2.8× ripgrep's clock on the same tree. Peak memory: 15 MB for `search -l` over `/usr`
-against `rg`'s 13 MB, 68 MB for `find '*'` against `find(1)`'s 4.8 MB. Every number, the
-cold-cache pass and the reproducer are in that document.
+As of the commit those tables were last generated at (`main`@`547f955`, 2 vCPUs, warm cache):
+every literal search case is within a few percent of ripgrep or ahead of it, a general regex
+is about 1.4× ripgrep, `-o` about 2.4× its reference, `-z` ahead, `find`'s glob form about
+1.6× `find -name`, and both `du` rows ahead of GNU `du` with byte-identical totals. Delete
+timings are not in that suite: the only recorded figure is the 0.4.0 container measurement,
+50,301 entries in **0.36 s** against 0.60 s for `rm -rf` on the same tree.
 
 ## Use it from an AI agent
 
