@@ -1,28 +1,59 @@
 //! Directory enumeration for Linux, in two layers.
 //!
-//! [`list`] is the primitive: one `getdents64` batch sequence through `std::fs::read_dir`,
-//! a name copy per entry, and a `dirent` type that costs nothing when the filesystem fills
-//! `d_type` (std falls back to one `lstat` only on filesystems that leave it `DT_UNKNOWN`).
-//! Anything that needs the inode — size, allocation, mtime, device, file id — is
-//! [`Lite::stat`], one `lstat` on demand, cached in the entry. A walk that only reads names
-//! and types therefore never stats.
+//! [`Batch`] is the primitive: one `openat` per directory, then `getdents64` into a reused
+//! 64 KiB buffer, with every `linux_dirent64` record parsed in place and its name borrowed
+//! straight out of that buffer. The entry type comes with the record (`d_type`), so a walk
+//! that only needs names and types never stats. Anything that needs the inode — size,
+//! allocation, mtime, device, file id — is one `statx` on the open directory descriptor,
+//! which is `lstat` without a path to resolve.
 //!
-//! [`DirReader::read`] keeps the eager contract its other callers rely on (every entry
-//! carries its `lstat` data, exactly as before) and is built on a single `readdir` loop.
+//! [`list`] is the names-and-types layer. [`DirReader::read`] and [`read_plain`] add the
+//! `statx`; [`Lite::stat`] defers it until asked. A directory that changes while it is
+//! being read is read again, and a name it repeats is reported once.
 //!
 //! Symlinks take the place of Windows reparse points: they are reported and never
 //! followed. Per-entry failures are recorded in the caller's `ErrorCounts` and the walk
 //! continues; only an unreadable directory is returned as `Err`.
 
+use super::sys;
 use crate::model::ErrorCounts;
-use std::cell::Cell;
-use std::ffi::{OsStr, OsString};
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Bytes per `getdents64` call. One 64 KiB batch covers a thousand dense records, and the
+/// buffer is reused by every directory the thread reads.
+const DIR_BUF: usize = 64 * 1024;
+
+/// `linux_dirent64` (dirent.h). Declared for its layout, which the parser indexes: a record
+/// is `d_reclen` bytes long and `d_name` is a NUL-terminated name that runs to the end.
+#[repr(C)]
+#[allow(dead_code)]
+struct LinuxDirent64 {
+    d_ino: u64,
+    d_off: i64,
+    d_reclen: u16,
+    d_type: u8,
+    d_name: [u8; 0],
+}
+
+const DIRENT_OFF: usize = std::mem::offset_of!(LinuxDirent64, d_off);
+const DIRENT_RECLEN: usize = std::mem::offset_of!(LinuxDirent64, d_reclen);
+const DIRENT_TYPE: usize = std::mem::offset_of!(LinuxDirent64, d_type);
+const DIRENT_NAME: usize = std::mem::offset_of!(LinuxDirent64, d_name);
+
+// `d_type` (dirent.h). Anything unlisted is a socket, fifo, device or whiteout.
+const DT_UNKNOWN: u8 = 0;
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
+const DT_LNK: u8 = 10;
 
 /// One directory entry: the Unix shape of `win::enumerate::Entry`.
 pub struct Entry {
@@ -61,10 +92,31 @@ enum Kind {
     File,
     Link,
     Other,
+    /// The filesystem did not say: one `statx` answers it, as `read_dir` does on `DT_UNKNOWN`.
+    Unknown,
 }
 
 impl Kind {
-    fn of(t: fs::FileType) -> Kind {
+    fn of_dtype(t: u8) -> Kind {
+        match t {
+            DT_DIR => Kind::Dir,
+            DT_REG => Kind::File,
+            DT_LNK => Kind::Link,
+            DT_UNKNOWN => Kind::Unknown,
+            _ => Kind::Other,
+        }
+    }
+
+    fn of_mode(mode: u16) -> Kind {
+        match mode & sys::S_IFMT {
+            sys::S_IFDIR => Kind::Dir,
+            sys::S_IFLNK => Kind::Link,
+            sys::S_IFREG => Kind::File,
+            _ => Kind::Other,
+        }
+    }
+
+    fn of_type(t: fs::FileType) -> Kind {
         if t.is_dir() {
             Kind::Dir
         } else if t.is_symlink() {
@@ -84,6 +136,7 @@ pub struct Stat {
     pub alloc: u64,
     pub file_id: u128,
     pub dev: u64,
+    kind: Kind,
     modified: SystemTime,
 }
 
@@ -91,16 +144,282 @@ impl Stat {
     pub fn modified(&self) -> SystemTime {
         self.modified
     }
+
+    fn of_statx(s: &sys::Statx) -> Stat {
+        let kind = Kind::of_mode(s.mode);
+        let dev = sys::make_dev(s.dev_major, s.dev_minor);
+        Stat {
+            size: if kind == Kind::Dir { 0 } else { s.size },
+            alloc: s.blocks * 512,
+            file_id: (dev as u128) << 64 | s.ino as u128,
+            dev,
+            kind,
+            modified: time_of(s.mtime),
+        }
+    }
+
+    fn of_metadata(md: &fs::Metadata) -> Stat {
+        let dev = md.dev();
+        Stat {
+            size: if md.is_dir() { 0 } else { md.len() },
+            alloc: md.blocks() * 512,
+            file_id: (dev as u128) << 64 | md.ino() as u128,
+            dev,
+            kind: Kind::of_type(md.file_type()),
+            modified: md.modified().unwrap_or(UNIX_EPOCH),
+        }
+    }
+}
+
+fn time_of(t: sys::StatxTimestamp) -> SystemTime {
+    let span = Duration::new(t.tv_sec.unsigned_abs(), t.tv_nsec);
+    if t.tv_sec < 0 {
+        UNIX_EPOCH - span
+    } else {
+        UNIX_EPOCH + span
+    }
 }
 
 fn stat_of(p: &Path) -> io::Result<Stat> {
-    let md = fs::symlink_metadata(p)?;
-    Ok(Stat {
-        size: if md.is_dir() { 0 } else { md.len() },
-        alloc: md.blocks() * 512,
-        file_id: (md.dev() as u128) << 64 | md.ino() as u128,
-        dev: md.dev(),
-        modified: md.modified().unwrap_or(UNIX_EPOCH),
+    Ok(Stat::of_metadata(&fs::symlink_metadata(p)?))
+}
+
+fn malformed() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "malformed dirent record")
+}
+
+fn c_path(p: &OsStr) -> io::Result<CString> {
+    CString::new(p.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))
+}
+
+/// `lstat` one name of an open directory, without resolving a path.
+fn stat_at(fd: RawFd, name: &CStr) -> io::Result<Stat> {
+    let mut stx = sys::Statx::default();
+    // SAFETY: `name` is NUL-terminated and lives in the directory's buffer, `fd` is open on
+    // that directory, and `stx` is a live `struct statx` of exactly the size declared.
+    let rc = unsafe {
+        sys::statx(
+            fd,
+            name.as_ptr(),
+            sys::AT_SYMLINK_NOFOLLOW,
+            sys::STATX_BASIC_STATS,
+            &mut stx,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Stat::of_statx(&stx))
+}
+
+/// `n` bytes at `off`: the callers have already checked the record is that long.
+fn bytes<const N: usize>(raw: &[u8], off: usize) -> [u8; N] {
+    let mut out = [0; N];
+    out.copy_from_slice(&raw[off..off + N]);
+    out
+}
+
+/// One record out of the batch buffer, borrowed from it in place.
+struct Rec<'a> {
+    name: &'a [u8],
+    /// The same name NUL-terminated, which `statx` takes and `OsStr` does not.
+    cname: &'a CStr,
+    kind: Kind,
+}
+
+/// Where a pass over one directory stopped.
+enum Pass {
+    /// The directory was read to the end.
+    End,
+    /// The directory changed while it was read, so it has to be read again.
+    Restart,
+}
+
+/// An open directory, read in `getdents64` batches.
+struct Batch<'a> {
+    fd: OwnedFd,
+    buf: &'a mut [u8],
+    /// Bytes of the current batch in `buf`, and how far the parse has got.
+    len: usize,
+    pos: usize,
+    /// The kernel has handed back the last batch.
+    done: bool,
+}
+
+impl<'a> Batch<'a> {
+    fn open(dir: &Path, buf: &'a mut [u8]) -> io::Result<Batch<'a>> {
+        let path = c_path(dir.as_os_str())?;
+        // SAFETY: `path` is NUL-terminated and outlives the call, the flags are the ones
+        // `read_dir` opens a directory with, and a failure is reported as -1 with `errno`.
+        let raw = unsafe {
+            sys::openat(
+                sys::AT_FDCWD,
+                path.as_ptr(),
+                sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC | sys::O_NONBLOCK,
+                0,
+            )
+        };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `raw` is a descriptor this call just opened and nothing else will close.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        Ok(Batch {
+            fd,
+            buf,
+            len: 0,
+            pos: 0,
+            done: false,
+        })
+    }
+
+    /// Feed every record of this directory to `sink`, until the directory ends or moves
+    /// out from under the read. `.` and `..` never come out of here.
+    fn drain<S: Sink + ?Sized>(
+        &mut self,
+        sink: &mut S,
+        fuse: &mut Option<HashSet<Vec<u8>>>,
+        last_off: &mut i64,
+        restart: bool,
+    ) -> io::Result<Pass> {
+        let fd = self.fd.as_raw_fd();
+        loop {
+            if self.pos == self.len {
+                if self.done {
+                    return Ok(Pass::End);
+                }
+                // The buffer leaves `self` for the call and comes straight back, so the
+                // borrow the fill takes never overlaps the borrow the parse takes.
+                let buf = std::mem::take(&mut self.buf);
+                let filled = fill(fd, buf);
+                self.buf = buf;
+                let n = filled?;
+                // A short batch is not the end: the kernel stops where its own buffer
+                // ends, so only an empty batch ends the directory.
+                self.len = n;
+                self.pos = 0;
+                if n == 0 {
+                    self.done = true;
+                    return Ok(Pass::End);
+                }
+            }
+            let raw = &self.buf[self.pos..self.len];
+            if raw.len() < DIRENT_NAME {
+                return Err(malformed());
+            }
+            let reclen = u16::from_ne_bytes(bytes::<2>(raw, DIRENT_RECLEN)) as usize;
+            if reclen < DIRENT_NAME || reclen > raw.len() {
+                return Err(malformed());
+            }
+            let off = i64::from_ne_bytes(bytes::<8>(raw, DIRENT_OFF));
+            let dtype = raw[DIRENT_TYPE];
+            let tail = &raw[DIRENT_NAME..reclen];
+            self.pos += reclen;
+            let Some(nul) = tail.iter().position(|&b| b == 0) else {
+                return Err(malformed());
+            };
+            let name = &tail[..nul];
+            if name == b"." || name == b".." {
+                continue;
+            }
+            match off {
+                // Some filesystems never fill `d_off`: positions are unusable, so a
+                // repeated name is dropped instead of noticed.
+                0 => {
+                    fuse.get_or_insert_with(HashSet::new);
+                }
+                // The offset went backwards, so the directory changed under the read:
+                // read it again, and report each name once.
+                off if off <= *last_off => {
+                    if restart {
+                        return Ok(Pass::Restart);
+                    }
+                    fuse.get_or_insert_with(HashSet::new);
+                }
+                off => *last_off = off,
+            }
+            if let Some(seen) = fuse {
+                if !seen.insert(name.to_vec()) {
+                    continue;
+                }
+            }
+            let cname = CStr::from_bytes_with_nul(&tail[..=nul]).map_err(|_| malformed())?;
+            sink.push(
+                fd,
+                &Rec {
+                    name,
+                    cname,
+                    kind: Kind::of_dtype(dtype),
+                },
+            );
+        }
+    }
+
+    /// Back to the first record, for a directory that changed while it was read.
+    fn rewind(&mut self) -> io::Result<()> {
+        // SAFETY: the descriptor is open on this directory and the result is checked.
+        let off = unsafe { sys::lseek(self.fd.as_raw_fd(), 0, sys::SEEK_SET) };
+        if off < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.len = 0;
+        self.pos = 0;
+        self.done = false;
+        Ok(())
+    }
+}
+
+/// One `getdents64` batch into `buf`: the bytes written, 0 at the end of the directory.
+fn fill(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: `fd` is open on a directory and `buf` is a live slice of `buf.len()` bytes
+    // for the kernel to fill with records.
+    let n = unsafe { sys::getdents64(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
+    }
+}
+
+/// Where one directory's records go.
+trait Sink {
+    /// Take one record from the directory open as `fd`, which `stat_at` resolves names in.
+    fn push(&mut self, fd: RawFd, rec: &Rec<'_>);
+    /// Drop everything pushed so far, for the second read of a directory that changed.
+    fn clear(&mut self);
+}
+
+// One reused `getdents64` buffer per thread: a walk keeps one buffer rather than
+// allocating 64 KiB per directory.
+thread_local! {
+    static DIR_BUF_CELL: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Read one directory into `sink`, reusing this thread's batch buffer.
+fn read_dir_raw<S: Sink + ?Sized>(dir: &Path, sink: &mut S) -> io::Result<()> {
+    DIR_BUF_CELL.with(|cell| {
+        let mut reused = cell.borrow_mut();
+        if reused.len() < DIR_BUF {
+            reused.resize(DIR_BUF, 0);
+        }
+        let mut batch = Batch::open(dir, reused.as_mut_slice())?;
+        let mut last_off = 0i64;
+        let mut fuse: Option<HashSet<Vec<u8>>> = None;
+        let mut rewound = false;
+        loop {
+            match batch.drain(sink, &mut fuse, &mut last_off, !rewound)? {
+                Pass::End => return Ok(()),
+                Pass::Restart => {
+                    rewound = true;
+                    batch.rewind()?;
+                    sink.clear();
+                    // From here on, a name read twice is reported once.
+                    fuse = Some(HashSet::new());
+                    last_off = 0;
+                }
+            }
+        }
     })
 }
 
@@ -139,6 +458,37 @@ impl Lite {
     }
 }
 
+struct LiteSink<'a> {
+    out: &'a mut Vec<Lite>,
+    errs: &'a mut ErrorCounts,
+}
+
+impl Sink for LiteSink<'_> {
+    fn push(&mut self, fd: RawFd, rec: &Rec<'_>) {
+        let kind = match rec.kind {
+            // One `statx` answers a type the filesystem left out, exactly as `read_dir`
+            // does; an entry that vanished meanwhile is counted and dropped.
+            Kind::Unknown => match stat_at(fd, rec.cname) {
+                Ok(s) => s.kind,
+                Err(err) => {
+                    self.errs.record(&err);
+                    return;
+                }
+            },
+            kind => kind,
+        };
+        self.out.push(Lite {
+            name: OsString::from_vec(rec.name.to_vec()),
+            kind,
+            stat: Cell::new(None),
+        });
+    }
+
+    fn clear(&mut self) {
+        self.out.clear();
+    }
+}
+
 /// List one directory into `out`: names and types only, no `stat`.
 ///
 /// `out` is cleared and its allocation reused, so a walk keeps one entry vector instead of
@@ -146,28 +496,7 @@ impl Lite {
 /// dropped, like an entry that vanishes between `getdents` and `lstat` always was.
 pub fn list(dir: &Path, out: &mut Vec<Lite>, errs: &mut ErrorCounts) -> io::Result<()> {
     out.clear();
-    for e in fs::read_dir(dir)? {
-        let e = match e {
-            Ok(e) => e,
-            Err(err) => {
-                errs.record(&err);
-                continue;
-            }
-        };
-        // `file_type` is the `dirent`'s own `d_type`; std stats only when the filesystem
-        // reports `DT_UNKNOWN`.
-        match e.file_type() {
-            Ok(t) => out.push(Lite {
-                name: e.file_name(),
-                kind: Kind::of(t),
-                stat: Cell::new(None),
-            }),
-            Err(err) => {
-                errs.record(&err);
-            }
-        }
-    }
-    Ok(())
+    read_dir_raw(dir, &mut LiteSink { out, errs })
 }
 
 /// True for entries that are counted as links and never descended into.
@@ -175,54 +504,47 @@ pub fn is_skipped(e: &Entry) -> bool {
     e.is_link
 }
 
-fn entry(name: OsString, md: &fs::Metadata, detail: bool) -> Entry {
-    let id = if detail {
-        (md.dev() as u128) << 64 | md.ino() as u128
-    } else {
-        0
-    };
-    Entry {
-        name,
-        is_dir: md.is_dir(),
-        is_link: md.file_type().is_symlink(),
-        size: if md.is_dir() { 0 } else { md.len() },
-        alloc: if detail { md.blocks() * 512 } else { 0 },
-        file_id: id,
-        dev: if detail { md.dev() } else { 0 },
-        modified: md.modified().unwrap_or(UNIX_EPOCH),
+struct EntrySink<'a> {
+    out: &'a mut Vec<Entry>,
+    errs: &'a mut ErrorCounts,
+    detail: bool,
+}
+
+impl Sink for EntrySink<'_> {
+    fn push(&mut self, fd: RawFd, rec: &Rec<'_>) {
+        // `statx` is `lstat`: a symlink is described, not followed.
+        match stat_at(fd, rec.cname) {
+            Ok(s) => self.out.push(Entry {
+                name: OsString::from_vec(rec.name.to_vec()),
+                is_dir: s.kind == Kind::Dir,
+                is_link: s.kind == Kind::Link,
+                size: s.size,
+                alloc: if self.detail { s.alloc } else { 0 },
+                file_id: if self.detail { s.file_id } else { 0 },
+                dev: if self.detail { s.dev } else { 0 },
+                modified: s.modified,
+            }),
+            Err(err) => {
+                self.errs.record(&err);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.out.clear();
     }
 }
 
 /// List one directory with an `lstat` per entry. `detail` fills allocation size, device and
 /// file id, which costs nothing extra here (one `lstat` per entry either way) but keeps the
 /// `readdir` backend's documented "on-disk unknown, no file ids" behaviour.
-///
-/// This keeps the `DirEntry::metadata` call rather than rebuilding a path and statting it:
-/// it is `fstatat(dirfd, name)`, one syscall with no path to resolve, which is what the
-/// eager callers (scan, prune, delete, watch) want for every single entry.
 fn read_with(
     dir: &Path,
     out: &mut Vec<Entry>,
     errs: &mut ErrorCounts,
     detail: bool,
 ) -> io::Result<()> {
-    for e in fs::read_dir(dir)? {
-        let e = match e {
-            Ok(e) => e,
-            Err(err) => {
-                errs.record(&err);
-                continue;
-            }
-        };
-        // `DirEntry::metadata` is `lstat` on Linux: a symlink is described, not followed.
-        match e.metadata() {
-            Ok(md) => out.push(entry(e.file_name(), &md, detail)),
-            Err(err) => {
-                errs.record(&err);
-            }
-        }
-    }
-    Ok(())
+    read_dir_raw(dir, &mut EntrySink { out, errs, detail })
 }
 
 /// Enumerator with the batched backend's contract: every entry carries its
@@ -587,6 +909,161 @@ mod tests {
             "  list + stat every entry           {:>8.1} ms  {k} entries",
             ms(lazy)
         );
+    }
+
+    #[test]
+    fn dirent_layout_matches_linux_dirent64() {
+        assert_eq!(DIRENT_OFF, 8);
+        assert_eq!(DIRENT_RECLEN, 16);
+        assert_eq!(DIRENT_TYPE, 18);
+        assert_eq!(DIRENT_NAME, 19);
+        assert_eq!(std::mem::size_of::<LinuxDirent64>(), 24);
+    }
+
+    #[test]
+    fn statx_fields_match_std_metadata() {
+        let f = Fixture::new("statx");
+        fs::create_dir(f.0.join("sub")).unwrap();
+        fs::write(f.0.join("a.bin"), vec![0u8; 9000]).unwrap();
+        std::os::unix::fs::symlink(f.0.join("a.bin"), f.0.join("lnk")).unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        DirReader::new().read(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(errs.total(), 0);
+        assert_eq!(v.len(), 3);
+        for e in &v {
+            let md = fs::symlink_metadata(f.0.join(&e.name)).unwrap();
+            let name = &e.name;
+            assert_eq!(e.size, if md.is_dir() { 0 } else { md.len() }, "{name:?}");
+            assert_eq!(e.alloc, md.blocks() * 512, "{name:?}");
+            assert_eq!(e.dev, md.dev(), "{name:?}");
+            assert_eq!(
+                e.file_id,
+                (md.dev() as u128) << 64 | md.ino() as u128,
+                "{name:?}"
+            );
+            assert_eq!(e.is_dir, md.is_dir(), "{name:?}");
+            assert_eq!(e.is_link, md.file_type().is_symlink(), "{name:?}");
+            assert_eq!(e.modified(), md.modified().unwrap(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_directory_lists_nothing() {
+        let f = Fixture::new("empty");
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        DirReader::new().read(&f.0, &mut v, &mut errs).unwrap();
+        assert!(v.is_empty() && errs.total() == 0);
+        let mut lite = Vec::new();
+        list(&f.0, &mut lite, &mut errs).unwrap();
+        assert!(lite.is_empty() && errs.total() == 0);
+    }
+
+    #[test]
+    fn names_survive_multiple_batches() {
+        let f = Fixture::new("many");
+        let want: Vec<String> = (0..5000).map(|i| format!("f{i:05}")).collect();
+        for n in &want {
+            fs::write(f.0.join(n), b"x").unwrap();
+        }
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(errs.total(), 0);
+        let mut got = names_of(&v);
+        got.sort();
+        assert_eq!(got, want);
+        let mut v: Vec<Entry> = Vec::new();
+        DirReader::new().read(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(v.len(), want.len());
+        assert!(v.iter().all(|e| !e.is_dir && e.size == 1 && e.file_id != 0));
+    }
+
+    /// Hand-built `linux_dirent64` records, as one batch the kernel could have returned.
+    fn stage(batch: &mut Batch<'_>, records: &[(u8, i64, &str)]) {
+        batch.len = 0;
+        batch.pos = 0;
+        batch.done = true;
+        for &(dtype, off, name) in records {
+            let start = batch.len;
+            let reclen = (DIRENT_NAME + name.len() + 1 + 7) & !7;
+            let rec = &mut batch.buf[start..start + reclen];
+            rec.fill(0);
+            rec[DIRENT_OFF..DIRENT_OFF + 8].copy_from_slice(&off.to_ne_bytes());
+            rec[DIRENT_RECLEN..DIRENT_RECLEN + 2].copy_from_slice(&(reclen as u16).to_ne_bytes());
+            rec[DIRENT_TYPE] = dtype;
+            rec[DIRENT_NAME..DIRENT_NAME + name.len()].copy_from_slice(name.as_bytes());
+            batch.len += reclen;
+        }
+    }
+
+    fn names_of(v: &[Lite]) -> Vec<String> {
+        v.iter()
+            .map(|e| e.name.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The sink the two synthetic tests read through: names only, no `statx`.
+    struct Collected(Vec<String>);
+
+    impl Sink for Collected {
+        fn push(&mut self, _fd: RawFd, rec: &Rec<'_>) {
+            self.0.push(String::from_utf8(rec.name.to_vec()).unwrap());
+        }
+
+        fn clear(&mut self) {
+            self.0.clear();
+        }
+    }
+
+    #[test]
+    fn a_rewound_directory_is_read_again() {
+        let f = Fixture::new("rewind");
+        let mut buf = [0u8; 512];
+        let mut batch = Batch::open(&f.0, &mut buf).unwrap();
+        // Two records, then the offset the reader has already passed: the directory
+        // gained or lost an entry between two batches.
+        stage(
+            &mut batch,
+            &[(DT_REG, 10, "a"), (DT_REG, 20, "b"), (DT_REG, 20, "c")],
+        );
+        let mut got = Collected(Vec::new());
+        let (mut fuse, mut last_off) = (None, 0);
+        let pass = batch
+            .drain(&mut got, &mut fuse, &mut last_off, true)
+            .unwrap();
+        assert!(matches!(pass, Pass::Restart));
+        batch.rewind().unwrap();
+        got.clear();
+        let mut fuse = Some(HashSet::new());
+        let mut last_off = 0;
+        let pass = batch
+            .drain(&mut got, &mut fuse, &mut last_off, false)
+            .unwrap();
+        assert!(matches!(pass, Pass::End));
+        // The fixture itself is empty, so the second pass reads nothing new.
+        assert!(got.0.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_name_is_reported_once() {
+        let f = Fixture::new("fuse");
+        let mut buf = [0u8; 512];
+        let mut batch = Batch::open(&f.0, &mut buf).unwrap();
+        // A `d_off` of 0 means the filesystem cannot report positions, so a record that
+        // comes back is dropped instead of listed twice.
+        stage(
+            &mut batch,
+            &[(DT_REG, 0, "a"), (DT_REG, 0, "a"), (DT_REG, 0, "b")],
+        );
+        let mut got = Collected(Vec::new());
+        let (mut fuse, mut last_off) = (None, 0);
+        let pass = batch
+            .drain(&mut got, &mut fuse, &mut last_off, true)
+            .unwrap();
+        assert!(matches!(pass, Pass::End));
+        assert_eq!(got.0, ["a", "b"]);
     }
 
     fn ms(d: std::time::Duration) -> f64 {
