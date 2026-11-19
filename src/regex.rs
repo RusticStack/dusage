@@ -307,6 +307,9 @@ pub struct Regex {
     lit: Option<Vec<u8>>,
     /// A byte every match must contain, for prefiltering.
     required: Option<u8>,
+    /// A substring every match must contain, with its skip plan built once so the per-line
+    /// check costs a scan and nothing else.
+    run: Option<(Vec<u8>, crate::bytes::Finder)>,
     /// No `^`, `$`, `\b` or `\B` anywhere in the pattern.
     assertion_free: bool,
     /// The assertion context bits the byte program reads, which is what decides how many
@@ -353,6 +356,14 @@ impl Regex {
         let mut rprog = Vec::new();
         compile(&reverse_node(&node), &mut rprog, byte_symbols);
         rprog.push(Inst::Match);
+        // A folded pattern's bytes in the tree are pre-folded and no longer literal.
+        let run = match parsed.folded {
+            true => None,
+            false => required_run(&node).filter(|run| run.len() >= 2).map(|run| {
+                let finder = crate::bytes::Finder::new(&run, false);
+                (run, finder)
+            }),
+        };
         let ctx_mask = ctx_mask(&prog);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         Ok(Regex {
@@ -362,6 +373,7 @@ impl Regex {
             flags,
             lit,
             required,
+            run,
             ctx_mask,
             id,
             assertion_free: !has_assertion(&node),
@@ -382,6 +394,11 @@ impl Regex {
     /// haystacks that are not pure ASCII.
     pub fn is_unicode(&self) -> bool {
         self.cprog.is_some()
+    }
+
+    /// A substring every match must contain, or `None` when the pattern gives no hint.
+    pub fn required_literal(&self) -> Option<&[u8]> {
+        self.run.as_ref().map(|(bytes, _)| bytes.as_slice())
     }
 
     /// A byte every match must contain, or `None` when the pattern gives no hint.
@@ -411,6 +428,11 @@ impl Regex {
                 end: i + lit.len(),
             });
         }
+        // A haystack without a run of bytes the pattern cannot match without cannot match it
+        // at all, and proving that is a scan rather than an automaton walk.
+        if let Some((_, finder)) = &self.run {
+            finder.find_from(hay, start)?;
+        }
         // An ASCII line and a line that is not UTF-8 are both answered by the byte
         // program: the first is exact for it, and the second has no characters to
         // speak of, so it keeps the byte semantics it had before this engine learned
@@ -433,6 +455,11 @@ impl Regex {
     pub fn is_match(&self, hay: &[u8]) -> bool {
         if let Some(lit) = &self.lit {
             return crate::bytes::memmem(hay, lit).is_some();
+        }
+        if let Some((_, finder)) = &self.run {
+            if finder.find_from(hay, 0).is_none() {
+                return false;
+            }
         }
         if self.cprog.is_none() || hay.is_ascii() {
             if let Some(Some(found)) = with_dfa(self, |c| c.is_match(&self.prog, hay, 0)) {
@@ -861,6 +888,93 @@ fn required_byte(n: &Node) -> Option<u8> {
         Node::Repeat(inner, min, _, _) => (*min > 0).then(|| required_byte(inner)).flatten(),
         Node::Assert(_) | Node::Dot(_) | Node::Empty => None,
     }
+}
+
+/// The whole match of `n`, when it is a fixed string of bytes: `foo`, `\.go`, `a{3}`.
+fn pure_literal(n: &Node) -> Option<Vec<u8>> {
+    match n {
+        Node::Byte(b) => Some(vec![*b]),
+        // A class of one byte matches exactly that byte.
+        Node::Set(set) => set.sole().map(|b| vec![b]),
+        Node::Char(c) => {
+            let mut buf = [0u8; 4];
+            Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+        }
+        Node::Concat(parts) => {
+            let mut out = Vec::new();
+            for part in parts {
+                out.extend_from_slice(&pure_literal(part)?);
+            }
+            Some(out)
+        }
+        Node::Empty => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// The longest run of consecutive bytes every match of `n` must contain.
+fn required_run(n: &Node) -> Option<Vec<u8>> {
+    if let Some(lit) = pure_literal(n) {
+        return (!lit.is_empty()).then_some(lit);
+    }
+    match n {
+        // Literal neighbours join into one run; anything else contributes only a run of its
+        // own, since where inside its own match that run sits is not known here.
+        Node::Concat(parts) => {
+            let mut best: Vec<u8> = Vec::new();
+            let mut run: Vec<u8> = Vec::new();
+            for part in parts {
+                match pure_literal(part) {
+                    Some(bytes) => run.extend_from_slice(&bytes),
+                    None => {
+                        if run.len() > best.len() {
+                            best = std::mem::take(&mut run);
+                        } else {
+                            run.clear();
+                        }
+                        if let Some(bytes) = required_run(part) {
+                            if bytes.len() > best.len() {
+                                best = bytes;
+                            }
+                        }
+                    }
+                }
+            }
+            if run.len() > best.len() {
+                best = run;
+            }
+            (!best.is_empty()).then_some(best)
+        }
+        // Every branch must hold the run, so it has to survive in all of them.
+        Node::Alt(branches) => {
+            let runs: Vec<Vec<u8>> = branches.iter().map(required_run).collect::<Option<_>>()?;
+            let (first, rest) = runs.split_first()?;
+            Some(common_run(first, rest))
+        }
+        // The first `min` iterations of a repetition are mandatory and sit next to each
+        // other, so a literal inner turns them into one run.
+        Node::Repeat(inner, min, _, _) if *min > 0 => match pure_literal(inner) {
+            Some(lit) if *min <= 16 => Some(lit.repeat(*min as usize)),
+            _ => required_run(inner),
+        },
+        _ => None,
+    }
+}
+
+/// The longest substring of `first` that every haystack in `rest` also contains.
+fn common_run(first: &[u8], rest: &[Vec<u8>]) -> Vec<u8> {
+    for len in (1..=first.len()).rev() {
+        for at in 0..=first.len() - len {
+            let cand = &first[at..at + len];
+            if rest
+                .iter()
+                .all(|hay| crate::bytes::memmem(hay, cand).is_some())
+            {
+                return cand.to_vec();
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// The first byte of `c` in UTF-8: every haystack holding `c` holds this byte.
@@ -2434,6 +2548,78 @@ mod tests {
     }
 
     /// The prefilter must never reject a line the engine would match.
+    #[test]
+    fn required_literal_is_the_longest_mandatory_run() {
+        let run = |pat: &str| {
+            Regex::new(pat)
+                .unwrap()
+                .required_literal()
+                .map(<[u8]>::to_vec)
+        };
+        assert_eq!(run(r"[A-Z][a-zA-Z0-9_]*\.go").as_deref(), Some(&b".go"[..]));
+        assert_eq!(run("a[A-Z]qqqq[A-Z]").as_deref(), Some(&b"qqqq"[..]));
+        assert_eq!(run("foo(bar|baz)").as_deref(), Some(&b"foo"[..]));
+        // An alternation only keeps a run every branch holds.
+        assert_eq!(run("(foo|foobar)z").as_deref(), Some(&b"foo"[..]));
+        // One byte is the byte prefilter's job, not the run's.
+        assert_eq!(run("ab|ac"), None);
+        assert_eq!(run("a{3}b").as_deref(), Some(&b"aaa"[..]));
+        assert_eq!(run("(?:ab)?cd").as_deref(), Some(&b"cd"[..]));
+        assert_eq!(run(r"\d+"), None);
+        assert_eq!(run("x?"), None);
+        assert_eq!(run("[a-z][0-9]"), None);
+        // A folded pattern holds no literal bytes to look for.
+        assert_eq!(run("(?i)needle"), None);
+    }
+
+    #[test]
+    fn required_literal_is_never_a_false_negative() {
+        let pats = [
+            r"[A-Z][a-zA-Z0-9_]*\.go",
+            "a[A-Z]qqqq[A-Z]",
+            "foo(bar|baz)",
+            "(foo|foobar)z",
+            "a{3}b",
+            r"\bvar\b",
+            "a*b",
+            "(a|b)c?",
+            r"\d{2,4}",
+            "ab+",
+            "(?s)a.b",
+        ];
+        let hays = [
+            "Foo.go",
+            "aBqqqqC",
+            "foobar",
+            "foobaz",
+            "foobarz",
+            "aaab",
+            "var x",
+            "aaab",
+            "12",
+            "abbb",
+            "a\nb",
+            "\u{e9}\u{e9}\u{e9}",
+        ];
+        for pat in pats {
+            let re = Regex::new(pat).unwrap();
+            for hay in hays {
+                let found = re.is_match(hay.as_bytes());
+                assert_eq!(
+                    found,
+                    vm_find(&re, hay.as_bytes(), 0).is_some(),
+                    "{pat:?} on {hay:?}"
+                );
+                if let Some(run) = re.required_literal() {
+                    assert!(
+                        !found || crate::bytes::memmem(hay.as_bytes(), run).is_some(),
+                        "{pat:?} matched {hay:?} without its run {run:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn required_byte_is_never_a_false_negative() {
         let pats = [

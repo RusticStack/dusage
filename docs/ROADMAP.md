@@ -241,7 +241,10 @@ those docs were written.
 - A regex engine of our own (`regex.rs`): Thompson NFA, run by a lazily built DFA (one
   table lookup per byte) with the Pike VM underneath it, no backtracking, so a pathological
   pattern costs time, never exponential time. A plain-literal pattern skips it for a byte
-  scan, and a required literal byte prefilters lines for the rest.
+  scan, and the rest is prefiltred twice: by a single mandatory byte and by the longest run of
+  bytes every match must contain (`.go` for `[A-Z][a-zA-Z0-9_]*\.go`), with the run's skip plan
+  built once at compile time. Together they took regex counting from 348 ms to 220 ms on
+  `/usr/local/go`.
 - Ignore handling close enough to ripgrep to be unsurprising: the built-in cache list, then
   `.gitignore` and `.ignore` per directory with deeper files winning and `!` re-including,
   then `-g`; a positive `-g` switches the ignore layers off. `--no-ignore` switches them off
@@ -265,6 +268,11 @@ those docs were written.
   class of its case variants, which costs program size but no complexity.
 - No multi-line matching (`rg -U`). Matching is per line by construction; `(?s)` only widens
   `.`, it does not let a pattern cross a newline.
+- Regexes still cost about 2.4x ripgrep's time on a general pattern, because they keep the
+  line-at-a-time path: the DFA's leftmost-start recovery reads backwards from the end of the
+  buffer it is handed, which is sound on a line and quadratic on a block, so the block scanner
+  cannot be used for them yet. Bounding that walk by the line an accept lands on needs the
+  reverse automaton to be run in suffix mode; that is the next engine change worth measuring.
 - No `--follow`. The walker never follows a symlink, by the same invariant the scanner and
   the pruner keep, and a followed tree needs cycle detection before it can be offered.
 - No mmap. Files are read in 64 KiB blocks; whether mmap wins on warm-cache large files is a
