@@ -237,6 +237,11 @@ fn find_candidate<C: Case>(hay: &[u8], byte: u8, from: usize, last: usize) -> Op
     if from > last || last >= hay.len() {
         return None;
     }
+    // The folded scan is one vector compare on the lowered bytes, the same equivalence the SWAR
+    // loop below implements a word at a time.
+    if !C::SENSITIVE && hay.len() - from >= VECTOR_MIN {
+        return crate::simd::memchr_ci(hay, byte, from).filter(|&p| p <= last);
+    }
     let target = C::target(byte);
     let end = last + 1;
     let mut i = from;

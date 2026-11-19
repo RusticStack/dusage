@@ -62,6 +62,30 @@ pub fn memchr(hay: &[u8], needle: u8, from: usize) -> Option<usize> {
     portable(hay, needle, from)
 }
 
+/// The first byte equal to `needle` under ASCII case folding, at or after `from`.
+///
+/// Both sides are folded the same way, so the result is exactly the set of bytes the fold
+/// treats as the same letter: the low five bits of `@[\\]^_` move with the low five bits of
+/// `` `{|}~ `` exactly as `a` moves with `A`, which is the equivalence the SWAR path already
+/// uses and the one `C::eq` answers.
+#[inline]
+pub fn memchr_ci(hay: &[u8], needle: u8, from: usize) -> Option<usize> {
+    if from >= hay.len() {
+        return None;
+    }
+    #[cfg(target_arch = "x86_64")]
+    match level() {
+        // SAFETY: as in `memchr`; every load is checked against the length.
+        Level::Avx2 => return unsafe { memchr_ci_avx2(hay, needle, from) },
+        Level::Sse2 => return unsafe { memchr_ci_sse2(hay, needle, from) },
+        Level::Portable => {}
+    }
+    hay.get(from..)?
+        .iter()
+        .position(|&b| b | 0x20 == needle | 0x20)
+        .map(|i| from + i)
+}
+
 /// The first of two `needles` at or after `from`, with the byte found.
 #[inline]
 pub fn memchr2(hay: &[u8], a: u8, b: u8, from: usize) -> Option<(usize, u8)> {
@@ -123,6 +147,56 @@ unsafe fn memchr_avx2(hay: &[u8], needle: u8, from: usize) -> Option<usize> {
         i += 32;
     }
     portable(hay, needle, i)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn memchr_ci_avx2(hay: &[u8], needle: u8, from: usize) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let len = hay.len();
+    let ptr = hay.as_ptr();
+    let want = _mm256_set1_epi8((needle | 0x20) as i8);
+    let lower = _mm256_set1_epi8(0x20);
+    let mut i = from;
+    // SAFETY: `i + 32 <= len`, so the 32-byte load stays inside the slice.
+    while i + 32 <= len {
+        let block = unsafe { _mm256_loadu_si256(ptr.add(i) as *const __m256i) };
+        let folded = _mm256_or_si256(block, lower);
+        let hits = _mm256_movemask_epi8(_mm256_cmpeq_epi8(folded, want)) as u32;
+        if hits != 0 {
+            return Some(i + hits.trailing_zeros() as usize);
+        }
+        i += 32;
+    }
+    hay[i..]
+        .iter()
+        .position(|&b| b | 0x20 == needle | 0x20)
+        .map(|k| i + k)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn memchr_ci_sse2(hay: &[u8], needle: u8, from: usize) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let len = hay.len();
+    let ptr = hay.as_ptr();
+    let want = _mm_set1_epi8((needle | 0x20) as i8);
+    let lower = _mm_set1_epi8(0x20);
+    let mut i = from;
+    // SAFETY: `i + 16 <= len`, so the 16-byte load stays inside the slice.
+    while i + 16 <= len {
+        let block = unsafe { _mm_loadu_si128(ptr.add(i) as *const __m128i) };
+        let folded = _mm_or_si128(block, lower);
+        let hits = _mm_movemask_epi8(_mm_cmpeq_epi8(folded, want)) as u32;
+        if hits != 0 {
+            return Some(i + hits.trailing_zeros() as usize);
+        }
+        i += 16;
+    }
+    hay[i..]
+        .iter()
+        .position(|&b| b | 0x20 == needle | 0x20)
+        .map(|k| i + k)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -250,6 +324,21 @@ mod tests {
                 }
                 hay[at] = b'x';
             }
+        }
+    }
+
+    #[test]
+    fn case_folded_search_agrees_with_the_portable_scan() {
+        let mut hay = vec![b'x'; 200];
+        hay[70] = b'M';
+        hay[140] = b'm';
+        for from in [0usize, 70, 71, 141] {
+            let want = hay[from..]
+                .iter()
+                .position(|&b| b | 0x20 == b'm')
+                .map(|i| from + i);
+            assert_eq!(memchr_ci(&hay, b'm', from), want);
+            assert_eq!(memchr_ci(&hay, b'M', from), want);
         }
     }
 
