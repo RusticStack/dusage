@@ -20,10 +20,11 @@ there; every other number here was measured on the machine above.
 The parser itself is shared with the rest of the tool: `Args::parse`
 (`src/cli.rs`) accepts `--name value` and `--name=value`, a bare `--`
 terminator, an attached short value (`-A2`, `-m5`, `-g*.rs`, `-tjs`), and it
-treats a lone `-` or a negative number as a positional. Short flags do **not**
-cluster: a bundle is read as its first flag and the rest is discarded, so `-in`
-means `-i` and loses the `-n`, while `-nm1` is an error naming `-1` (measured;
-see the appendix). Write `-i -n -m1`. A repeated *boolean* flag is idempotent.
+treats a lone `-` or a negative number as a positional. Short flags cluster, as
+in ripgrep: `-in` is `-i -n`, `-nm1` is `-n -m 1`, `-inA2` is `-i -n -A 2`, and a
+value flag at the end of a bundle takes the next argument (`-g *.rs` is `-g*.rs`).
+An unknown character anywhere in a bundle is an error naming the whole argument.
+A repeated *boolean* flag is idempotent.
 Repeated *value* flags keep their whole history (`Args::values`,
 `src/cli.rs`), and what each caller does with it is its own business: `-e` and
 `-f` are joined into one alternation, `-g`, `--iglob`, `-t`, `-T`, `--include`,
