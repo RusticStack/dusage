@@ -1503,18 +1503,32 @@ impl<'a> Scanner<'a> {
         let mut line_no = base;
         let mut line_start = 0;
         let mut pos = 0;
-        while let Some(m) = self.o.pattern.block_match(body, pos) {
+        // A block-safe regex is found by the forward automaton alone, which is a single pass
+        // over bytes no match touches; the exact span of the line it lands on is worked out
+        // afterwards, on that line only. A literal needs no such split.
+        let regex_block = self.o.pattern.block_finder().is_none();
+        while let Some((hit, stop_at)) = if regex_block {
+            self.o
+                .pattern
+                .block_accept_end(body, pos)
+                // The match ends just past its last byte, which is inside the line.
+                .map(|e| (e.saturating_sub(1).max(pos), e))
+        } else {
+            self.o
+                .pattern
+                .block_match(body, pos)
+                .map(|m| (m.start, m.end))
+        } {
             // A match that runs across a newline is not a line match: the per-line semantics
             // never see the newline at all, so a class like `[^a-z]` must not match one.
-            if bytes::find_byte(&body[m.start..m.end.max(m.start)], b'\n', 0).is_some() {
-                pos = m.start + 1;
-                line_start = match bytes::rfind_byte(body, b'\n', m.start) {
+            if bytes::find_byte(&body[hit..stop_at.max(hit)], b'\n', 0).is_some() {
+                pos = hit + 1;
+                line_start = match bytes::rfind_byte(body, b'\n', hit) {
                     Some(i) => i + 1,
                     None => 0,
                 };
                 continue;
             }
-            let hit = m.start;
             let ls = match bytes::rfind_byte(body, b'\n', hit) {
                 Some(i) => i + 1,
                 None => line_start,

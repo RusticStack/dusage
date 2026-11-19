@@ -161,12 +161,28 @@ impl Pattern {
             return false;
         }
         match self.kind {
-            // The regex engine's reverse walk starts at the end of the haystack it is given,
-            // so handing it a whole block would cost a block per match. It keeps the line
-            // path, where its lazy DFA is already the right tool.
             PatternKind::Literal => self.block_finder().is_some(),
-            PatternKind::Regex | PatternKind::Pcre => false,
+            PatternKind::Regex => self.block_re().is_some(),
+            PatternKind::Pcre => false,
         }
+    }
+
+    /// The compiled regex when a block scan may use it: no line-relative assertion (or `^`
+    /// and `$` would mean the block's ends) and no instruction that permits a newline (or a
+    /// match could straddle a line and could not be attributed to one).
+    pub fn block_re(&self) -> Option<&Regex> {
+        let re = self.re.as_ref()?;
+        // A pattern that needs Unicode semantics is answered by the character program on
+        // text that is not ASCII, which a byte-level block walk cannot stand in for.
+        if !re.assertion_free() || re.can_match_newline() || re.is_unicode() {
+            return None;
+        }
+        Some(re)
+    }
+
+    /// The end of the first match at or after `from`, from the forward automaton alone.
+    pub fn block_accept_end(&self, hay: &[u8], from: usize) -> Option<usize> {
+        self.block_re()?.accept_end(hay, from)
     }
 
     /// The next match at or after `from`, for the block scanner.
