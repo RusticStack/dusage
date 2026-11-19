@@ -1,1 +1,4 @@
 * text=auto
+
+# Test fixtures are compared byte for byte, on both platforms.
+tests/fixtures/** -text

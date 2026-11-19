@@ -11,6 +11,11 @@ the commands are deterministic, and running them again on that version reproduce
 file byte for byte. A different `lz4` version may pick different match offsets inside the
 same frame — regenerate both the `.lz4` and its `.txt` and the test still passes.
 
+Every file here is compared byte for byte, so `.gitattributes` marks `tests/fixtures/**`
+as `-text`: without that, `* text=auto` would give a Windows checkout CRLF in the `.txt`
+files while the frames keep LF, and the comparison would fail for a reason that has nothing
+to do with the decoder.
+
 ```sh
 : > empty.txt
 printf 'a' > one-byte.txt
