@@ -1933,3 +1933,76 @@ fn the_global_excludes_file_is_read_and_can_be_switched_off() {
         stdout(&o)
     );
 }
+
+/// One plaintext and a compressed sibling of it, for each format `-z` understands. The
+/// pairs are checked in by the decoder tests, so the search path is tested against streams
+/// a real encoder produced rather than against anything this test could build.
+fn fixture_pairs() -> Vec<(&'static str, PathBuf, PathBuf)> {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    vec![
+        (
+            "bzip2",
+            base.join("bz2/mixed_200k.bz2"),
+            base.join("bz2/mixed_200k.txt"),
+        ),
+        (
+            "lz4",
+            base.join("lz4/mixed-100k.lz4"),
+            base.join("lz4/mixed-100k.txt"),
+        ),
+        ("xz", base.join("xz/alpha.xz"), base.join("xz/alpha.txt")),
+        (
+            "zstd",
+            base.join("zstd/text3.zst"),
+            base.join("zstd/text.bin"),
+        ),
+        (
+            "brotli",
+            base.join("brotli/mixed-q11.br"),
+            base.join("brotli/mixed.txt"),
+        ),
+    ]
+}
+
+#[test]
+fn search_zip_expands_every_format_it_claims() {
+    for (name, packed, plain) in fixture_pairs() {
+        assert!(packed.exists(), "{name}: {} is missing", packed.display());
+        let text = String::from_utf8(fs::read(&plain).unwrap()).unwrap();
+        // The needle is a whole line of the plaintext, so it can only be found inside the
+        // expansion, never in the compressed bytes.
+        let needle = text
+            .lines()
+            .map(str::trim)
+            .find(|l| l.len() >= 12 && l.is_ascii())
+            .unwrap_or_else(|| panic!("{name}: no usable line in {}", plain.display()));
+        let o = run(&["search", "-z", "-F", "--no-filename", needle], &packed);
+        assert_eq!(
+            code(&o),
+            0,
+            "{name}: -z missed {needle:?} in {}: {}",
+            packed.display(),
+            stderr(&o)
+        );
+        assert!(
+            stdout(&o).contains(needle),
+            "{name}: {} {}",
+            stdout(&o),
+            stderr(&o)
+        );
+        // Without -z the same file is searched as it lies, and the line is not in it.
+        let plain_run = run(&["search", "-F", "--no-filename", needle], &packed);
+        assert_eq!(code(&plain_run), 1, "{name}: searched compressed bytes");
+    }
+}
+
+#[test]
+fn search_zip_reports_a_corrupt_stream() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let corrupt = base.join("bz2/corrupt.bz2");
+    let o = run(&["search", "-z", "-F", "needle"], &corrupt);
+    // A stream that starts like bzip2 and is corrupt is an unreadable path: the run fails
+    // with the aggregate diagnostic rather than answering from half an expansion.
+    assert_eq!(code(&o), 2, "{}", stderr(&o));
+    assert!(stderr(&o).contains("could not be read"), "{}", stderr(&o));
+}
