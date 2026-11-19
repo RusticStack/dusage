@@ -29,7 +29,9 @@ What each produces:
 | `scripts/perf-guard.sh` | a fixed-width verdict table and an exit status | the block in "The performance guard" |
 
 The rule for this document: a number is either the output of one of those
-commands, or it is labelled as an approximation with the reason. A hand-typed
+commands, or it is labelled as an approximation with the reason. The result file
+`bench/results.json` is gitignored, so the tables are a snapshot kept in the
+document; the commands reproduce them. A hand-typed
 timing is not allowed, and a ratio quoted as stable ("2.7x slower than ripgrep")
 belongs in prose only with the commit it was measured at — see the cross
 references in `docs/SEARCH.md`, whose performance sentences point here instead
@@ -109,6 +111,12 @@ sizes, the run counts, the RSS and cold methods, and one object per row with
 CSV on stdout keeps its original seven columns and appends `cache` and
 `maxrss_kb`.
 
+The file is **not tracked**: `.gitignore` lists it, so a fresh clone has no
+result file and `bench/summary.sh` exits 2 with "run bench/run.sh first" until
+you make one. The tables below are a snapshot of the run named in their
+preamble, kept here so the document reads on its own; re-running the suite
+replaces them.
+
 `bench/summary.sh` renders that file as Markdown: one table per cache pass, one
 line per case, the fastest reference of the case named beside its own median,
 both peak-RSS columns and their ratio. It is POSIX `sh` plus `awk`.
@@ -116,8 +124,11 @@ both peak-RSS columns and their ratio. It is POSIX `sh` plus `awk`.
 ## The commit these numbers describe
 
 The run behind this document was made from `main` at `547f955` (the merge of the
-search and find work plus the recalibration commits that precede it). The header
-of `bench/results.json` is the conditions record, quoted as it stands:
+search and find work plus the recalibration commits that precede it). Check that
+commit against `git log --oneline -1 -- src/ bench/` before quoting a table: if
+the scanner or the walk has moved since, the numbers describe the old code and
+the suite should be re-run. The header the run wrote is its conditions record,
+quoted as it stands:
 
 ```json
 {
@@ -243,13 +254,14 @@ perf-guard: pass (tolerance 25%, 5 runs per row)
 The baseline is machine specific: a run on a box with a different CPU count still
 works but says so on stderr, because the comparison then carries the machine's
 own spread. Re-record it with `--update-baseline` after a deliberate change, on
-the machine CI runs on. CI does not run the guard yet; the step to add to the
-Linux job in `.github/workflows/ci.yml`, after the release build, is:
+the machine CI runs on.
 
-```yaml
-      - name: Performance guard
-        run: bash scripts/perf-guard.sh
-```
+CI runs the guard in the Linux job, after the release build, as an **advisory**
+step (`continue-on-error: true`): it searches a 30-file tree built from the
+repository itself, so the case is deterministic on any runner, and it sets
+`DUSAGE_PERF_TOL=60` because a shared runner is noisier than a quiet box. A red
+guard there is a signal to look, not a merge gate; a regression that should stop
+a merge is caught by running the guard on a quiet machine.
 
 ## Reading the tables
 
