@@ -33,6 +33,9 @@ const BINARY_SCAN: usize = 8 * 1024;
 /// Upper bound on how many matches `-o` will report on one line, so a pathological
 /// pattern cannot blow up memory.
 const MAX_PER_LINE: usize = 1024;
+/// How much match text one file pools before the rest of it is stored per record instead: a
+/// match's place in the pool is a `u32` pair.
+const POOL_MAX: usize = 1 << 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -254,15 +257,30 @@ pub struct LineHit {
     /// Byte offset of this line's first byte within the file.
     pub offset: u64,
     pub number: u64,
-    /// Line bytes without the newline (a trailing `\r` is removed for `\r\n` files).
+    /// Line bytes without the newline (a trailing `\r` is removed for `\r\n` files), or
+    /// empty when they live in the file's pool and `pooled` says where.
     pub text: Vec<u8>,
+    /// Where this record's text is in its file's pool: what `-o` shares, so a match costs no
+    /// allocation of its own. `(0, 0)` means the text is in `text`.
+    pub pooled: (u32, u32),
     /// False for context lines.
     pub matched: bool,
-    /// Byte spans inside `text` for `-o` and colouring; empty on context lines.
+    /// Byte spans inside `text` for colouring; empty on context lines and on `-o` records,
+    /// which are nothing but the match and so need no span of their own.
     pub spans: Vec<(usize, usize)>,
     /// Where `text` starts within its line: 0 for a whole line, the match's offset for `-o`.
     /// `--column` and `--vimgrep` count a column from here.
     pub text_start: usize,
+}
+
+impl LineHit {
+    /// The bytes this record prints, read out of the file's pool when it shares one.
+    pub fn text<'a>(&'a self, pool: &'a [u8]) -> &'a [u8] {
+        match self.pooled {
+            (0, 0) => &self.text,
+            (s, e) => &pool[s as usize..e as usize],
+        }
+    }
 }
 
 /// Everything found in one file.
@@ -276,6 +294,9 @@ pub struct FileHits {
     pub total: u64,
     /// The file looks binary (a NUL in its first 8 KiB) and `-a` was not given.
     pub binary: bool,
+    /// The text of the records that share one buffer rather than owning theirs (`-o`), so a
+    /// file's matches cost it one allocation instead of one each.
+    pub pool: Vec<u8>,
 }
 
 /// Counters for `--stats`.
@@ -710,6 +731,7 @@ fn binary_hit(path: &Path, o: &SearchOptions, stats: &mut Stats, found: bool) ->
         matches: u64::from(found),
         total: u64::from(found),
         binary: true,
+        pool: Vec::new(),
     })
 }
 
@@ -902,6 +924,7 @@ struct Lines {
     line: Vec<u8>,
     history: VecDeque<(u64, Vec<u8>)>,
     hits: Vec<LineHit>,
+    pool: Vec<u8>,
 }
 
 impl Lines {
@@ -911,6 +934,7 @@ impl Lines {
             line: Vec::new(),
             history: VecDeque::new(),
             hits: Vec::new(),
+            pool: Vec::new(),
         }
     }
 
@@ -923,6 +947,7 @@ impl Lines {
         self.line.clear();
         self.history.clear();
         self.hits.clear();
+        self.pool.clear();
     }
 }
 
@@ -1163,6 +1188,7 @@ fn scan_multiline(
             matches: 0,
             total: 0,
             binary: false,
+            pool: Vec::new(),
         }));
     }
     stats.matches += found.len() as u64;
@@ -1175,6 +1201,7 @@ fn scan_multiline(
                 number: line_number(&data, m.start),
                 offset: m.start as u64,
                 text: data[m.start..m.end].to_vec(),
+                pooled: (0, 0),
                 matched: true,
                 spans: vec![(0, m.end - m.start)],
                 text_start: m.start - line_start(&data, m.start),
@@ -1198,6 +1225,7 @@ fn scan_multiline(
         matches: lines,
         total: found.len() as u64,
         binary: false,
+        pool: Vec::new(),
     };
     Ok(Some(out))
 }
@@ -1272,6 +1300,7 @@ fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result
                         number,
                         offset: offset + s as u64,
                         text: record[s..e].to_vec(),
+                        pooled: (0, 0),
                         matched: true,
                         spans: vec![(0, e - s)],
                         text_start: s,
@@ -1282,6 +1311,7 @@ fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result
                     number,
                     offset,
                     text: record.to_vec(),
+                    pooled: (0, 0),
                     matched: true,
                     spans,
                     text_start: 0,
@@ -1298,6 +1328,7 @@ fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result
             matches: 0,
             total: 0,
             binary: false,
+            pool: Vec::new(),
         }));
     }
     stats.matches += matches;
@@ -1312,6 +1343,7 @@ fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result
         matches,
         total,
         binary: false,
+        pool: Vec::new(),
     }))
 }
 
@@ -1374,6 +1406,7 @@ fn matched_lines(data: &[u8], found: &[Match]) -> Vec<LineHit> {
                 number: (i + 1) as u64,
                 offset: s as u64,
                 text: strip_cr(&data[s..e]).to_vec(),
+                pooled: (0, 0),
                 matched: true,
                 spans,
                 text_start: 0,
@@ -1401,6 +1434,7 @@ fn every_line(data: &[u8], found: &[Match]) -> Vec<LineHit> {
                 number: (i + 1) as u64,
                 offset: s as u64,
                 text: strip_cr(&data[s..e]).to_vec(),
+                pooled: (0, 0),
                 matched: !spans.is_empty(),
                 spans,
                 text_start: 0,
@@ -1417,6 +1451,7 @@ fn plain_lines(data: &[u8]) -> Vec<LineHit> {
             number: (i + 1) as u64,
             offset: s as u64,
             text: strip_cr(&data[s..e]).to_vec(),
+            pooled: (0, 0),
             matched: false,
             spans: Vec::new(),
             text_start: 0,
@@ -1441,6 +1476,8 @@ struct Scanner<'a> {
     line: Vec<u8>,
     /// Individual matches over the whole file (a line can hold several).
     total: u64,
+    /// The text of the records that share one buffer (`-o`); handed to the file's results.
+    pool: Vec<u8>,
     /// Byte offset of the current chunk within the file, and of the first byte the carry is
     /// holding.
     pos: u64,
@@ -1472,6 +1509,7 @@ impl<'a> Scanner<'a> {
             stopped: false,
             line: lines.line,
             total: 0,
+            pool: lines.pool,
             pos: 0,
             carry_pos: 0,
         }
@@ -1484,6 +1522,7 @@ impl<'a> Scanner<'a> {
             line: std::mem::take(&mut self.line),
             history: std::mem::take(&mut self.history),
             hits: std::mem::take(&mut self.hits),
+            pool: std::mem::take(&mut self.pool),
         };
         lines.put_back();
         SCAN_LINES.with(|l| *l.borrow_mut() = lines);
@@ -1546,13 +1585,13 @@ impl<'a> Scanner<'a> {
     /// splitting every line. This is the path ripgrep takes, and it is what makes a search
     /// for a rare word cost one scan of the data rather than one pass per line.
     ///
-    /// Only for the modes where a match means "print or count this line": context, inversion,
-    /// `-o` and `-m` need the line-at-a-time machinery and decline here.
+    /// Only for the modes where a match means "print or count this line" or, for `-o`, "report
+    /// every match": context, inversion and `-m` need the line-at-a-time machinery and decline
+    /// here.
     fn block_scan(&mut self, chunk: &[u8]) -> bool {
         if self.o.invert
             || self.o.before > 0
             || self.o.after > 0
-            || self.o.only_matching
             || self.o.passthru
             // The replacement rewrites the line, which this path does not do.
             || self.o.replace.is_some()
@@ -1598,9 +1637,25 @@ impl<'a> Scanner<'a> {
             }
         };
         let body = &body[..end];
-        // Line numbers are carried forward from match to match, so each byte of the block is
-        // counted once rather than once per match.
+        // The block ends right before a newline, so it holds one line more than its newlines.
+        // Both walks count the lines they passed over the same way and hand back the same
+        // number, so the next block starts on the right one.
         let base = self.line_no;
+        self.line_no = if self.o.only_matching {
+            self.block_matches(body, from, base)
+        } else {
+            self.block_lines(body, base)
+        };
+        if from + end + 1 < chunk.len() && self.carry.is_empty() {
+            self.carry_pos = self.pos + (from + end + 1) as u64;
+        }
+        self.carry.extend_from_slice(&chunk[from + end + 1..]);
+        true
+    }
+
+    /// The lines of one block that hold a match, each reported once with the spans of the
+    /// matches on it. Returns the line number the block ends on.
+    fn block_lines(&mut self, body: &[u8], base: u64) -> u64 {
         let mut line_no = base;
         let mut line_start = 0;
         let mut pos = 0;
@@ -1639,7 +1694,6 @@ impl<'a> Scanner<'a> {
                 None => body.len(),
             };
             line_no += bytes::count_byte(&body[line_start..ls], b'\n') as u64 + 1;
-            self.line_no = line_no;
             self.matches += 1;
             let line = strip_cr(&body[ls..le]);
             if self.o.count_matches {
@@ -1664,25 +1718,115 @@ impl<'a> Scanner<'a> {
                     number: line_no,
                     offset,
                     text,
+                    pooled: (0, 0),
                     matched: true,
                     spans,
                     text_start: 0,
                 });
             }
-            if self.matches >= self.limit {
-                break;
-            }
             // One line is reported once however many matches it holds.
             pos = le + 1;
             line_start = pos;
         }
-        // The block ends right before a newline, so it holds one line more than its newlines.
-        self.line_no = base + bytes::count_byte(body, b'\n') as u64 + 1;
-        if from + end + 1 < chunk.len() && self.carry.is_empty() {
-            self.carry_pos = self.pos + (from + end + 1) as u64;
+        base + bytes::count_byte(body, b'\n') as u64 + 1
+    }
+
+    /// Every match of one block as its own record, for `-o`. The search continues from the
+    /// previous match's end instead of restarting at the start of its line, which is what a
+    /// line-at-a-time `-o` pays for once a file matches often. Returns the line number the
+    /// block ends on.
+    ///
+    /// Line numbers cost a count of the bytes between one record and the next, which is a
+    /// whole second pass over the file however much output it produces. Only `-n`, `--vimgrep`
+    /// and the modes that print positions (`paint`: colour, `--json`, `--column`) read them,
+    /// so the rest skip the count and their records carry the line number they arrived with.
+    fn block_matches(&mut self, body: &[u8], from: usize, base: u64) -> u64 {
+        let numbers = self.o.line_numbers || self.o.vimgrep || self.o.paint;
+        // Absolute offset of `body`'s first byte within the file.
+        let at = self.pos + from as u64;
+        let mut line_no = base;
+        // The line the last record came from: its first byte, the newline that ends it (or
+        // the block end), where its text ends after a `\r\n`'s `\r` is stripped, and how
+        // many records it has already reported. A line is capped at [`MAX_PER_LINE`] matches,
+        // as the line path's `find_all` caps it.
+        let mut line_start = 0;
+        let mut line_end = 0;
+        let mut content_end = 0;
+        let mut counted_to = 0;
+        let mut on_line = 0;
+        let mut fresh = true;
+        let mut pos = 0;
+        while let Some(m) = self.o.pattern.block_match(body, pos) {
+            // A match that runs across a newline is not a line match: the per-line semantics
+            // never see the newline at all, so a class like `[^a-z]` must not match one.
+            if bytes::find_byte(&body[m.start..m.end], b'\n', 0).is_some() {
+                pos = m.start + 1;
+                continue;
+            }
+            if fresh || m.start > line_end {
+                line_start = match bytes::rfind_byte(body, b'\n', m.start) {
+                    Some(i) => i + 1,
+                    None => line_start,
+                };
+                line_end = match bytes::find_byte(body, b'\n', m.start) {
+                    Some(i) => i,
+                    None => body.len(),
+                };
+                if numbers {
+                    line_no += bytes::count_byte(&body[counted_to..line_start], b'\n') as u64 + 1;
+                }
+                content_end = line_start + strip_cr(&body[line_start..line_end]).len();
+                counted_to = (line_end + 1).min(body.len());
+                on_line = 0;
+                fresh = false;
+            }
+            // The line path matches what is left after the `\r` of a `\r\n` is stripped, so
+            // a match that reaches into it is not one.
+            if m.end > content_end {
+                pos = m.start + 1;
+                continue;
+            }
+            // A line counts once however many matches it holds.
+            if on_line == 0 {
+                self.matches += 1;
+            }
+            if self.o.count_matches {
+                self.total += 1;
+            }
+            if self.want_lines {
+                let text = &body[m.start..m.end];
+                let mut hit = LineHit {
+                    number: line_no,
+                    offset: at + m.start as u64,
+                    text: Vec::new(),
+                    pooled: (0, 0),
+                    matched: true,
+                    spans: Vec::new(),
+                    text_start: m.start - line_start,
+                };
+                // One buffer for the whole file, while a `u32` can still address it: a match
+                // otherwise costs an allocation and, later, a copy into the report.
+                if self.pool.len() + text.len() <= POOL_MAX {
+                    let from = self.pool.len() as u32;
+                    self.pool.extend_from_slice(text);
+                    hit.pooled = (from, self.pool.len() as u32);
+                } else {
+                    hit.text = text.to_vec();
+                }
+                self.hits.push(hit);
+            }
+            on_line += 1;
+            if on_line >= MAX_PER_LINE {
+                // Nothing more is reported from this line; the next one starts after it.
+                pos = line_end + 1;
+                continue;
+            }
+            pos = m.end.max(m.start + 1);
         }
-        self.carry.extend_from_slice(&chunk[from + end + 1..]);
-        true
+        if !numbers {
+            return base;
+        }
+        base + bytes::count_byte(body, b'\n') as u64 + 1
     }
 
     /// Hand the carry over as a line once it grows past [`CARRY_MAX`], so a file that is not
@@ -1751,6 +1895,16 @@ fn finished(
     binary: bool,
 ) -> io::Result<Option<FileHits>> {
     sc.flush();
+    // `--trim` and `--max-columns` rewrite a record's text, which a pooled one cannot do in
+    // place; those two modes give the file's matches texts of their own.
+    if o.trim || o.max_columns > 0 {
+        for h in &mut sc.hits {
+            if h.pooled != (0, 0) {
+                h.text = h.text(&sc.pool).to_vec();
+                h.pooled = (0, 0);
+            }
+        }
+    }
     present(&mut sc.hits, o);
     if sc.matches == 0 {
         // `--passthru` prints the file anyway, so its lines are kept even with no match.
@@ -1765,6 +1919,7 @@ fn finished(
             matches: 0,
             total: 0,
             binary,
+            pool: std::mem::take(&mut sc.pool),
         });
         sc.recycle();
         return Ok(hit);
@@ -1777,6 +1932,7 @@ fn finished(
         matches: sc.matches,
         total: sc.total,
         binary,
+        pool: std::mem::take(&mut sc.pool),
     };
     sc.recycle();
     Ok(Some(out))
@@ -1861,6 +2017,7 @@ fn handle_line(
                 number: no,
                 offset,
                 text: text.to_vec(),
+                pooled: (0, 0),
                 matched: false,
                 spans: Vec::new(),
                 text_start: 0,
@@ -1874,6 +2031,7 @@ fn handle_line(
                 number: no,
                 offset,
                 text: text.to_vec(),
+                pooled: (0, 0),
                 matched: false,
                 spans: Vec::new(),
                 text_start: 0,
@@ -1911,6 +2069,7 @@ fn handle_line(
                 // only `-A`/`-B` reach and neither prints an offset for.
                 offset,
                 text: t,
+                pooled: (0, 0),
                 matched: false,
                 spans: Vec::new(),
                 text_start: 0,
@@ -1931,13 +2090,13 @@ fn handle_line(
             for m in &found {
                 let mut out = Vec::new();
                 expand(&mut out, rep, &o.pattern, text, m.start);
-                let len = out.len();
                 hits.push(LineHit {
                     number: no,
                     offset: offset + m.start as u64,
                     text: out,
+                    pooled: (0, 0),
                     matched: true,
-                    spans: vec![(0, len)],
+                    spans: Vec::new(),
                     text_start: m.start,
                 });
                 *last_emitted = no;
@@ -1948,6 +2107,7 @@ fn handle_line(
                 number: no,
                 offset,
                 text,
+                pooled: (0, 0),
                 matched: true,
                 spans,
                 text_start: 0,
@@ -1964,8 +2124,9 @@ fn handle_line(
                 number: no,
                 offset: offset + s as u64,
                 text: text[s..e].to_vec(),
+                pooled: (0, 0),
                 matched: true,
-                spans: vec![(0, e - s)],
+                spans: Vec::new(),
                 text_start: s,
             });
             *last_emitted = no;
@@ -1975,6 +2136,7 @@ fn handle_line(
             number: no,
             offset,
             text: text.to_vec(),
+            pooled: (0, 0),
             matched: true,
             spans,
             text_start: 0,
@@ -2096,7 +2258,7 @@ mod tests {
                     (
                         f.path.clone(),
                         h.number,
-                        String::from_utf8_lossy(&h.text).into_owned(),
+                        String::from_utf8_lossy(h.text(&f.pool)).into_owned(),
                         h.matched,
                     )
                 })
@@ -2176,6 +2338,92 @@ mod tests {
         o.paint = true;
         let r = search(&o).unwrap();
         assert_eq!(r.files[0].hits[0].spans, vec![(2, 5), (8, 11)]);
+    }
+
+    #[test]
+    fn only_matching_walks_a_whole_block() {
+        // `-o` reads a block in one pass and continues from each match's end, so a line with
+        // many matches in it, a match at the very start and one at the very end all have to
+        // come out as the line path would print them.
+        let f = Fixture::new("only-block");
+        f.file(
+            "a.txt",
+            "needle one\n\n  needle needle needle  \nno\nneedle\n",
+        );
+        let mut o = opts(&f, "needle");
+        o.only_matching = true;
+        o.line_numbers = true;
+        let r = search(&o).unwrap();
+        let got: Vec<(u64, String)> = r.files[0]
+            .hits
+            .iter()
+            .map(|h| {
+                (
+                    h.number,
+                    String::from_utf8_lossy(h.text(&r.files[0].pool)).into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (1, "needle".to_string()),
+                (3, "needle".to_string()),
+                (3, "needle".to_string()),
+                (3, "needle".to_string()),
+                (5, "needle".to_string()),
+            ]
+        );
+        assert_eq!(r.stats.matches, 3, "matching lines, not matches");
+        assert_eq!(r.files[0].total, 0, "`--count-matches` was not asked for");
+    }
+
+    #[test]
+    fn only_matching_counts_lines_across_blocks() {
+        // A file several blocks long: each block picks up where the last one stopped, and the
+        // line numbers still name the line the match is on.
+        let f = Fixture::new("only-blocks");
+        let mut text = String::new();
+        let mut want = Vec::new();
+        for line in 1..=60_000u64 {
+            if line % 7 == 0 {
+                want.push(line);
+                text.push_str("a needle here\n");
+            } else {
+                text.push_str("nothing on this line at all\n");
+            }
+        }
+        f.file("big.txt", &text);
+        let mut o = opts(&f, "needle");
+        o.only_matching = true;
+        o.line_numbers = true;
+        let r = search(&o).unwrap();
+        let got: Vec<u64> = r.files[0].hits.iter().map(|h| h.number).collect();
+        assert_eq!(got, want);
+        let text: Vec<&[u8]> = r.files[0]
+            .hits
+            .iter()
+            .map(|h| h.text(&r.files[0].pool))
+            .collect();
+        assert!(text.iter().all(|t| *t == b"needle"));
+    }
+
+    #[test]
+    fn only_matching_caps_a_line() {
+        // A pathological line cannot grow the output without bound, and the matches past the
+        // cap are dropped rather than stopping the file.
+        let f = Fixture::new("only-cap");
+        let mut line = String::new();
+        for _ in 0..(MAX_PER_LINE + 100) {
+            line.push_str("ab ");
+        }
+        f.file("a.txt", &format!("{line}\nafter ab\n"));
+        let mut o = opts(&f, "ab");
+        o.only_matching = true;
+        let r = search(&o).unwrap();
+        let capped = r.files[0].hits.len();
+        assert_eq!(capped, MAX_PER_LINE + 1, "the cap plus the next line's one");
+        assert_eq!(r.stats.matches, 2, "both lines still count as matching");
     }
 
     #[test]

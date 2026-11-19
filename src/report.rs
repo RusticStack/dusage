@@ -349,8 +349,10 @@ struct Row<'a> {
 
 impl Row<'_> {
     /// One row: `[path] [line] [column] [byte offset] text`, each field closed by `sep`.
-    /// `span` is the match this row is about (`--vimgrep` gives a row per match), and `marks`
-    /// are the ranges to paint inside the text.
+    /// `span` is the match this row is about (`--vimgrep` gives a row per match), `marks` are
+    /// the ranges to paint inside the text, and `text` is that text, which a record may share
+    /// with the rest of its file rather than own.
+    #[allow(clippy::too_many_arguments)]
     fn write(
         &self,
         out: &mut dyn Write,
@@ -359,6 +361,7 @@ impl Row<'_> {
         sep: &[u8],
         span: Option<(usize, usize)>,
         marks: &[(usize, usize)],
+        text: &[u8],
     ) -> io::Result<()> {
         let o = self.o;
         if self.named {
@@ -396,7 +399,7 @@ impl Row<'_> {
             write!(out, "{at}")?;
             out.write_all(sep)?;
         }
-        write_match_line(out, &h.text, marks, self.color)?;
+        write_match_line(out, text, marks, self.color)?;
         out.write_all(self.end)
     }
 }
@@ -484,8 +487,16 @@ pub fn render_search(
             };
             // `--vimgrep` is `-n --column` with one row per match, so several matches on one
             // line print that line several times, each with its own column.
-            if o.vimgrep && !h.spans.is_empty() {
-                for span in &h.spans {
+            let text = h.text(&f.pool);
+            // An `-o` record is the match itself, so its span is the whole of its text.
+            let whole = (0, text.len());
+            let spans: &[(usize, usize)] = if o.only_matching {
+                std::slice::from_ref(&whole)
+            } else {
+                &h.spans
+            };
+            if o.vimgrep && !spans.is_empty() {
+                for span in spans {
                     row.write(
                         out,
                         &f.path,
@@ -493,10 +504,11 @@ pub fn render_search(
                         sep,
                         Some(*span),
                         std::slice::from_ref(span),
+                        text,
                     )?;
                 }
             } else {
-                row.write(out, &f.path, h, sep, h.spans.first().copied(), &h.spans)?;
+                row.write(out, &f.path, h, sep, spans.first().copied(), spans, text)?;
             }
         }
     }
@@ -532,16 +544,23 @@ pub fn render_search_json(
                 "{{\"line_number\":{},\"context\":{},",
                 h.number, !h.matched
             );
+            let text = h.text(&f.pool);
             s.push_str("\"text\":");
-            jstr(&String::from_utf8_lossy(&h.text), &mut s);
+            jstr(&String::from_utf8_lossy(text), &mut s);
             s.push_str(",\"submatches\":[");
-            for (k, &(a, b)) in h.spans.iter().enumerate() {
+            let whole = (0, text.len());
+            let spans: &[(usize, usize)] = if o.only_matching {
+                std::slice::from_ref(&whole)
+            } else {
+                &h.spans
+            };
+            for (k, &(a, b)) in spans.iter().enumerate() {
                 if k > 0 {
                     s.push(',');
                 }
                 let _ = write!(s, "{{\"start\":{a},\"end\":{b},\"text\":");
                 jstr(
-                    &String::from_utf8_lossy(&h.text[a.min(h.text.len())..b.min(h.text.len())]),
+                    &String::from_utf8_lossy(&text[a.min(text.len())..b.min(text.len())]),
                     &mut s,
                 );
                 s.push('}');
@@ -1008,6 +1027,7 @@ mod tests {
                         number: 2,
                         offset: 22,
                         text: b"a needle".to_vec(),
+                        pooled: (0, 0),
                         matched: true,
                         spans: vec![(2, 8)],
                         text_start: 0,
@@ -1016,6 +1036,7 @@ mod tests {
                         number: 5,
                         offset: 64,
                         text: b"another needle".to_vec(),
+                        pooled: (0, 0),
                         matched: true,
                         spans: vec![(8, 14)],
                         text_start: 0,
@@ -1024,6 +1045,7 @@ mod tests {
                 matches: 2,
                 total: 2,
                 binary: false,
+                pool: Vec::new(),
             }],
             stats: Stats {
                 files_scanned: 3,
