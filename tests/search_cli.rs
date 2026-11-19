@@ -1331,7 +1331,10 @@ fn grep_compatibility_flags() {
 
     // `-d skip` does not descend, so a file in a subdirectory drops out.
     let skipped = stdout(&run(&["search", "-I", "-l", "-d", "skip", "needle"], &dir));
-    assert!(skipped.contains("a.c") && skipped.contains("b.h"), "{skipped}");
+    assert!(
+        skipped.contains("a.c") && skipped.contains("b.h"),
+        "{skipped}"
+    );
     assert_eq!(skipped.lines().count(), 2, "{skipped}");
 }
 
@@ -1368,4 +1371,41 @@ fn basic_regular_expressions() {
         stdout(&run(&["search", "-h", "-o", "ab{2}c"], &dir)),
         "abbc\n"
     );
+}
+
+#[test]
+fn absolute_date_filters() {
+    let f = Fixture::new("dates");
+    let dir = f.root.join("dates");
+    fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("old.txt");
+    let new = dir.join("new.txt");
+    fs::write(&old, "x").unwrap();
+    fs::write(&new, "x").unwrap();
+    // The timestamps are set from the file handle, so the test needs no date arithmetic of
+    // its own beyond two fixed instants.
+    let set = |p: &std::path::Path, at: std::time::SystemTime| {
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    };
+    let epoch = std::time::UNIX_EPOCH;
+    set(&old, epoch + std::time::Duration::from_secs(1_500_000_000)); // 2017
+    set(&new, epoch + std::time::Duration::from_secs(1_700_000_000)); // 2023
+
+    // `--newermt` takes an absolute date, a date-time, or a Unix timestamp.
+    let newer = stdout(&run(&["find", "--newermt", "2020-01-01", "*.txt"], &dir));
+    assert_eq!(newer.trim(), "new.txt", "{newer}");
+    let stamped = stdout(&run(&["find", "--newermt", "@1600000000", "*.txt"], &dir));
+    assert_eq!(stamped.trim(), "new.txt", "{stamped}");
+    let both = stdout(&run(&["find", "--newermt", "2000-01-01", "*.txt"], &dir));
+    assert_eq!(both.lines().count(), 2, "{both}");
+
+    // A date that makes no sense is refused rather than silently matching nothing.
+    let bad = run(&["find", "--newermt", "not-a-date", "*"], &dir);
+    assert_eq!(code(&bad), 2);
+    assert!(stderr(&bad).contains("invalid date"), "{}", stderr(&bad));
 }

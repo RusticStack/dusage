@@ -230,9 +230,24 @@ pub fn parse_date(s: &str) -> Result<SystemTime, String> {
     let (mut hh, mut mm, mut ss) = (0i64, 0i64, 0i64);
     if !time.is_empty() {
         let mut tparts = time.split(':');
-        hh = tparts.next().ok_or_else(bad)?.trim().parse().map_err(|_| bad())?;
-        mm = tparts.next().unwrap_or("0").trim().parse().map_err(|_| bad())?;
-        ss = tparts.next().unwrap_or("0").trim().parse().map_err(|_| bad())?;
+        hh = tparts
+            .next()
+            .ok_or_else(bad)?
+            .trim()
+            .parse()
+            .map_err(|_| bad())?;
+        mm = tparts
+            .next()
+            .unwrap_or("0")
+            .trim()
+            .parse()
+            .map_err(|_| bad())?;
+        ss = tparts
+            .next()
+            .unwrap_or("0")
+            .trim()
+            .parse()
+            .map_err(|_| bad())?;
         if !(0..24).contains(&hh) || !(0..60).contains(&mm) || !(0..61).contains(&ss) {
             return Err(bad());
         }

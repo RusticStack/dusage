@@ -464,6 +464,7 @@ find_case find_dirs eq plain . '--dirs *' '. -mindepth 1 -type d'
 find_case find_no_match eq plain . '*.nope' '. -name *.nope'
 find_case find_mindepth eq plain . '--mindepth 2 *' '. -mindepth 2'
 find_case find_name_only eq plain . '--name *.md' '. -name *.md'
+find_case find_newermt eq plain . '--newermt 2000-01-01 *.txt' '. -newermt 2000-01-01 -name *.txt'
 
 say ""
 say "== known differences"

@@ -1185,9 +1185,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                     let got = match which {
                         1 => std::fs::metadata(&c.path).and_then(|m| m.accessed()),
                         2 => std::fs::metadata(&c.path).and_then(|m| m.created()),
-                        _ => c.modified.ok_or_else(|| {
-                            std::io::Error::new(std::io::ErrorKind::Other, "no mtime")
-                        }),
+                        _ => c.modified.ok_or_else(|| std::io::Error::other("no mtime")),
                     };
                     if !got.is_ok_and(|g| g > t) {
                         return false;

@@ -115,6 +115,7 @@ flag lists in `src/cmd/search.rs`).
 | `-i`, `--ignore-case` | `find -iname` | Folds the glob, or the `--fixed` substring, without changing what it is matched against. |
 | `--name`, `--full-path` | `find -name` / `find -path` | `--name` matches the file name alone, `--full-path` the whole path below the root. Without either, the pattern decides: no `/` means name, a `/` means path — which is `find -name` and `find -path` in one flag. |
 | `--mindepth N` | `find -mindepth N` | Counts levels below each root, so a file in the root is 1. |
+| `--newermt`, `--newerat`, `--newerct` | `find -newermt`, `-newerat`, `-newerct` | Keep what was modified, accessed or changed after an absolute date: `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS]`, `YYYY-MM-DDTHH:MM:SS`, or `@SECONDS`. Dates are read as UTC, since a time-zone library is a dependency this tool does not have; `-d '2 days ago'`-style date arithmetic is `--newer 2d` instead. |
 | `--hidden` | no find equivalent | GNU find lists dotfiles like any other name; we skip them unless this flag is given. |
 | `--no-ignore` | no find equivalent | Without it, the built-in cache list and the ignore files apply to `find` too. |
 | `-x`, `--one-filesystem` | `find -xdev` | Device comparison per directory (`src/search.rs:216-222`). |
