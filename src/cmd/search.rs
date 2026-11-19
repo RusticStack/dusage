@@ -114,7 +114,10 @@ A path of `-` is standard input, and with no paths a piped stdin is searched ins
     --no-ignore-dot        do not read .ignore files
     --no-ignore-parent     do not read the ignore files above a root
     --no-ignore-files      read no ignore file at all (the three switches above)
-    --no-ignore-global     accepted for compatibility; this never reads a global ignore file
+    --no-ignore-global     do not read git's global excludes file (core.excludesFile)
+        --ignore-file PATH     read ignore patterns from PATH as well; repeatable
+        --ignore-file-case-insensitive
+                           match the --ignore-file patterns without case
     --mmap, --no-mmap      accepted and ignored: this reads in blocks, and mapping the file
                            was measured slower (docs/BENCHMARKS.md)
     --follow               follow symbolic links, walking each real directory once
@@ -177,7 +180,10 @@ OPTIONS:
     --no-ignore-dot        do not read .ignore files
     --no-ignore-parent     do not read the ignore files above a root
     --no-ignore-files      read no ignore file at all (the three switches above)
-    --no-ignore-global     accepted for compatibility; this never reads a global ignore file
+    --no-ignore-global     do not read git's global excludes file (core.excludesFile)
+        --ignore-file PATH     read ignore patterns from PATH as well; repeatable
+        --ignore-file-case-insensitive
+                           match the --ignore-file patterns without case
     --follow               follow symbolic links, walking each real directory once
                            (ripgrep spells this -L; here -L means --files-without-match)
     -x, --one-filesystem   stay on the starting filesystem
@@ -422,6 +428,7 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--exclude-dir",
     "--pre",
     "--pre-glob",
+    "--ignore-file",
     "--binary-files",
     "-d",
     "--directories",
@@ -469,6 +476,7 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--no-ignore-dot",
     "--no-ignore-parent",
     "--no-ignore-global",
+    "--ignore-file-case-insensitive",
     "--no-ignore-files",
     "--follow",
     "-x",
@@ -824,6 +832,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--no-ignore-dot",
                 "--no-ignore-parent",
                 "--no-ignore-global",
+                "--ignore-file-case-insensitive",
                 "--no-ignore-files",
                 "--follow",
                 "-x",
@@ -1115,6 +1124,16 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.no_ignore_vcs = a.flag("--no-ignore-vcs") || a.flag("--no-ignore-files");
     o.no_ignore_dot = a.flag("--no-ignore-dot") || a.flag("--no-ignore-files");
     o.no_ignore_parent = a.flag("--no-ignore-parent") || a.flag("--no-ignore-files");
+    o.no_ignore_global = a.flag("--no-ignore-global") || a.flag("--no-ignore-files");
+    o.ignore_file_icase = a.flag("--ignore-file-case-insensitive");
+    o.ignore_files = a.values("--ignore-file").to_vec();
+    // An explicit ignore file that cannot be read is a usage error, not a silent empty
+    // stack: the rules the caller asked for would be missing from every result.
+    for path in &o.ignore_files {
+        if std::fs::read_to_string(path).is_err() {
+            return Err(Fail::from(format!("{path}: cannot read ignore file")));
+        }
+    }
     o.follow = a.flag("--follow");
     o.pre = a.value("--pre").map(str::to_string);
     o.pre_globs = a.values("--pre-glob").to_vec();
