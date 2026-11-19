@@ -83,6 +83,7 @@ states, **gap** is missing compatibility with a flag or syntax the other tools a
 | `crlf-anchor` | The same rule makes `$` match before the `\r`: `second line$` matches a CRLF line in dusage, not in rg or grep. | documented | `src/search.rs` (`strip_cr`) |
 | `byte-dot` | The regex engine is byte-oriented, so `.` consumes one byte of a multi-byte character: `^caf.$` never matches a line that is exactly `café`, which rg matches as one character. | documented | `src/regex.rs` (documented semantics; a literal character compiles to its UTF-8 bytes) |
 | `max-columns` | `--max-columns 20` truncates the line and prints it; rg omits the line and prints `[Omitted long matching line]`. | documented | `src/search.rs` (truncate) and the help text |
+| `type-plus` | `--type-add 'rust:+*.md'` extends an existing type, as ripgrep's documentation describes; ripgrep 14.1 stores `+*.md` as a glob that matches nothing. | documented | `src/cmd/search.rs` (`Types::add`) |
 
 Everything the first pass of this suite catalogued as a **bug** is fixed and is now an `eq`
 case: the ignore-layer wipe on a rule-less directory (`ancestor-wipe`), symlinked files being
