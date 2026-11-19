@@ -158,6 +158,8 @@ pub struct IgnoreRules {
     dot: bool,
     /// Stack the rule files of the directories above a root (`--no-ignore-parent` clears it).
     parent: bool,
+    /// Read git's global excludes file (`--no-ignore-global` clears it).
+    global: bool,
 }
 
 impl IgnoreRules {
@@ -177,6 +179,7 @@ impl IgnoreRules {
             vcs: true,
             dot: true,
             parent: true,
+            global: true,
             ..Default::default()
         }
     }
@@ -191,6 +194,11 @@ impl IgnoreRules {
     /// True when a walk should stack the ignore files of a root's ancestors.
     pub fn reads_parents(&self) -> bool {
         self.parent
+    }
+
+    /// Turn git's global excludes file on or off (`--no-ignore-global`).
+    pub fn set_global(&mut self, on: bool) {
+        self.global = on;
     }
 
     /// The rules of one directory, in priority order: `.gitignore` first, then `.ignore`,
@@ -296,6 +304,53 @@ impl IgnoreRules {
 
     pub fn pop_to(&mut self, mark: usize) {
         self.layers.truncate(mark);
+    }
+
+    /// Stack git's global excludes file, the lowest-priority layer there is. Read once per
+    /// walk, before the per-directory layers, so a repository's own rules always win.
+    /// Returns the depth to restore with [`pop_to`].
+    pub fn push_global(&mut self) -> usize {
+        let mark = self.layers.len();
+        if !self.global {
+            return mark;
+        }
+        let Some(path) = global_ignore_path() else {
+            return mark;
+        };
+        let mut rules = Vec::new();
+        read_rules(&path, &mut rules);
+        if !rules.is_empty() {
+            self.layers.push(Arc::new(Layer {
+                base: String::new(),
+                rules,
+            }));
+        }
+        mark
+    }
+
+    /// Stack the rules of one explicit ignore file (`--ignore-file`). Its patterns are
+    /// read the way git reads `.gitignore`: relative to the walk root, `!` re-including,
+    /// and a leading `/` anchoring at the root. With `case_insensitive` every pattern
+    /// matches without case, as `--ignore-file-case-insensitive` asks.
+    pub fn push_file(&mut self, path: &Path, case_insensitive: bool) -> Result<(), String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut rules = Vec::new();
+        for line in text.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            let glob = Glob::new_with(t, case_insensitive)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            rules.push(glob);
+        }
+        if !rules.is_empty() {
+            self.layers.push(Arc::new(Layer {
+                base: String::new(),
+                rules,
+            }));
+        }
+        Ok(())
     }
 
     /// Stack the rule files of the directories above `root`, so a scan started inside a
@@ -429,6 +484,97 @@ pub fn ancestors(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The path of git's global excludes file: `core.excludesFile` from the user's git config
+/// when it is set, and otherwise git's own default, `$XDG_CONFIG_HOME/git/ignore`.
+///
+/// Only the two per-user config files are read, in git's order (`~/.gitconfig`, then
+/// `$XDG_CONFIG_HOME/git/config`), and only the `[core]` section's `excludesFile` key. A
+/// value starting with `~/` is expanded against the home directory; `~user/` is not, since
+/// resolving another user's home is not something this tool does.
+pub fn global_ignore_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|h| !h.is_empty()));
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| PathBuf::from(h).join(".config")));
+    if let Some(configured) =
+        git_config_value("core", "excludesfile", home.as_deref(), xdg.as_deref())
+    {
+        return Some(expand_home(&configured, home.as_deref()));
+    }
+    xdg.map(|d| d.join("git").join("ignore"))
+}
+
+/// Expand a leading `~/` against `home`; anything else is taken as it is.
+fn expand_home(value: &str, home: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = home {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(value)
+}
+
+/// One key out of the per-user git config files, lowercased and trimmed. The last file that
+/// names the key wins, which is git's own precedence. Comment lines and sections other than
+/// `section` are ignored; a value is returned without quotes or a trailing comment.
+fn git_config_value(
+    section: &str,
+    key: &str,
+    home: Option<&std::ffi::OsStr>,
+    xdg: Option<&Path>,
+) -> Option<String> {
+    let mut files = Vec::new();
+    if let Some(home) = home {
+        files.push(PathBuf::from(home).join(".gitconfig"));
+    }
+    if let Some(xdg) = xdg {
+        files.push(xdg.join("git").join("config"));
+    }
+    let mut answer = None;
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let mut in_section = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            if line.starts_with('[') {
+                let name = line
+                    .trim_start_matches('[')
+                    .split(']')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase();
+                in_section = name == section;
+                continue;
+            }
+            if !in_section {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            if k.trim().to_ascii_lowercase() != key {
+                continue;
+            }
+            let v = v.trim();
+            let v = v.split(['#', ';']).next().unwrap_or(v).trim();
+            let v = v.trim_matches('"');
+            if !v.is_empty() {
+                answer = Some(v.to_string());
+            }
+        }
+    }
+    answer
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +673,90 @@ mod tests {
         );
         assert!(!r.is_ignored("a.txt", false));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    fn write(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn explicit_ignore_file_excludes_and_reincludes() {
+        let dir = tmp("ignore-file");
+        let path = write(&dir, "extra.ignore", "*.log\n!keep.log\nbuild/\n");
+        let mut rules = IgnoreRules::new(false);
+        rules.push_file(&path, false).unwrap();
+        assert!(rules.is_ignored("app.log", false));
+        assert!(rules.is_ignored("deep/nested/app.log", false));
+        assert!(!rules.is_ignored("keep.log", false));
+        assert!(rules.is_ignored("build", true));
+        assert!(!rules.is_ignored("src/main.rs", false));
+    }
+
+    #[test]
+    fn explicit_ignore_file_can_match_without_case() {
+        let dir = tmp("ignore-file-case");
+        let path = write(&dir, "extra.ignore", "*.LOG\n");
+        let mut folded = IgnoreRules::new(false);
+        folded.push_file(&path, true).unwrap();
+        assert!(folded.is_ignored("app.log", false));
+        let mut exact = IgnoreRules::new(false);
+        exact.push_file(&path, false).unwrap();
+        assert!(!exact.is_ignored("app.log", false));
+        assert!(exact.is_ignored("app.LOG", false));
+    }
+
+    #[test]
+    fn a_missing_ignore_file_is_an_error() {
+        let dir = tmp("ignore-file-missing");
+        let mut rules = IgnoreRules::new(false);
+        let err = rules
+            .push_file(&dir.join("nope.ignore"), false)
+            .unwrap_err();
+        assert!(err.contains("nope.ignore"), "{err}");
+    }
+
+    #[test]
+    fn global_excludes_file_comes_from_the_git_config() {
+        let home = tmp("git-home");
+        fs::create_dir_all(home.join(".config/git")).unwrap();
+        write(
+            &home,
+            ".gitconfig",
+            "[user]\n\tname = nobody\n[core]\n\texcludesFile = ~/.config/git/ignore\n",
+        );
+        let home_os = home.as_os_str();
+        let got = git_config_value("core", "excludesfile", Some(home_os), None);
+        assert_eq!(got.as_deref(), Some("~/.config/git/ignore"));
+        assert_eq!(
+            expand_home("~/.config/git/ignore", Some(home_os)),
+            home.join(".config/git/ignore")
+        );
+        assert_eq!(
+            expand_home("/etc/gitignore", Some(home_os)),
+            PathBuf::from("/etc/gitignore")
+        );
+    }
+
+    #[test]
+    fn git_config_ignores_other_sections_and_comments() {
+        let home = tmp("git-home-2");
+        write(
+            &home,
+            ".gitconfig",
+            "[alias]\n\texcludesFile = wrong\n[core] # the real one\n\texcludesFile = \"/tmp/x\" # trailing\n",
+        );
+        let got = git_config_value("core", "excludesfile", Some(home.as_os_str()), None);
+        assert_eq!(got.as_deref(), Some("/tmp/x"));
+    }
+
+    #[test]
+    fn the_global_layer_is_off_when_asked() {
+        let mut rules = IgnoreRules::new(false);
+        rules.set_global(false);
+        let before = rules.mark();
+        assert_eq!(rules.push_global(), before);
+        assert_eq!(rules.layers.len(), before);
     }
 }

@@ -112,6 +112,12 @@ pub struct SearchOptions {
     pub no_ignore_dot: bool,
     /// Do not stack the rule files of a root's parent directories.
     pub no_ignore_parent: bool,
+    /// Leave git's global excludes file unread (`--no-ignore-global`).
+    pub no_ignore_global: bool,
+    /// Explicit ignore files from `--ignore-file`, in the order given.
+    pub ignore_files: Vec<String>,
+    /// Read the `--ignore-file` patterns without case (`--ignore-file-case-insensitive`).
+    pub ignore_file_icase: bool,
     /// Follow symbolic links, refusing to walk a directory twice (`--follow`).
     pub follow: bool,
     /// Let a match span lines (`-U`): the file is searched whole rather than line by line.
@@ -220,6 +226,9 @@ impl SearchOptions {
             no_ignore_vcs: false,
             no_ignore_dot: false,
             no_ignore_parent: false,
+            no_ignore_global: false,
+            ignore_files: Vec::new(),
+            ignore_file_icase: false,
             follow: false,
             multiline: false,
             search_zip: false,
@@ -352,6 +361,15 @@ struct JobOut {
 fn walk_rules(o: &SearchOptions) -> Arc<IgnoreRules> {
     let mut rules = IgnoreRules::new(!o.no_ignore);
     rules.set_sources(!o.no_ignore_vcs, !o.no_ignore_dot, !o.no_ignore_parent);
+    rules.set_global(!o.no_ignore_global);
+    // The global file and the explicit ones are one layer stack shared by every directory,
+    // so they are read once here rather than per walk step.
+    rules.push_global();
+    for path in &o.ignore_files {
+        rules
+            .push_file(std::path::Path::new(path), o.ignore_file_icase)
+            .expect("--ignore-file was validated at parse time");
+    }
     rules
         .add_globs_with_case(&o.globs, &o.iglobs)
         .and_then(|()| rules.add_filters(&o.type_globs))

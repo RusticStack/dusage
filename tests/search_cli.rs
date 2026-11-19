@@ -50,6 +50,15 @@ fn run(args: &[&str], root: &Path) -> Output {
     c.output().unwrap()
 }
 
+fn run_with_env(args: &[&str], root: &Path, env: &[(&str, &str)]) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_dusage"));
+    c.args(args).arg(root);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.output().unwrap()
+}
+
 fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
@@ -1837,4 +1846,90 @@ fn no_heading_is_the_last_spelling_that_wins() {
         &dir,
     ));
     assert_eq!(on, format!("{a}\n1:HIT a\n\n{b}\n1:HIT b\n"));
+}
+
+#[test]
+fn an_explicit_ignore_file_applies_and_can_fold_case() {
+    let f = Fixture::new("ignore-file");
+    let extra = f.root.join("extra.ignore");
+    fs::write(&extra, "README.md\n").unwrap();
+    let base = run(&["search", "-i", "needle"], &f.root);
+    assert!(stdout(&base).contains("README.md"), "{}", stdout(&base));
+    let extra_s = extra.to_str().unwrap();
+    let o = run(
+        &["search", "-i", "needle", "--ignore-file", extra_s],
+        &f.root,
+    );
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(!stdout(&o).contains("README.md"), "{}", stdout(&o));
+
+    fs::write(&extra, "readme.md\n").unwrap();
+    let exact = run(
+        &["search", "-i", "needle", "--ignore-file", extra_s],
+        &f.root,
+    );
+    assert!(stdout(&exact).contains("README.md"), "{}", stdout(&exact));
+    let folded = run(
+        &[
+            "search",
+            "-i",
+            "needle",
+            "--ignore-file",
+            extra_s,
+            "--ignore-file-case-insensitive",
+        ],
+        &f.root,
+    );
+    assert!(
+        !stdout(&folded).contains("README.md"),
+        "{}",
+        stdout(&folded)
+    );
+}
+
+#[test]
+fn a_missing_ignore_file_is_misuse() {
+    let f = Fixture::new("ignore-file-missing");
+    let missing = f.root.join("no-such.ignore");
+    let o = run(
+        &[
+            "search",
+            "needle",
+            "--ignore-file",
+            missing.to_str().unwrap(),
+        ],
+        &f.root,
+    );
+    assert_eq!(code(&o), 2);
+    assert!(stderr(&o).contains("no-such.ignore"), "{}", stderr(&o));
+}
+
+#[test]
+fn the_global_excludes_file_is_read_and_can_be_switched_off() {
+    let f = Fixture::new("global-excludes");
+    let home = f.root.parent().unwrap().join("home");
+    fs::create_dir_all(home.join(".config/git")).unwrap();
+    fs::write(home.join(".config/git/ignore"), "tests/\n").unwrap();
+    let home_s = home.to_str().unwrap();
+    let config_s = home.join(".config").to_str().unwrap().to_string();
+    // `XDG_CONFIG_HOME` wins over the home directory when it is set, and a CI runner sets
+    // it, so the test points both at the same tree.
+    let env = [
+        ("HOME", home_s),
+        ("USERPROFILE", home_s),
+        ("XDG_CONFIG_HOME", config_s.as_str()),
+    ];
+    let o = run_with_env(&["search", "-n", "needle"], &f.root, &env);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(!stdout(&o).contains("it.rs"), "{}", stdout(&o));
+    let o = run_with_env(
+        &["search", "-n", "needle", "--no-ignore-global"],
+        &f.root,
+        &env,
+    );
+    assert!(
+        stdout(&o).contains("it.rs:1:needle in a test"),
+        "{}",
+        stdout(&o)
+    );
 }
