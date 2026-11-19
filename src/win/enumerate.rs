@@ -593,7 +593,9 @@ mod stat_tests {
         );
         assert_eq!(std::mem::offset_of!(FileIdExtdDirInfo, last_write_time), 24);
         assert_eq!(std::mem::offset_of!(FileIdExtdDirInfo, change_time), 32);
-        assert_eq!(std::mem::offset_of!(FileIdExtdDirInfo, file_id), 56);
+        // Attrs, name length, EA size and the reparse tag fill 56..72, then the id.
+        assert_eq!(std::mem::offset_of!(FileIdExtdDirInfo, file_attributes), 56);
+        assert_eq!(std::mem::offset_of!(FileIdExtdDirInfo, file_id), 72);
         // FILE_BASIC_INFO is 4 ticks and an attribute word, 40 bytes with its padding.
         assert_eq!(std::mem::offset_of!(BasicInfo, file_attributes), 32);
         assert_eq!(std::mem::size_of::<BasicInfo>(), 40);
