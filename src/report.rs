@@ -285,6 +285,11 @@ pub fn fmt_time(t: Option<SystemTime>) -> String {
     format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}")
 }
 
+/// The same inverse, for `find -ls`, whose time column is not ISO.
+pub fn civil_from_days_for_ls(days: i64) -> (i64, u32, u32) {
+    civil_from_days(days)
+}
+
 /// Howard Hinnant's days-from-civil inverse: days since 1970-01-01 to (y, m, d).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;

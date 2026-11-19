@@ -1934,8 +1934,10 @@ fn ls_line(entry: &findexpr::Entry, ids: &dyn Ids) -> String {
     let group = ids
         .group_of(entry.gid)
         .unwrap_or_else(|| entry.gid.to_string());
-    format!(
-        "{:>9} {:>4} {} {:>3} {:<8} {:<8} {:>8} {} {}",
+    // A symlink prints what it points at, the way find and ls do, so the line says where a
+    // walk stopped rather than only that it stopped.
+    let mut line = format!(
+        "{:>9} {:>6} {} {:>3} {:<8} {:<8} {:>8} {} {}",
         entry.inode,
         entry.blocks.div_ceil(2),
         ls_mode(entry.mode, entry.kind),
@@ -1943,9 +1945,46 @@ fn ls_line(entry: &findexpr::Entry, ids: &dyn Ids) -> String {
         user,
         group,
         entry.size,
-        report::fmt_time(Some(entry.mtime)),
+        ls_time(entry.mtime),
         entry.path
-    )
+    );
+    if let Some(target) = &entry.target {
+        line.push_str(" -> ");
+        line.push_str(target);
+    }
+    line
+}
+
+/// `Nov 19 21:41`, or `Nov 19  2025` for a file more than six months from now, which is the
+/// shape `ls -l` and `find -ls` print. Times are UTC here, as everywhere else in this tool.
+fn ls_time(t: SystemTime) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(secs);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (y, m, d) = crate::report::civil_from_days_for_ls(days);
+    let month = MONTHS[(m as usize).saturating_sub(1).min(11)];
+    // Six months in seconds is the ls convention, with a day of slack for a future time.
+    let recent = (now - secs).abs() < 15_552_000;
+    if recent {
+        format!(
+            "{} {:>2} {:02}:{:02}",
+            month,
+            d,
+            rem / 3600,
+            (rem % 3600) / 60
+        )
+    } else {
+        format!("{} {:>2}  {:04}", month, d, y)
+    }
 }
 
 /// `drwxr-xr-x` and friends, the way `find -ls` prints a mode. `%M` in `-printf` is rendered

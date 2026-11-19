@@ -476,6 +476,8 @@ impl Test {
             | Test::Unsupported(_) => {}
             // Without `-follow` the target's kind says what the link points at.
             Test::XType(_) => out.link |= !settings.follow,
+            // The target text itself, which only `-lname` reads for its own sake.
+            Test::LinkGlob(_) => out.link = true,
             Test::Size { .. }
             | Test::Empty
             | Test::Perm(_)
@@ -505,6 +507,8 @@ enum Test {
         path: bool,
     },
     Regex(Box<Regex>),
+    /// `-lname`/`-ilname`: the text a symlink points at.
+    LinkGlob(Glob),
     Type(Kind),
     XType(Kind),
     Size {
@@ -553,7 +557,11 @@ impl Action {
     fn needs(&self, out: &mut Needs) {
         match self {
             Action::Print { .. } | Action::Prune | Action::Quit | Action::Exec(_) => {}
-            Action::Ls => out.stat = true,
+            // The line ends with what a symlink points at, as find's does.
+            Action::Ls => {
+                out.stat = true;
+                out.link = true;
+            }
             Action::Printf(format) => {
                 for piece in &format.pieces {
                     let Piece::Field { conv, .. } = piece else {
@@ -1226,6 +1234,11 @@ impl Parser<'_> {
                 let glob = Glob::new(&self.value(tok)?, fold)?;
                 return Ok(Node::test(Test::Glob { glob, path: false }));
             }
+            "-lname" | "-ilname" => {
+                let fold = tok == "-ilname";
+                let glob = Glob::new(&self.value(tok)?, fold)?;
+                return Ok(Node::test(Test::LinkGlob(glob)));
+            }
             "-path" | "-wholename" | "-ipath" | "-iwholename" => {
                 let fold = tok.starts_with("-i");
                 let glob = Glob::new(&self.value(tok)?, fold)?;
@@ -1774,6 +1787,7 @@ impl Test {
     fn holds(&self, e: &Entry, ctx: &Ctx, settings: &Settings) -> Result<bool, String> {
         Ok(match self {
             Test::Glob { glob, path } => glob.matches(if *path { e.path } else { e.name }),
+            Test::LinkGlob(glob) => e.target.is_some_and(|t| glob.matches(t)),
             Test::Regex(re) => re.is_match(e.path.as_bytes()),
             Test::Type(kind) => e.kind == *kind,
             Test::XType(kind) => {
