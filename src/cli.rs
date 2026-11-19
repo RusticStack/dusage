@@ -47,49 +47,37 @@ impl Args {
                 a.positionals.push(tok);
                 continue;
             }
-            // A bundle of short flags: `-in`, `-ilw`, and `-inm5` where the last one takes a
-            // value. Anything with a value flag not at the end is rejected by the expansion.
-            if !tok.starts_with("--") && tok.len() > 2 && !value_flags.contains(&&tok[..2]) {
-                let mut rest = tok.as_str();
-                while let Some(head) = rest.get(..2) {
-                    let short = &rest[1..2];
-                    let flag = format!("-{short}");
+            // A cluster of short flags, read left to right: each character is a boolean flag
+            // of its own until one that takes a value swallows the rest of the cluster as its
+            // value. So `-in` is `-i -n`, `-A2` is `-A 2` and `-inA2` is `-i -n -A 2`, as in
+            // ripgrep. A character that is neither is an error naming the whole argument.
+            if !tok.starts_with("--") && tok.chars().count() > 2 {
+                let body = &tok[1..];
+                for (at, c) in body.char_indices() {
+                    let flag = format!("-{c}");
                     if bool_flags.contains(&flag.as_str()) {
                         if !a.bools.contains(&flag) {
                             a.bools.push(flag);
                         }
-                        rest = &rest[2..];
-                        if rest.is_empty() {
-                            break;
-                        }
                         continue;
                     }
                     if value_flags.contains(&flag.as_str()) {
-                        let v = match rest.get(2..) {
-                            Some(v) if !v.is_empty() => v.to_string(),
-                            _ => it
-                                .next()
-                                .ok_or_else(|| format!("option {flag} needs a value"))?,
+                        let rest = &body[at + c.len_utf8()..];
+                        let v = if rest.is_empty() {
+                            it.next()
+                                .ok_or_else(|| format!("option {flag} needs a value"))?
+                        } else {
+                            rest.to_string()
                         };
                         a.values.entry(flag).or_default().push(v);
-                        rest = "";
                         break;
                     }
-                    return Err(format!("unknown option: -{short} (in {head}...)"));
+                    return Err(format!("unknown option: {tok}"));
                 }
                 continue;
             }
             let (name, inline) = match tok.split_once('=') {
                 Some((n, v)) if n.starts_with("--") => (n.to_string(), Some(v.to_string())),
-                // An attached short value: `-C2`, `-m5`, `-g*.rs`, `-tjs`.
-                _ if !tok.starts_with("--") && tok.len() > 2 => {
-                    let head = &tok[..2];
-                    if value_flags.contains(&head) {
-                        (head.to_string(), Some(tok[2..].to_string()))
-                    } else {
-                        (tok.clone(), None)
-                    }
-                }
                 _ => (tok.clone(), None),
             };
             if value_flags.contains(&name.as_str()) {
@@ -386,6 +374,27 @@ mod tests {
         assert!(Args::parse(s(&["--age"]), &["--age"], &[]).is_err());
         assert!(Args::parse(s(&["--dry=1"]), &[], &["--dry"]).is_err());
         assert!(Args::parse(s(&["--=x"]), &[], &[]).is_err());
+    }
+
+    #[test]
+    fn short_flags_bundle() {
+        let a = Args::parse(
+            s(&["-in", "-Fi", "-A2", "-inA2", "-nm1", "-inA", "3", "x"]),
+            &["-A", "-m", "-g"],
+            &["-i", "-n", "-c", "-F"],
+        )
+        .unwrap();
+        for flag in ["-i", "-n", "-F"] {
+            assert!(a.flag(flag), "{flag} came out of a cluster");
+        }
+        assert_eq!(a.values("-A"), &s(&["2", "2", "3"])[..]);
+        assert_eq!(a.values("-m"), &s(&["1"])[..]);
+        assert_eq!(a.positionals(), &s(&["x"])[..]);
+        // A character that is not a flag of ours names the whole argument.
+        let e = Args::parse(s(&["-inQ"]), &[], &["-i", "-n"]).unwrap_err();
+        assert!(e.contains("-inQ"), "{e}");
+        let e = Args::parse(s(&["-cx"]), &[], &["-c"]).unwrap_err();
+        assert!(e.contains("-cx"), "{e}");
     }
 
     #[test]

@@ -610,13 +610,14 @@ fn pattern_files_and_bundled_short_flags() {
     let out = stdout(&o);
     assert!(out.contains("util.rs:1"), "{out}");
 
-    // `-F` makes every pattern in the file a literal.
-    let wild = f.root.join("wild.txt");
-    fs::write(&wild, "need.le\n").unwrap();
+    // `-F` makes every pattern in the file a literal. The file lives outside the tree, so a
+    // literal pattern is not found in the pattern file itself.
+    let wild = f.root.parent().unwrap().join("wild.txt");
+    fs::write(&wild, "nee.le\n").unwrap();
     let o = run(&["search", "-f", wild.to_str().unwrap()], &f.root);
     assert_eq!(code(&o), 0, "a '.' is a wildcard here");
     let o = run(&["search", "-F", "-f", wild.to_str().unwrap()], &f.root);
-    assert_eq!(code(&o), 1, "-F is a literal, so 'need.le' never matches");
+    assert_eq!(code(&o), 1, "-F is a literal, so 'nee.le' never matches");
 
     // A pattern file with nothing in it is an error, not a silent empty pattern.
     let empty = f.root.join("empty.txt");
@@ -2490,4 +2491,191 @@ fn find_expression_execdir_runs_in_the_entry_directory() {
     assert!(out.lines().all(|l| l.starts_with("E ./")), "{out}");
     assert!(!out.contains("sub"), "the path is a bare name: {out}");
     assert_eq!(out.lines().count(), 3, "{out}");
+}
+
+/// A cluster of short flags has to mean exactly what the same flags spelled apart mean, in the
+/// forms ripgrep accepts: `-in`, `-inA2`, `-nm1`, and a value flag ending the cluster.
+#[test]
+fn short_flags_bundle_the_way_ripgrep_bundles_them() {
+    let f = Fixture::new("bundle");
+    fs::write(
+        f.root.join("case.txt"),
+        "needle\nsecond needle\nNEEDLE upper\nthird\nfourth\n",
+    )
+    .unwrap();
+    for (bundled, separate) in [
+        (["-in"].as_slice(), ["-i", "-n"].as_slice()),
+        (["-inA2"].as_slice(), ["-i", "-n", "-A", "2"].as_slice()),
+        (["-nm1"].as_slice(), ["-n", "-m", "1"].as_slice()),
+        (["-inm1"].as_slice(), ["-i", "-n", "-m", "1"].as_slice()),
+        (["-inB1"].as_slice(), ["-i", "-n", "-B", "1"].as_slice()),
+        (["-Fi"].as_slice(), ["-F", "-i"].as_slice()),
+    ] {
+        let mut one = vec!["search"];
+        one.extend(bundled);
+        one.push("needle");
+        let mut two = vec!["search"];
+        two.extend(separate);
+        two.push("needle");
+        let got = run(&one, &f.root);
+        let want = run(&two, &f.root);
+        assert_eq!(
+            (code(&got), stdout(&got)),
+            (code(&want), stdout(&want)),
+            "{bundled:?} does not mean {separate:?}: {}",
+            stderr(&got)
+        );
+        assert_eq!(code(&got), 0, "{bundled:?} found nothing");
+    }
+    // The flag at the end of a cluster was applied, not silently dropped.
+    let out = stdout(&run(&["search", "-in", "needle"], &f.root));
+    assert!(out.contains("case.txt:1:needle"), "{out}");
+    assert!(out.contains("case.txt:3:NEEDLE upper"), "{out}");
+    // A value flag that ends the cluster takes the next argument as its value.
+    let tail = run(&["search", "-inA", "2", "needle"], &f.root);
+    let spaced = run(&["search", "-i", "-n", "-A", "2", "needle"], &f.root);
+    assert_eq!(stdout(&tail), stdout(&spaced));
+    // A character that is not one of our flags is an error naming the whole cluster.
+    let o = run(&["search", "-inQ", "needle"], &f.root);
+    assert_eq!(code(&o), 2);
+    assert!(stderr(&o).contains("-inQ"), "{}", stderr(&o));
+}
+
+/// The option names in the `find` help's OPTIONS block: the flag column of each line, with
+/// aliases split apart and `--color[=WHEN]` reduced to its name.
+fn find_help_flags(help: &str) -> Vec<String> {
+    let options = help
+        .split_once("OPTIONS:")
+        .map(|(_, rest)| rest)
+        .unwrap_or("");
+    let mut flags = Vec::new();
+    for line in options.lines() {
+        let Some((column, _)) = line.trim_start().split_once("  ") else {
+            continue;
+        };
+        for word in column.split_whitespace() {
+            if let Some(name) = word.strip_prefix('-') {
+                flags.push(format!("-{}", name.trim_end_matches(',')));
+            }
+        }
+    }
+    flags
+}
+
+/// Every flag `find --help` names is one the parser accepts. The list comes out of the help
+/// text, so a flag added to one without the other fails here.
+#[test]
+fn every_flag_the_find_help_names_is_accepted() {
+    let o = Command::new(env!("CARGO_BIN_EXE_dusage"))
+        .args(["find", "--help"])
+        .output()
+        .unwrap();
+    let help = stdout(&o);
+    let flags = find_help_flags(&help);
+    assert!(flags.len() > 20, "the help parser found {flags:?}");
+    for flag in &flags {
+        // A value flag eats the dummy and a boolean one leaves it as a starting point, so
+        // either way the parser gets a well-formed command line, and `--help` answers before
+        // any of the values are used.
+        let o = Command::new(env!("CARGO_BIN_EXE_dusage"))
+            .args(["find", flag, "dummy", "--help"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            code(&o),
+            0,
+            "{flag} is in the find help but the parser refuses it: {}",
+            stderr(&o)
+        );
+        assert!(!stdout(&o).is_empty(), "{flag} printed nothing");
+    }
+    // find matches paths, not contents, so the content-search flags are gone from both.
+    for gone in [
+        "--pre",
+        "--pre-glob",
+        "--binary-files",
+        "-I",
+        "-d",
+        "--directories",
+    ] {
+        assert!(
+            !flags.iter().any(|f| f == gone),
+            "{gone} is still in the find help"
+        );
+        let o = Command::new(env!("CARGO_BIN_EXE_dusage"))
+            .args(["find", ".", gone, "x"])
+            .output()
+            .unwrap();
+        assert_eq!(code(&o), 2, "{gone} should be refused by find, not ignored");
+    }
+    // The glob-narrowing spellings the help names do narrow a path search.
+    let (_f, dir) = expr_tree("find_glob_flags");
+    let o = run(&["find", "--include", "*.rs", "*"], &dir);
+    let out = stdout(&o);
+    assert!(out.contains("a.rs"), "{out}");
+    assert!(
+        !out.contains("b.md"),
+        "--include '*.rs' kept a markdown file: {out}"
+    );
+    let o = run(&["find", "--exclude", "*.md", "*"], &dir);
+    assert!(!stdout(&o).contains("b.md"), "{}", stdout(&o));
+    let o = run(&["find", "--exclude-dir", "sub", "*"], &dir);
+    let out = stdout(&o);
+    assert!(
+        !out.contains("c.rs"),
+        "--exclude-dir sub kept sub/c.rs: {out}"
+    );
+    let o = run(&["find", "--iglob", "*.TXT", "*"], &dir);
+    assert!(stdout(&o).contains("d.txt"), "{}", stdout(&o));
+    // They carry into an expression walk too, which the help promises.
+    let o = find_at(&dir, &["-name", "*", "--exclude-dir", "cache"]);
+    let out = stdout(&o);
+    assert!(!out.contains("buried.rs"), "{out}");
+    assert!(out.contains("a.rs"), "{out}");
+}
+
+/// `-F` means "this text is literal" however the pattern arrives: positionally, through `-e`,
+/// through `-f`, or several of them at once.
+#[test]
+fn fixed_strings_is_literal_for_every_pattern_source() {
+    let f = Fixture::new("fixedpatterns");
+    let hay = f.root.join("dots.txt");
+    fs::write(&hay, "a.b\naxb\nA.B\na+b\n(x)\n").unwrap();
+    let pats = f.root.parent().unwrap().join("pats.txt");
+    fs::write(&pats, "a.b\n").unwrap();
+
+    let found = |args: &[&str]| -> String { stdout(&run(args, &f.root)) };
+    // The reported defect: `-e` escaped the pattern and the literal matcher searched for the
+    // escape itself.
+    for args in [
+        ["search", "-F", "-e", "a.b"].as_slice(),
+        ["search", "-F", "a.b"].as_slice(),
+        ["search", "-F", "-f", pats.to_str().unwrap()].as_slice(),
+        ["search", "-F", "-e", "a.b", "-f", pats.to_str().unwrap()].as_slice(),
+        ["search", "-F", "-e", "a.b", "-e", "a+b"].as_slice(),
+        ["search", "-F", "--line-regexp", "a.b"].as_slice(),
+    ] {
+        let out = found(args);
+        assert!(
+            out.contains("a.b"),
+            "{args:?} lost the literal match: {out}"
+        );
+        assert!(
+            !out.contains("axb"),
+            "{args:?} let '.' match any byte: {out}"
+        );
+    }
+    // Metacharacters stay themselves: `a+b` is not a repetition and `(x)` is not a group.
+    let out = found(&["search", "-F", "-e", "a+b"]);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(out.trim_end().ends_with(":a+b"), "{out}");
+    let out = found(&["search", "-F", "-e", "(x)"]);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(out.trim_end().ends_with(":(x)"), "{out}");
+    // Without `-F` the same pattern is still a regex, so the flag is what decides.
+    let out = found(&["search", "-e", "a.b"]);
+    assert_eq!(out.lines().count(), 3, "'.' matches any byte here: {out}");
+    // Case folding composes with it, and `-F` still respects `-i`.
+    let out = found(&["search", "-F", "-i", "-e", "a.b"]);
+    assert_eq!(out.lines().count(), 2, "{out}");
 }

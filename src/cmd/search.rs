@@ -172,8 +172,9 @@ form runs once per directory. An expression holding both -exec and -execdir runs
 -exec way: the parsed request carries the command and the terminator, not which predicate
 asked for it.
 
-The options that describe the walk carry over: --hidden, --no-ignore and friends, -g/--glob,
--t/--type, --ext, --max-depth, --mindepth, -x, --follow and --allow-exec. --files, --dirs and
+The options that describe the walk carry over: --hidden, --no-ignore and friends, -g/--glob
+and grep's --include/--exclude/--exclude-dir/--iglob, -t/--type, --ext, --max-depth,
+--mindepth, -x, --follow and --allow-exec. --files, --dirs and
 --empty become the matching test. The options that describe the glob itself are refused with
 a message naming the expression spelling (-F, -i, --name, --full-path, --size, --older,
 --newer, --newermt, --newerat, --newerct, -Z, --long, --sort, --sortr, --json), because
@@ -202,12 +203,7 @@ OPTIONS:
         --include PATTERN  grep's spelling of a narrowing glob; repeatable
         --exclude PATTERN  grep's spelling of an exclusion glob; repeatable
         --exclude-dir PATTERN  exclude directories by this glob; repeatable
-        --pre COMMAND          run COMMAND PATH and search its output
-        --pre-glob PATTERN     only run --pre on files matching this glob; repeatable
-        --binary-files T    binary, text or without-match: what a NUL-carrying file is
-    -I                     the same as --binary-files without-match
-    -d, --directories A    recurse (default) or skip: whether to descend into directories
-        --iglob PATTERN    the same, matched without case
+        --iglob PATTERN    the same as --include, matched without case; repeatable
     --sort KEY             result order: path (default), none, modified, accessed, created
                            (each oldest first); ignored by an expression walk, which prints
                            in find's order
@@ -230,6 +226,10 @@ OPTIONS:
     --color[=WHEN]         WHEN is always, never or auto (default auto)
     -h, --help             this text
     -V, --version          print the version
+
+find matches paths, not contents, so it has no content-search flags: --binary-files, -I,
+-d/--directories and the --pre pair describe how bytes are read, and they are unknown options
+here (`dusage search` takes them).
 
 Exit status: 0 when something matched, 1 when nothing did, 2 on an error.";
 
@@ -285,37 +285,37 @@ fn color_enabled(mode: Option<&str>) -> bool {
     }
 }
 
-/// One pattern that matches any of `patterns`, for a repeated `-e`. Literal patterns are
-/// escaped individually; the rest are wrapped so a top-level `|` in one cannot leak.
+/// One pattern that matches any of `patterns`, for a repeated `-e`. The rest are wrapped so a
+/// top-level `|` in one cannot leak. A single pattern is handed over as its own text, so a
+/// lone `-F` literal reaches the literal matcher unescaped; only the joined form, which the
+/// engine reads as a regex, escapes a literal.
 fn alternation(patterns: &[String], fixed: bool) -> String {
-    let escape = |p: &str| -> String {
-        let mut out = String::with_capacity(p.len() + 4);
-        for c in p.chars() {
-            if matches!(
-                c,
-                '\\' | '^' | '$' | '.' | '[' | ']' | '{' | '}' | '(' | ')' | '|' | '*' | '+' | '?'
-            ) {
-                out.push('\\');
-            }
-            out.push(c);
-        }
-        out
-    };
-    if patterns.len() == 1 {
-        return if fixed {
-            escape(&patterns[0])
-        } else {
-            patterns[0].clone()
-        };
+    match patterns {
+        [one] => one.clone(),
+        _ => patterns
+            .iter()
+            .map(|p| {
+                let body = if fixed { escape_literal(p) } else { p.clone() };
+                format!("(?:{body})")
+            })
+            .collect::<Vec<_>>()
+            .join("|"),
     }
-    patterns
-        .iter()
-        .map(|p| {
-            let body = if fixed { escape(p) } else { p.clone() };
-            format!("(?:{body})")
-        })
-        .collect::<Vec<_>>()
-        .join("|")
+}
+
+/// `text` with every regex metacharacter escaped, so a regex engine reads it as itself.
+fn escape_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 4);
+    for c in text.chars() {
+        if matches!(
+            c,
+            '\\' | '^' | '$' | '.' | '[' | ']' | '{' | '}' | '(' | ')' | '|' | '*' | '+' | '?'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The patterns in one `-f` file: one per line, blank lines skipped, CRLF accepted.
@@ -828,12 +828,36 @@ fn take_dash_zero(raw: &mut Vec<String>) -> bool {
     seen
 }
 
+/// The walk's glob filters. `-g` is an override filter (ripgrep semantics: it also switches
+/// the ignore rules off), and grep's spellings are the same filter seen through grep:
+/// `--include` narrows, `--exclude` is its negation, `--exclude-dir` adds the trailing slash
+/// that makes a pattern match a directory only, and `--iglob` is `--include` without case, an
+/// override like `-g`. Every front end reads them here, so the two `find` forms and `search`
+/// agree about which paths exist for them.
+fn walk_globs(a: &Args) -> (Vec<String>, Vec<String>) {
+    let mut globs: Vec<String> = Vec::new();
+    for g in ["-g", "--glob", "--include"] {
+        globs.extend(a.values(g).iter().cloned());
+    }
+    for g in a.values("--exclude") {
+        globs.push(format!("!{g}"));
+    }
+    for g in a.values("--exclude-dir") {
+        globs.push(format!("!{g}/"));
+    }
+    (globs, a.values("--iglob").to_vec())
+}
+
 /// The flags `dusage find` takes before its pattern or expression, and the ones that carry
 /// a value. The expression splitter reads the same tables, so a flag's value is never
 /// mistaken for the start of an expression.
 const FIND_VALUE_FLAGS: &[&str] = &[
     "-g",
     "--glob",
+    "--include",
+    "--exclude",
+    "--exclude-dir",
+    "--iglob",
     "-t",
     "--type",
     "--ext",
@@ -938,6 +962,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         return run_find_expression(&a, &found.expr, &found.roots, &types, color_mode.as_deref());
     }
     let basic = a.flag("-G") || a.flag("--basic-regexp");
+    let fixed_strings = a.flag("-F") || a.flag("--fixed-strings");
     let mut multi_pattern = false;
     let mut given: Vec<String> = a.values("-e").to_vec();
     given.extend(a.values("--regexp").iter().cloned());
@@ -951,7 +976,11 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let (pattern_text, paths) = if !from_flags {
         match a.positionals().split_first() {
             Some((p, rest)) => {
-                let text = if basic { bre_to_ere(p) } else { p.clone() };
+                let text = if basic && !fixed_strings {
+                    bre_to_ere(p)
+                } else {
+                    p.clone()
+                };
                 (text, rest.to_vec())
             }
             None => return Err("missing <pattern>".to_string().into()),
@@ -962,16 +991,16 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         }
         // `-e` and `-f` may repeat: every pattern is an alternative, as in grep and rg. A
         // basic-regexp pattern is translated before they are joined, so the `|` that joins
-        // them stays an operator.
-        if basic {
+        // them stays an operator; `-F` leaves every pattern exactly as it was given, and the
+        // escaping of the joined form happens once, in `alternation`.
+        if basic && !fixed_strings {
             for p in given.iter_mut() {
                 *p = bre_to_ere(p);
             }
         }
-        let fixed = a.flag("-F") || a.flag("--fixed-strings");
         // Several literals become one escaped regex, so the fixed-string path is off.
         multi_pattern = given.len() > 1;
-        (alternation(&given, fixed), a.positionals().to_vec())
+        (alternation(&given, fixed_strings), a.positionals().to_vec())
     };
     if pattern_text.is_empty() {
         return Err("empty pattern".to_string().into());
@@ -985,13 +1014,24 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 .to_string(),
         ));
     }
-    // `--line-regexp` asks for the whole line, which is an anchor pair around whatever the
-    // pattern is: an alternation has to be grouped so the anchors cover all of it.
-    let mut pattern_text = if a.flag("--line-regexp") {
-        format!("^(?:{pattern_text})$")
+    let mut fixed = fixed_strings && !multi_pattern;
+    // The two rewrites below build a regex around the pattern text, which `-F` must not be
+    // read as: it is escaped once and takes the regex path instead.
+    let mut pattern_text = if a.flag("--line-regexp") || a.flag("--multiline-dotall") {
+        if fixed {
+            fixed = false;
+            escape_literal(&pattern_text)
+        } else {
+            pattern_text
+        }
     } else {
         pattern_text
     };
+    // `--line-regexp` asks for the whole line, which is an anchor pair around whatever the
+    // pattern is: an alternation has to be grouped so the anchors cover all of it.
+    if a.flag("--line-regexp") {
+        pattern_text = format!("^(?:{pattern_text})$");
+    }
     // `--multiline-dotall` widens `.` to a newline, which is the `(?s)` inline flag.
     if a.flag("--multiline-dotall") {
         pattern_text = format!("(?s){pattern_text}");
@@ -1028,20 +1068,8 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         }
     }
 
-    // `-g` is an override filter (ripgrep semantics: it also switches ignore rules off);
-    // `-t` and `--ext` only narrow the results.
-    let mut globs: Vec<String> = Vec::new();
-    for g in ["-g", "--glob", "--include"] {
-        globs.extend(a.values(g).iter().cloned());
-    }
-    // grep's exclusions are the negated form of the same glob, and `--exclude-dir` adds the
-    // trailing slash that makes a pattern only match a directory.
-    for g in a.values("--exclude").iter() {
-        globs.push(format!("!{g}"));
-    }
-    for g in a.values("--exclude-dir").iter() {
-        globs.push(format!("!{g}/"));
-    }
+    // `-t` and `--ext` only narrow the results; the glob filters come from `walk_globs`.
+    let (globs, iglobs) = walk_globs(&a);
     let mut type_globs: Vec<String> = Vec::new();
     for t in a.values("-t").iter().chain(a.values("--type").iter()) {
         type_globs.extend(types.globs(t)?);
@@ -1052,9 +1080,6 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             type_globs.push(format!("!{glob}"));
         }
     }
-    // `--iglob` is `-g` without case: it is an override like `-g`, so it switches the ignore
-    // files off the same way.
-    let iglobs: Vec<String> = a.values("--iglob").to_vec();
     for exts in a.values("--ext") {
         for e in exts.split(',').filter(|e| !e.is_empty()) {
             type_globs.push(format!("*.{e}"));
@@ -1071,9 +1096,6 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 .map_err(|_| Fail(2, format!("invalid {name} {v:?}"))),
         }
     };
-    // Path mode never compiles the pattern as a regex: it is a glob (or a substring
-    // with `--fixed`), so a literal placeholder is all the engine needs.
-    let fixed = (a.flag("-F") || a.flag("--fixed-strings")) && !multi_pattern;
     // The last case mode wins, as in ripgrep; smart case decides from the pattern itself.
     let mut ignore_case = a.flag("-i") || a.flag("--ignore-case");
     if a.flag("-s") || a.flag("--case-sensitive") {
@@ -1688,10 +1710,7 @@ fn run_find_expression(
         roots,
     );
     o.scope = Scope::Paths;
-    let mut globs: Vec<String> = Vec::new();
-    for g in ["-g", "--glob"] {
-        globs.extend(a.values(g).iter().cloned());
-    }
+    let (globs, iglobs) = walk_globs(a);
     let mut type_globs: Vec<String> = Vec::new();
     for t in a.values("-t").iter().chain(a.values("--type").iter()) {
         type_globs.extend(types.globs(t)?);
@@ -1702,6 +1721,7 @@ fn run_find_expression(
         }
     }
     o.globs = globs;
+    o.iglobs = iglobs;
     o.type_globs = type_globs;
     o.hidden = a.flag("--hidden");
     o.no_ignore = a.flag("--no-ignore");
