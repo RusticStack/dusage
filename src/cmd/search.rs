@@ -72,12 +72,14 @@ OPTIONS:
     --max-depth N          do not descend more than N levels below each root
     --max-filesize SIZE    skip files larger than SIZE (e.g. 10M)
     --max-columns N        truncate printed lines at N bytes
+        --max-columns-preview  say so when a line was cut
     --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
     --files                with no pattern, list the files a search would read
     -Z, --null             NUL instead of ':' after each file name (for xargs -0)
 
 A path of `-` is standard input, and with no paths a piped stdin is searched instead of `.`.
-    --sort KEY             result order: path (default), none, modified (oldest first)
+    --sort KEY             result order: path (default), none, modified, accessed, created
+                           (each oldest first)
     --sortr KEY            the same, reversed
     --hidden               also search hidden files and directories
     --no-ignore            do not skip .gitignore/.ignore rules or cache directories
@@ -125,7 +127,8 @@ OPTIONS:
     --max-depth N          do not descend more than N levels below each root
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
         --iglob PATTERN    the same, matched without case
-    --sort KEY             result order: path (default), none, modified (oldest first)
+    --sort KEY             result order: path (default), none, modified, accessed, created
+                           (each oldest first)
     --sortr KEY            the same, reversed
     --hidden               also look at hidden files and directories
     --no-ignore            do not skip .gitignore/.ignore rules or cache directories
@@ -416,6 +419,12 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "-Z",
     "--null",
     "--stats",
+    "--max-columns-preview",
+    "--no-heading",
+    "--crlf",
+    "--binary",
+    "--line-buffered",
+    "--block-buffered",
     "--help",
     "-V",
     "--version",
@@ -591,9 +600,11 @@ fn parse_sort(key: &str) -> Result<SortKey, Fail> {
         "path" => Ok(SortKey::Path),
         "none" => Ok(SortKey::None),
         "modified" => Ok(SortKey::Modified),
+        "accessed" => Ok(SortKey::Accessed),
+        "created" => Ok(SortKey::Created),
         other => Err(Fail(
             2,
-            format!("unsupported --sort key {other:?} (path, none, modified)"),
+            format!("unsupported --sort key {other:?} (path, none, modified, accessed, created)"),
         )),
     }
 }
@@ -828,7 +839,8 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.text = a.flag("-a") || a.flag("--text") || unrestricted >= 3;
     o.one_filesystem = a.flag("-x") || a.flag("--one-filesystem") || a.flag("--one-file-system");
     o.null = a.flag("-Z") || a.flag("--null");
-    o.heading = a.flag("--heading");
+    o.heading = a.flag("--heading") && !a.flag("--no-heading");
+    o.max_columns_preview = a.flag("--max-columns-preview");
     o.column = a.flag("--column");
     o.byte_offset = a.flag("--byte-offset");
     o.include_zero = a.flag("--include-zero");
@@ -846,7 +858,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     };
     o.sort = sort;
     o.sort_reverse = sort_reverse;
-    o.details |= sort == SortKey::Modified;
+    o.details |= sort != SortKey::Path && sort != SortKey::None;
     o.no_ignore_vcs = a.flag("--no-ignore-vcs") || a.flag("--no-ignore-files");
     o.no_ignore_dot = a.flag("--no-ignore-dot") || a.flag("--no-ignore-files");
     o.no_ignore_parent = a.flag("--no-ignore-parent") || a.flag("--no-ignore-files");

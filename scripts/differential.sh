@@ -475,6 +475,7 @@ content_case utf8_dot_byte known:byte-dot 3 plain . '^caf.$' -n -n -rnE
 content_case unicode_case_fold eq 3 plain . 'CAFÉ' '-i -n' '-i -n' -rniE
 content_case unicode_class_letters eq rg plain . '\p{L}{4,}' '-o -n' '-o -n --pcre2' -rE
 content_case max_columns known:max-columns rg plain . needle '--max-columns 20' '--max-columns 20' -rE
+content_case max_columns_preview eq rg plain . needle '--max-columns 20 --max-columns-preview' '--max-columns 20 --max-columns-preview' -rE
 
 say ""
 [ -n "$FAILED_NAMES" ] && say "unexpected mismatches:$FAILED_NAMES"
