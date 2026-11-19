@@ -1075,3 +1075,44 @@ fn multiline_matches_span_lines() {
     let context = run(&["search", "-U", "-A", "1", "mid"], &dir);
     assert_eq!(code(&context), 2);
 }
+
+#[test]
+fn search_zip_expands_gzip() {
+    let f = Fixture::new("searchzip");
+    let dir = f.root.join("zip");
+    fs::create_dir_all(&dir).unwrap();
+    // `gzip -9` of "alpha needle beta\ngamma needle delta\n", so the test needs no gzip
+    // binary and no compressor of its own.
+    const GZ: &[u8] = &[
+        0x1f, 0x8b, 0x08, 0x08, 0xf1, 0xef, 0xfe, 0x6a, 0x02, 0x03, 0x67, 0x2e, 0x74, 0x78, 0x74,
+        0x00, 0x4b, 0xcc, 0x29, 0xc8, 0x48, 0x54, 0xc8, 0x4b, 0x4d, 0x4d, 0xc9, 0x49, 0x55, 0x48,
+        0x4a, 0x2d, 0x49, 0xe4, 0x4a, 0x4f, 0xcc, 0xcd, 0x85, 0x8b, 0xa4, 0xa4, 0xe6, 0x00, 0x85,
+        0x00, 0x1e, 0xea, 0x96, 0x3e, 0x25, 0x00, 0x00, 0x00,
+    ];
+    fs::write(dir.join("log.txt.gz"), GZ).unwrap();
+
+    // Without `-z` the compressed bytes are what gets searched, and the pattern is not in
+    // them.
+    assert_eq!(code(&run(&["search", "-l", "needle"], &dir)), 1);
+
+    let found = stdout(&run(&["search", "-z", "-n", "needle"], &dir));
+    assert!(found.contains("log.txt.gz:1:alpha needle beta"), "{found}");
+    assert!(found.contains("log.txt.gz:2:gamma needle delta"), "{found}");
+    assert_eq!(
+        stdout(&run(&["search", "-z", "-c", "-h", "needle"], &dir)),
+        "2\n"
+    );
+
+    // A short or corrupt member is an error, reported the way an unreadable file is.
+    fs::write(dir.join("broken.txt.gz"), &GZ[..20]).unwrap();
+    // An error makes the run exit 2 even though the good file matched, which is grep's
+    // contract for "something went wrong" as opposed to "nothing matched".
+    let broken = run(&["search", "-z", "-l", "needle"], &dir);
+    assert_eq!(code(&broken), 2);
+    assert!(stdout(&broken).contains("log.txt.gz"));
+    assert!(
+        stderr(&broken).contains("could not be read"),
+        "{}",
+        stderr(&broken)
+    );
+}
