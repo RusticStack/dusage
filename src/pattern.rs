@@ -2,8 +2,10 @@
 //! and prefilter rules applied. This is the one place the rest of the searcher asks
 //! "does this line match, and where".
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::bytes;
-use crate::pcre::Pcre;
+use crate::pcre::{BudgetExceeded, Pcre};
 use crate::regex::{Flags, Regex};
 
 pub use crate::regex::Match;
@@ -16,6 +18,34 @@ pub enum PatternKind {
     Regex,
     /// A backtracking matcher, used when the pattern needs lookaround or backreferences.
     Pcre,
+}
+
+/// A backtracking engine that ran out of its step budget. The answer is unknown, not "no
+/// match", so the first overrun is kept and the command reports it instead of exiting 1.
+#[derive(Debug, Default)]
+struct Overrun {
+    steps: AtomicU64,
+    budget: AtomicU64,
+}
+
+impl Overrun {
+    fn record(&self, e: BudgetExceeded) {
+        // Relaxed is enough: the pair is only ever read after the search joins its threads.
+        if self.budget.load(Ordering::Relaxed) == 0 {
+            self.steps.store(e.steps, Ordering::Relaxed);
+            self.budget.store(e.budget, Ordering::Relaxed);
+        }
+    }
+
+    fn get(&self) -> Option<BudgetExceeded> {
+        match self.budget.load(Ordering::Relaxed) {
+            0 => None,
+            budget => Some(BudgetExceeded {
+                steps: self.steps.load(Ordering::Relaxed),
+                budget,
+            }),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -34,6 +64,8 @@ pub struct Pattern {
     pcre: Option<Pcre>,
     /// A byte every match must contain, used to skip lines without running the VM.
     required: Option<u8>,
+    /// The backtracking engine's step budget running out somewhere in this search.
+    overrun: Overrun,
 }
 
 impl Pattern {
@@ -65,6 +97,7 @@ impl Pattern {
                 re: None,
                 pcre: Some(Pcre::new(text)?),
                 required: None,
+                overrun: Overrun::default(),
             });
         }
         if fixed {
@@ -78,6 +111,7 @@ impl Pattern {
                 re: None,
                 pcre: None,
                 required: None,
+                overrun: Overrun::default(),
             });
         }
         let flags = Flags {
@@ -100,6 +134,7 @@ impl Pattern {
                         re: None,
                         pcre: Some(pcre),
                         required: None,
+                        overrun: Overrun::default(),
                     })
                 }
                 Err(_) => return Err(err),
@@ -127,6 +162,7 @@ impl Pattern {
                     re: None,
                     pcre: None,
                     required: None,
+                    overrun: Overrun::default(),
                 });
             }
         }
@@ -141,6 +177,7 @@ impl Pattern {
             re: Some(re),
             pcre: None,
             required,
+            overrun: Overrun::default(),
         })
     }
 
@@ -213,45 +250,69 @@ impl Pattern {
         self.kind == PatternKind::Literal && !self.ci && !self.word && self.lit.as_slice() == line
     }
 
-    /// The next acceptable match at or after `from`.
-    pub fn find_at(&self, hay: &[u8], from: usize) -> Option<Match> {
+    /// The next acceptable match at or after `from`, with the backtracking engine's step
+    /// budget reported rather than read as "no match".
+    pub fn try_find_at(&self, hay: &[u8], from: usize) -> Result<Option<Match>, BudgetExceeded> {
         if from > hay.len() {
-            return None;
+            return Ok(None);
         }
-        match self.kind {
-            PatternKind::Literal => self.find_literal(hay, from),
-            PatternKind::Pcre => {
-                let pcre = self.pcre.as_ref()?;
-                let mut at = from;
-                while at <= hay.len() {
-                    let m = pcre.find_at(hay, at)?;
-                    if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
-                        return Some(Match {
-                            start: m.start,
-                            end: m.end,
-                        });
-                    }
-                    at = m.start + 1;
-                }
-                None
-            }
-            PatternKind::Regex => {
-                // Cheap prefilter: a line without the required byte cannot match.
-                if let Some(b) = self.required {
-                    bytes::find_byte(hay, b, from)?;
-                }
-                let re = self.re.as_ref()?;
-                let mut at = from;
-                while at <= hay.len() {
-                    let m = re.find_at(hay, at)?;
-                    if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
-                        return Some(m);
-                    }
-                    at = m.start + 1;
-                }
-                None
-            }
+        let found = match self.kind {
+            PatternKind::Literal => Ok(self.find_literal(hay, from)),
+            PatternKind::Pcre => self.try_find_pcre(hay, from),
+            PatternKind::Regex => Ok(self.find_regex(hay, from)),
+        };
+        if let Err(e) = found {
+            self.overrun.record(e);
         }
+        found
+    }
+
+    /// The step budget running out somewhere in this search, for a command that reports it.
+    pub fn budget_overrun(&self) -> Option<BudgetExceeded> {
+        self.overrun.get()
+    }
+
+    /// The next match at or after `from`, ignoring the step budget.
+    pub fn find_at(&self, hay: &[u8], from: usize) -> Option<Match> {
+        self.try_find_at(hay, from).ok().flatten()
+    }
+
+    fn try_find_pcre(&self, hay: &[u8], from: usize) -> Result<Option<Match>, BudgetExceeded> {
+        let Some(pcre) = self.pcre.as_ref() else {
+            return Ok(None);
+        };
+        let mut at = from;
+        while at <= hay.len() {
+            let m = match pcre.try_find_at(hay, at)? {
+                Some(m) => m,
+                None => return Ok(None),
+            };
+            if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
+                return Ok(Some(Match {
+                    start: m.start,
+                    end: m.end,
+                }));
+            }
+            at = m.start + 1;
+        }
+        Ok(None)
+    }
+
+    fn find_regex(&self, hay: &[u8], from: usize) -> Option<Match> {
+        // Cheap prefilter: a line without the required byte cannot match.
+        if let Some(b) = self.required {
+            bytes::find_byte(hay, b, from)?;
+        }
+        let re = self.re.as_ref()?;
+        let mut at = from;
+        while at <= hay.len() {
+            let m = re.find_at(hay, at)?;
+            if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
+                return Some(m);
+            }
+            at = m.start + 1;
+        }
+        None
     }
 
     fn find_literal(&self, hay: &[u8], from: usize) -> Option<Match> {
@@ -405,6 +466,26 @@ mod tests {
             !bad.is_match(b"na\xefve"),
             "invalid UTF-8 falls back to bytes"
         );
+    }
+
+    #[test]
+    fn a_budget_overrun_is_reported_instead_of_read_as_no_match() {
+        let slow = Pattern::with_engine("(a+)+$", false, false, false, true).unwrap();
+        let hay = [vec![b'a'; 40], vec![b'b']].concat();
+        assert!(
+            slow.try_find_at(&hay, 0).is_err(),
+            "the budget must surface"
+        );
+        assert_eq!(slow.find_at(&hay, 0), None);
+        let e = slow
+            .budget_overrun()
+            .expect("the overrun is kept for the command");
+        assert!(e.steps > e.budget, "{e}");
+        // A pattern that answers never records one, whether it matches or not.
+        let q = Pattern::with_engine("ab", false, false, false, true).unwrap();
+        assert_eq!(q.find_at(b"ab", 0).map(|m| m.end), Some(2));
+        assert_eq!(q.find_at(b"xy", 0), None);
+        assert_eq!(q.budget_overrun(), None);
     }
 
     #[test]

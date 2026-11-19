@@ -1338,7 +1338,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                     return Err("-U cannot be combined with -A/-B/-C".to_string().into());
                 }
             }
-            if read_stdin {
+            let report = if read_stdin {
                 let mut data = Vec::new();
                 std::io::stdin()
                     .read_to_end(&mut data)
@@ -1350,7 +1350,13 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                     .map_err(|e| Fail(1, e.to_string()))?
             } else {
                 search(&o).map_err(|e| Fail(1, e.to_string()))?
+            };
+            // A backtracking match that ran out of steps is an unknown answer, not "no
+            // match": report it and exit 2 rather than printing a plan that exits 1.
+            if let Some(e) = o.pattern.budget_overrun() {
+                return Err(Fail(2, e.to_string()));
             }
+            report
         }
         Scope::Paths => {
             // The walk takes every path the filters allow; the positional glob decides

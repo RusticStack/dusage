@@ -84,6 +84,21 @@ fn finds_matching_lines_and_exits_0() {
 }
 
 #[test]
+fn a_pattern_that_burns_the_step_budget_exits_2() {
+    let f = Fixture::new("budget");
+    let hay = format!("{}b\n", "a".repeat(40));
+    fs::write(f.root.join("slow.txt"), hay).unwrap();
+    // `rg -P` exits 2 here as well: an unknown answer is not "no match".
+    let o = run(&["search", "-P", "-g", "slow.txt", "(a+)+$"], &f.root);
+    assert_eq!(code(&o), 2, "{}", stderr(&o));
+    assert!(stdout(&o).is_empty(), "{}", stdout(&o));
+    assert!(stderr(&o).contains("step budget"), "{}", stderr(&o));
+    // The linear engine answers the same pattern, so the exit code stays grep's 1.
+    let ok = run(&["search", "-g", "slow.txt", "(a+)+$"], &f.root);
+    assert_eq!(code(&ok), 1, "{}", stderr(&ok));
+}
+
+#[test]
 fn no_match_exits_1_and_bad_pattern_exits_2() {
     let f = Fixture::new("exit");
     let o = run(&["search", "definitely-absent-token"], &f.root);
