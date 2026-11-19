@@ -49,6 +49,17 @@ const DIRENT_RECLEN: usize = std::mem::offset_of!(LinuxDirent64, d_reclen);
 const DIRENT_TYPE: usize = std::mem::offset_of!(LinuxDirent64, d_type);
 const DIRENT_NAME: usize = std::mem::offset_of!(LinuxDirent64, d_name);
 
+// `struct linux_dirent64` (include/uapi/linux/dirent.h):
+//   u64 d_ino; s64 d_off; u16 d_reclen; u8 d_type; char d_name[];
+// 19 bytes up to the flexible name array; the struct rounds up to 24 for alignment.
+const _: () = {
+    assert!(DIRENT_OFF == 8);
+    assert!(DIRENT_RECLEN == 16);
+    assert!(DIRENT_TYPE == 18);
+    assert!(DIRENT_NAME == 19);
+    assert!(std::mem::size_of::<LinuxDirent64>() == 24);
+};
+
 // `d_type` (dirent.h). `DT_WHT` and anything unlisted is "some other object".
 const DT_UNKNOWN: u8 = 0;
 const DT_FIFO: u8 = 1;
@@ -141,11 +152,20 @@ fn stat_of_statx(s: &sys::Statx) -> Stat {
 }
 
 fn time_of(t: sys::StatxTimestamp) -> SystemTime {
-    let span = Duration::new(t.tv_sec.unsigned_abs(), t.tv_nsec);
-    if t.tv_sec < 0 {
-        UNIX_EPOCH - span
+    if t.tv_sec < 0 && t.tv_nsec > 0 && t.tv_nsec < 1_000_000_000 {
+        // `tv_sec` floors: -0.5 s arrives as `tv_sec = -1, tv_nsec = 500_000_000`, so there is
+        // one whole second less before the epoch than `|tv_sec|` reads and the fraction is the
+        // complement of `tv_nsec`.
+        UNIX_EPOCH - Duration::new(t.tv_sec.unsigned_abs() - 1, 1_000_000_000 - t.tv_nsec)
     } else {
-        UNIX_EPOCH + span
+        // A timespec with `tv_nsec` out of range is not canonical; `Duration::new` normalizes
+        // it, which is what the arithmetic below wants to keep tolerating.
+        let span = Duration::new(t.tv_sec.unsigned_abs(), t.tv_nsec);
+        if t.tv_sec < 0 {
+            UNIX_EPOCH - span
+        } else {
+            UNIX_EPOCH + span
+        }
     }
 }
 
@@ -192,8 +212,9 @@ fn c_path(p: &OsStr) -> io::Result<CString> {
 /// `lstat` one name of an open directory, without resolving a path.
 fn stat_at(fd: RawFd, name: &CStr) -> io::Result<Stat> {
     let mut stx = sys::Statx::default();
-    // SAFETY: `name` is NUL-terminated and lives in the directory's buffer, `fd` is open on
-    // that directory, and `stx` is a live `struct statx` of exactly the size declared.
+    // SAFETY: `name` is NUL-terminated for the whole call — it is borrowed either from the
+    // batch buffer or from the thread's name buffer — `fd` is open on the directory the name
+    // is relative to, and `stx` is a live `struct statx` of exactly the size declared.
     let rc = unsafe {
         sys::statx(
             fd,
@@ -321,6 +342,11 @@ impl<'a> Batch<'a> {
             if name == b"." || name == b".." {
                 continue;
             }
+            // A directory record never carries an empty name, and one would make
+            // `dir.join(name)` name the directory itself: the walk would descend into it.
+            if name.is_empty() {
+                return Err(malformed());
+            }
             match off {
                 // Some filesystems never fill `d_off`: positions are unusable, so a
                 // repeated name is dropped instead of noticed.
@@ -356,7 +382,8 @@ impl<'a> Batch<'a> {
 
     /// Back to the first record, for a directory that changed while it was read.
     fn rewind(&mut self) -> io::Result<()> {
-        // SAFETY: the descriptor is open on this directory and the result is checked.
+        // SAFETY: `self.fd` is an open directory descriptor this `Batch` owns, and `lseek`
+        // needs nothing else; the result is checked below.
         let off = unsafe { sys::lseek(self.fd.as_raw_fd(), 0, sys::SEEK_SET) };
         if off < 0 {
             return Err(io::Error::last_os_error());
@@ -1195,5 +1222,293 @@ mod tests {
 
     fn ms(d: std::time::Duration) -> f64 {
         d.as_secs_f64() * 1e3
+    }
+
+    /// One hand-built `linux_dirent64` slot: a header declaring `reclen`, `name` at
+    /// `DIRENT_NAME`, and enough zero padding that the slot is at least the header's size.
+    /// When `name` fills the slot there is no NUL, and when `reclen` exceeds the slot the
+    /// batch simply ends first.
+    fn record(reclen: u16, off: i64, dtype: u8, name: &[u8]) -> Vec<u8> {
+        let len = (DIRENT_NAME + name.len() + 1)
+            .max(DIRENT_NAME + 5)
+            .max(reclen.into());
+        let mut rec = vec![0u8; len];
+        rec[DIRENT_OFF..DIRENT_OFF + 8].copy_from_slice(&off.to_ne_bytes());
+        rec[DIRENT_RECLEN..DIRENT_RECLEN + 2].copy_from_slice(&reclen.to_ne_bytes());
+        rec[DIRENT_TYPE] = dtype;
+        rec[DIRENT_NAME..DIRENT_NAME + name.len()].copy_from_slice(name);
+        rec
+    }
+
+    /// Parse `raw` as one `getdents64` batch through the walk's own parser. Every access the
+    /// parser makes is a checked slice index, so a record that lies about its length can only
+    /// end as `Err` — a panic here would be the out-of-bounds read the audit is looking for.
+    fn drain_raw(dir: &Path, raw: &[u8]) -> io::Result<Vec<String>> {
+        let mut storage = vec![0u8; raw.len() + 32];
+        storage[..raw.len()].copy_from_slice(raw);
+        let mut batch = Batch::open(dir, &mut storage)?;
+        batch.len = raw.len();
+        batch.pos = 0;
+        batch.done = true;
+        let mut got = Collected(Vec::new());
+        let (mut fuse, mut last_off) = (None, 0i64);
+        // Synthetic offsets go backwards at will; `restart = false` dedups instead of restarting.
+        batch.drain(&mut got, &mut fuse, &mut last_off, false)?;
+        Ok(got.0)
+    }
+
+    fn assert_malformed(raw: &[u8]) {
+        let f = Fixture::new("bad");
+        let err = drain_raw(&f.0, raw).expect_err("a bad record must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+    }
+
+    #[test]
+    fn a_zero_reclen_is_rejected() {
+        // Stopped by the `reclen < DIRENT_NAME` test: a record shorter than its own header.
+        assert_malformed(&record(0, 1, DT_REG, b"a"));
+    }
+
+    #[test]
+    fn every_reclen_below_the_name_offset_is_rejected() {
+        for reclen in 0..DIRENT_NAME as u16 {
+            assert_malformed(&record(reclen, 1, DT_REG, b"a"));
+        }
+    }
+
+    #[test]
+    fn a_reclen_past_the_batch_is_rejected() {
+        // Stopped by the `reclen > raw.len()` test: the record claims more than came back.
+        let mut raw = record(24, 1, DT_REG, b"a");
+        raw[DIRENT_RECLEN..DIRENT_RECLEN + 2].copy_from_slice(&25u16.to_ne_bytes());
+        assert_malformed(&raw);
+        // A batch that ends inside the next header is not a record either.
+        let mut raw = record(24, 1, DT_REG, b"a");
+        raw.extend_from_slice(b"\0\0\0");
+        assert_malformed(&raw);
+    }
+
+    #[test]
+    fn a_name_without_a_nul_is_rejected() {
+        // Stopped by the `position(|&b| b == 0)` search over the record's tail.
+        assert_malformed(&record(24, 1, DT_REG, b"aaaaa"));
+    }
+
+    #[test]
+    fn an_empty_name_is_rejected() {
+        // A record whose `d_name` starts with NUL names nothing; `dir.join("")` would name the
+        // directory itself, so the walk refuses it.
+        assert_malformed(&record(24, 1, DT_REG, b""));
+    }
+
+    /// `d_reclen` need not be a multiple of 8 for the parse to be safe: every field is copied
+    /// out of a byte slice, so an unaligned record only moves the next parse to the offset it
+    /// declares. The kernel always emits 8-aligned records, so this is a robustness note, not
+    /// a safety hole.
+    #[test]
+    fn an_unaligned_reclen_is_followed_byte_wise() {
+        let mut raw = vec![0u8; 46];
+        raw[DIRENT_RECLEN..DIRENT_RECLEN + 2].copy_from_slice(&22u16.to_ne_bytes());
+        raw[DIRENT_OFF..DIRENT_OFF + 8].copy_from_slice(&1i64.to_ne_bytes());
+        raw[DIRENT_TYPE] = DT_REG;
+        raw[DIRENT_NAME] = b'a';
+        let s = 22;
+        raw[s + DIRENT_RECLEN..s + DIRENT_RECLEN + 2].copy_from_slice(&24u16.to_ne_bytes());
+        raw[s + DIRENT_OFF..s + DIRENT_OFF + 8].copy_from_slice(&2i64.to_ne_bytes());
+        raw[s + DIRENT_TYPE] = DT_DIR;
+        raw[s + DIRENT_NAME] = b'b';
+        let f = Fixture::new("unaligned");
+        assert_eq!(drain_raw(&f.0, &raw).unwrap(), ["a", "b"]);
+        // The same unaligned offset in front of bytes that are not a record: the second header
+        // declares a length past the batch and the walk stops.
+        let mut raw = vec![0xFFu8; 40];
+        raw[DIRENT_RECLEN..DIRENT_RECLEN + 2].copy_from_slice(&22u16.to_ne_bytes());
+        raw[DIRENT_NAME] = b'x';
+        raw[DIRENT_NAME + 1] = 0;
+        assert_malformed(&raw);
+    }
+
+    /// `d_reclen` is attacker- and kernel-controlled. Whatever it says, the walk has to come
+    /// back with an error or with the records that are really there.
+    #[test]
+    fn every_reclen_value_ends_in_an_error_or_the_end() {
+        let f = Fixture::new("reclen");
+        for reclen in (0..=600u16).chain([4096, u16::MAX]) {
+            for fill in [0u8, 0xFF] {
+                let mut raw = vec![fill; 96];
+                raw[DIRENT_OFF..DIRENT_OFF + 8].copy_from_slice(&1i64.to_ne_bytes());
+                raw[DIRENT_RECLEN..DIRENT_RECLEN + 2].copy_from_slice(&reclen.to_ne_bytes());
+                raw[DIRENT_TYPE] = DT_REG;
+                raw[DIRENT_NAME] = b'x';
+                raw[DIRENT_NAME + 1] = 0;
+                if let Ok(names) = drain_raw(&f.0, &raw) {
+                    assert_eq!(names, ["x"], "reclen {reclen} fill {fill}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_rewind_reads_the_directory_from_the_start_again() {
+        let f = Fixture::new("relseek");
+        for n in ["a", "b", "c"] {
+            fs::write(f.0.join(n), b"x").unwrap();
+        }
+        let mut buf = [0u8; 4096];
+        let mut batch = Batch::open(&f.0, &mut buf).unwrap();
+        let mut first = Collected(Vec::new());
+        let (mut fuse, mut last_off) = (None, 0);
+        let pass = batch
+            .drain(&mut first, &mut fuse, &mut last_off, true)
+            .unwrap();
+        assert!(matches!(pass, Pass::End));
+        // `rewind` is `lseek(fd, 0, SEEK_SET)`: the second read starts at the first record,
+        // never at an offset part-way into one.
+        batch.rewind().unwrap();
+        let mut again = Collected(Vec::new());
+        let (mut fuse, mut last_off) = (Some(HashSet::new()), 0);
+        let pass = batch
+            .drain(&mut again, &mut fuse, &mut last_off, false)
+            .unwrap();
+        assert!(matches!(pass, Pass::End));
+        first.0.sort();
+        again.0.sort();
+        assert_eq!(first.0, ["a", "b", "c"]);
+        assert_eq!(again.0, first.0);
+    }
+
+    /// The loop termination argument: `read_dir_raw` passes `restart = !rewound`, so a
+    /// directory whose offsets keep going backwards is re-read at most once and then
+    /// deduplicated. A second pass can never ask for a third.
+    #[test]
+    fn the_second_pass_never_restarts() {
+        let f = Fixture::new("shrink");
+        let mut buf = [0u8; 512];
+        let mut batch = Batch::open(&f.0, &mut buf).unwrap();
+        let recs = [(DT_REG, 30, "a"), (DT_REG, 20, "b"), (DT_REG, 10, "c")];
+        stage(&mut batch, &recs);
+        let mut got = Collected(Vec::new());
+        let (mut fuse, mut last_off) = (None, 0);
+        let pass = batch
+            .drain(&mut got, &mut fuse, &mut last_off, true)
+            .unwrap();
+        assert!(matches!(pass, Pass::Restart), "offsets went backwards");
+        let mut got = Collected(Vec::new());
+        batch.rewind().unwrap();
+        stage(&mut batch, &recs);
+        let (mut fuse, mut last_off) = (Some(HashSet::new()), 0);
+        let pass = batch
+            .drain(&mut got, &mut fuse, &mut last_off, false)
+            .unwrap();
+        assert!(matches!(pass, Pass::End), "the second pass is the last one");
+        assert_eq!(got.0, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn statx_describes_a_link_rather_than_its_target() {
+        let f = Fixture::new("nolink");
+        fs::create_dir(f.0.join("d")).unwrap();
+        fs::write(f.0.join("d/inner"), vec![0u8; 7777]).unwrap();
+        fs::write(f.0.join("file"), vec![0u8; 1234]).unwrap();
+        std::os::unix::fs::symlink(f.0.join("d"), f.0.join("dl")).unwrap();
+        std::os::unix::fs::symlink(f.0.join("file"), f.0.join("fl")).unwrap();
+        // `lstat` carries AT_SYMLINK_NOFOLLOW; `stat` is the documented `--follow` exception.
+        assert_eq!(lstat(&f.0.join("dl")).unwrap().kind, Kind::Symlink);
+        assert_eq!(stat(&f.0.join("dl")).unwrap().kind, Kind::Dir);
+        assert_ne!(lstat(&f.0.join("fl")).unwrap().size, 1234);
+        // The walk stats names against the open directory descriptor: same flag, no path.
+        let dir = fs::File::open(&f.0).unwrap();
+        let fd = dir.as_raw_fd();
+        assert_eq!(stat_at(fd, c"dl").unwrap().kind, Kind::Symlink);
+        assert_eq!(stat_at(fd, c"fl").unwrap().kind, Kind::Symlink);
+        assert_eq!(stat_at(fd, c"d").unwrap().kind, Kind::Dir);
+        // A link is its own inode, so hardlink dedup cannot fold it into its target.
+        assert_ne!(
+            file_id_of(&f.0.join("fl")).unwrap(),
+            file_id_of(&f.0.join("file")).unwrap()
+        );
+        // Both backends report the link, and the deferred `stat` agrees.
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        DirReader::new().read(&f.0, &mut v, &mut errs).unwrap();
+        let e = v.iter().find(|e| e.name == "dl").unwrap();
+        assert!(e.is_link && !e.is_dir && is_skipped(e));
+        let mut lite = Vec::new();
+        list(&f.0, &mut lite, &mut errs).unwrap();
+        let l = lite.iter().find(|e| e.name == "fl").unwrap();
+        assert!(l.is_reparse());
+        assert_eq!(l.stat().unwrap().kind, Kind::Symlink);
+    }
+
+    #[test]
+    fn the_name_buffer_is_reused_without_truncation() {
+        let f = Fixture::new("namebuf");
+        let long = "l".repeat(250);
+        fs::write(f.0.join(&long), vec![0u8; 300]).unwrap();
+        fs::write(f.0.join("s"), vec![0u8; 7]).unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        let stat = |n: &str| v.iter().find(|e| e.name == n).unwrap().stat().unwrap();
+        // Long, short, long again: a stale tail from the longer name would make the shorter
+        // one resolve to a different entry, and a truncated one would not resolve at all.
+        assert_eq!(stat(&long).size, 300);
+        assert_eq!(stat("s").size, 7);
+        assert_eq!(stat(&long).size, 300);
+        assert_eq!(stat(&long).kind, Kind::File);
+    }
+
+    #[test]
+    fn a_name_at_and_past_the_name_limit() {
+        let f = Fixture::new("namelen");
+        let exact = "e".repeat(255);
+        fs::write(f.0.join(&exact), vec![0u8; 11]).unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].stat().unwrap().size, 11);
+        // No file can be named longer than that, so build the entry by hand: the thread's name
+        // buffer grows past it and `statx` answers ENAMETOOLONG for the whole name rather than
+        // receiving a truncated path.
+        let lite = |name: &[u8]| Lite {
+            name: OsString::from_vec(name.to_vec()),
+            kind: Kind::File,
+            dir: Rc::clone(&v[0].dir),
+            stat: Cell::new(None),
+        };
+        let long = lite(&[b'o'; 256]);
+        assert_eq!(long.stat().unwrap_err().raw_os_error(), Some(36));
+        // And a name holding a NUL can never be handed to `statx` as an `CStr`.
+        let bad = lite(b"a\0b");
+        assert_eq!(bad.stat().unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn timestamps_before_the_epoch_keep_their_nanoseconds() {
+        let at = |tv_sec: i64, tv_nsec: u32| {
+            time_of(sys::StatxTimestamp {
+                tv_sec,
+                tv_nsec,
+                reserved: 0,
+            })
+        };
+        assert_eq!(at(0, 0), UNIX_EPOCH);
+        assert_eq!(at(2, 500), UNIX_EPOCH + Duration::new(2, 500));
+        // `tv_sec` is the floor of the timestamp, so -0.5 s is `tv_sec = -1, tv_nsec = 5e8`.
+        assert_eq!(
+            at(-1, 500_000_000),
+            UNIX_EPOCH - Duration::new(0, 500_000_000)
+        );
+        assert_eq!(
+            at(-2, 250_000_000),
+            UNIX_EPOCH - Duration::new(1, 750_000_000)
+        );
+        assert_eq!(at(-1, 0), UNIX_EPOCH - Duration::new(1, 0));
+        // A non-canonical `tv_nsec` neither panics nor loses its whole seconds.
+        assert_eq!(
+            at(-1, 1_500_000_000),
+            UNIX_EPOCH - Duration::new(2, 500_000_000)
+        );
     }
 }

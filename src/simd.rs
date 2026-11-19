@@ -687,4 +687,99 @@ mod tests {
         assert_eq!(memchr(&[], b'a', 0), None);
         assert_eq!(memchr(hay, b'c', 2), Some(2));
     }
+
+    /// Every length from 1 to 70 against a scalar reference. Below one vector (32 bytes AVX2,
+    /// 16 SSE2) the loop body never runs and the whole slice is the tail; between two and three
+    /// vectors it runs once and leaves a partial vector behind. That partial vector is the case
+    /// the `i + 32 <= len` guard exists for, so it is the one worth pinning: the tail loop reads
+    /// it, never a vector load.
+    #[test]
+    fn every_length_from_one_to_seventy_agrees_with_the_scalar_scan() {
+        for len in 1..=70usize {
+            // The haystack is a prefix of a bigger buffer whose tail is full of the needle, so a
+            // vector load one lane past the slice would show up as a match at or past `len`
+            // instead of only being undefined behaviour nobody notices.
+            let mut big = vec![b'a'; len + 64];
+            for b in &mut big[..len] {
+                *b = b'.';
+            }
+            for (at, byte) in [(0, b'b'), (len / 2, b'b'), (len - 1, b'c')] {
+                big[at] = byte;
+            }
+            big[len / 3] = b'M';
+            let hay = &big[..len];
+            for from in 0..=len {
+                let rest = &hay[from..];
+                for needle in [b'a', b'b', b'c', b'M', b'm', b'.', b'z', 0u8] {
+                    let want = rest.iter().position(|&b| b == needle).map(|i| from + i);
+                    assert_eq!(
+                        memchr(hay, needle, from),
+                        want,
+                        "memchr len {len} from {from} needle {needle}"
+                    );
+                }
+                let want_ci = rest
+                    .iter()
+                    .position(|&b| b | 0x20 == b'm')
+                    .map(|i| from + i);
+                assert_eq!(
+                    memchr_ci(hay, b'm', from),
+                    want_ci,
+                    "memchr_ci len {len} from {from}"
+                );
+                assert_eq!(memchr_ci(hay, b'M', from), want_ci);
+                let want2 = rest
+                    .iter()
+                    .enumerate()
+                    .find(|(_, &b)| b == b'a' || b == b'c')
+                    .map(|(i, &b)| (from + i, b));
+                assert_eq!(
+                    memchr2(hay, b'a', b'c', from),
+                    want2,
+                    "memchr2 len {len} from {from}"
+                );
+            }
+            assert_eq!(count(hay, b'.'), hay.iter().filter(|&&b| b == b'.').count());
+            assert_eq!(count(hay, b'z'), 0);
+            assert_eq!(count(hay, b'a'), hay.iter().filter(|&&b| b == b'a').count());
+        }
+    }
+
+    /// The same length sweep through the prefilter, whose paired mask looks one lane past a
+    /// candidate: the masks have to agree with a brute-force scan at every length, including
+    /// the ones that end in a partial vector. The buffer after the slice repeats every needle,
+    /// so a load past the end becomes a visible wrong answer.
+    #[test]
+    fn every_length_from_one_to_seventy_agrees_with_the_brute_force_prefilter() {
+        let sets: [&[&[u8]]; 2] = [&[b"ab", b"cd"], &[b"abc", b"aa", b"ab"]];
+        for len in 1..=70usize {
+            let mut big = b"abcdabcdabcdabcdabcd".repeat((len + 64) / 20 + 2);
+            for b in &mut big[..len] {
+                *b = b'.';
+            }
+            let mut at = 0;
+            while at + 2 <= len {
+                big[at..at + 2].copy_from_slice(b"ab");
+                at += 7;
+            }
+            let hay = &big[..len];
+            for set in sets {
+                let needles: Vec<Vec<u8>> = set.iter().map(|n| n.to_vec()).collect();
+                let pf = Prefilter::new(needles.clone()).unwrap();
+                for from in 0..=len {
+                    let want = (from..len).find_map(|at| {
+                        needles
+                            .iter()
+                            .position(|n| hay[at..].starts_with(n))
+                            .map(|i| (at, i))
+                    });
+                    assert_eq!(
+                        pf.find_any(hay, from),
+                        want,
+                        "needles {set:?} len {len} from {from}"
+                    );
+                }
+            }
+        }
+    }
 }

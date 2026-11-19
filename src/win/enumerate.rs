@@ -68,6 +68,47 @@ struct Win32FindStreamData {
     stream_name: [u16; MAX_PATH + 36],
 }
 
+// Layouts from the Microsoft Learn definitions in winbase.h / fileapi.h. Asserted at compile
+// time, so the `x86_64-pc-windows-msvc` cross-check verifies them without a Windows host.
+//   FILE_ID_EXTD_DIR_INFO: NextEntryOffset, FileIndex, CreationTime, LastAccessTime,
+//     LastWriteTime, ChangeTime, EndOfFile, AllocationSize, FileAttributes, FileNameLength,
+//     EaSize, ReparsePointTag, FileId (FILE_ID_128), FileName[1].
+//   FILE_ID_BOTH_DIR_INFO: the same head, then ShortNameLength (CCHAR), ShortName[12],
+//     FileId (LARGE_INTEGER), FileName[1].
+//   WIN32_FIND_STREAM_DATA: StreamSize (LARGE_INTEGER), cStreamName[MAX_PATH + 36].
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(offset_of!(FileIdExtdDirInfo, next_entry_offset) == 0);
+    assert!(offset_of!(FileIdExtdDirInfo, file_index) == 4);
+    assert!(offset_of!(FileIdExtdDirInfo, creation_time) == 8);
+    assert!(offset_of!(FileIdExtdDirInfo, last_access_time) == 16);
+    assert!(offset_of!(FileIdExtdDirInfo, last_write_time) == 24);
+    assert!(offset_of!(FileIdExtdDirInfo, change_time) == 32);
+    assert!(offset_of!(FileIdExtdDirInfo, end_of_file) == 40);
+    assert!(offset_of!(FileIdExtdDirInfo, allocation_size) == 48);
+    assert!(offset_of!(FileIdExtdDirInfo, file_attributes) == 56);
+    assert!(offset_of!(FileIdExtdDirInfo, file_name_length) == 60);
+    assert!(offset_of!(FileIdExtdDirInfo, ea_size) == 64);
+    assert!(offset_of!(FileIdExtdDirInfo, reparse_point_tag) == 68);
+    assert!(offset_of!(FileIdExtdDirInfo, file_id) == 72);
+    assert!(offset_of!(FileIdExtdDirInfo, file_name) == 88);
+    assert!(size_of::<FileIdExtdDirInfo>() == 96);
+    assert!(offset_of!(FileIdBothDirInfo, next_entry_offset) == 0);
+    assert!(offset_of!(FileIdBothDirInfo, change_time) == 32);
+    assert!(offset_of!(FileIdBothDirInfo, end_of_file) == 40);
+    assert!(offset_of!(FileIdBothDirInfo, allocation_size) == 48);
+    assert!(offset_of!(FileIdBothDirInfo, file_attributes) == 56);
+    assert!(offset_of!(FileIdBothDirInfo, file_name_length) == 60);
+    assert!(offset_of!(FileIdBothDirInfo, ea_size) == 64);
+    assert!(offset_of!(FileIdBothDirInfo, short_name_length) == 68);
+    assert!(offset_of!(FileIdBothDirInfo, short_name) == 70);
+    assert!(offset_of!(FileIdBothDirInfo, file_id) == 96);
+    assert!(offset_of!(FileIdBothDirInfo, file_name) == 104);
+    assert!(size_of::<FileIdBothDirInfo>() == 112);
+    assert!(offset_of!(Win32FindStreamData, stream_name) == 8);
+    assert!(size_of::<Win32FindStreamData>() == 600);
+};
+
 /// Field offsets of one directory-info class, so one parser serves both.
 struct Layout {
     next: usize,
@@ -300,6 +341,11 @@ fn parse(buf: &[u8], l: &Layout, out: &mut Vec<Entry>) -> io::Result<()> {
             .ok_or_else(|| bad("name overflow"))?;
         if !name_len.is_multiple_of(2) || name_end > buf.len() {
             return Err(bad("file name exceeds buffer"));
+        }
+        // A record with no name would name the directory itself once joined (`dir.join("")`),
+        // and the walk would descend into it under its own path; the kernel never emits one.
+        if name_len == 0 {
+            return Err(bad("directory entry with an empty file name"));
         }
         let wide: Vec<u16> = buf[name_off..name_end]
             .as_chunks::<2>()
@@ -537,6 +583,13 @@ struct FileIdInfo {
     file_id: [u8; 16],
 }
 
+// FILE_ID_INFO: VolumeSerialNumber (ULONGLONG), FileId (FILE_ID_128). 24 bytes.
+const _: () = {
+    assert!(std::mem::offset_of!(FileIdInfo, volume_serial_number) == 0);
+    assert!(std::mem::offset_of!(FileIdInfo, file_id) == 8);
+    assert!(std::mem::size_of::<FileIdInfo>() == 24);
+};
+
 /// Error for a tool root that is itself a reparse point (junction/symlink): listing it would
 /// open the link object and see nothing, so callers refuse it instead of reporting zero.
 /// `Ok(())` when `path` is not a reparse point; other failures are returned as-is.
@@ -753,6 +806,30 @@ struct AttributeTagInfo {
     reparse_tag: u32,
 }
 
+// The three `GetFileInformationByHandleEx` out-structs, from winbase.h:
+//   FILE_BASIC_INFO: four LARGE_INTEGER times, FileAttributes (ULONG), 4 bytes of padding.
+//   FILE_STANDARD_INFO: AllocationSize, EndOfFile (LARGE_INTEGER), NumberOfLinks (ULONG),
+//     DeletePending (BOOLEAN), Directory (BOOLEAN), 2 bytes of padding.
+//   FILE_ATTRIBUTE_TAG_INFO: FileAttributes, ReparseTag.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(offset_of!(BasicInfo, creation_time) == 0);
+    assert!(offset_of!(BasicInfo, last_access_time) == 8);
+    assert!(offset_of!(BasicInfo, last_write_time) == 16);
+    assert!(offset_of!(BasicInfo, change_time) == 24);
+    assert!(offset_of!(BasicInfo, file_attributes) == 32);
+    assert!(size_of::<BasicInfo>() == 40);
+    assert!(offset_of!(StandardInfo, allocation_size) == 0);
+    assert!(offset_of!(StandardInfo, end_of_file) == 8);
+    assert!(offset_of!(StandardInfo, number_of_links) == 16);
+    assert!(offset_of!(StandardInfo, delete_pending) == 20);
+    assert!(offset_of!(StandardInfo, directory) == 21);
+    assert!(size_of::<StandardInfo>() == 24);
+    assert!(offset_of!(AttributeTagInfo, file_attributes) == 0);
+    assert!(offset_of!(AttributeTagInfo, reparse_tag) == 4);
+    assert!(size_of::<AttributeTagInfo>() == 8);
+};
+
 const FILE_BASIC_INFO_CLASS: i32 = 0;
 const FILE_STANDARD_INFO_CLASS: i32 = 1;
 
@@ -867,6 +944,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::mem::{offset_of, size_of};
+    use std::os::windows::ffi::OsStrExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1209,5 +1287,140 @@ mod tests {
         assert_eq!(out[0].reparse_tag, 0);
         assert!(out[1].is_reparse() && out[1].is_dir());
         assert_eq!(out[1].reparse_tag, 0xA000_0003);
+    }
+
+    /// One synthetic `FILE_ID_*_DIR_INFO` record for `l`: `next` in NextEntryOffset, `name`
+    /// as UTF-16 at `l.name`, and `name_len` in FileNameLength (which need not match the
+    /// bytes staged). The slot is the header plus the name plus slack, zero-filled.
+    fn rec(l: &Layout, next: u32, name: &str, name_len: u32) -> Vec<u8> {
+        let nb: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        let mut b = vec![0u8; l.name + nb.len() + 8];
+        b[l.next..l.next + 4].copy_from_slice(&next.to_le_bytes());
+        b[l.name_len..l.name_len + 4].copy_from_slice(&name_len.to_le_bytes());
+        b[l.name..l.name + nb.len()].copy_from_slice(&nb);
+        b
+    }
+
+    #[test]
+    fn a_zero_length_name_is_rejected() {
+        // `dir.join("")` names the directory itself, so a record that names nothing would make
+        // the walk descend into it under its own path.
+        for l in [&EXTD, &BOTH] {
+            let mut out = Vec::new();
+            let err = parse(&rec(l, 0, "", 0), l, &mut out).expect_err("empty name");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+            assert!(out.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_utf16_name_needs_no_terminator() {
+        // FileNameLength, not a NUL, delimits the name: the UTF-16 need not end with 0.
+        for l in [&EXTD, &BOTH] {
+            let name = "üñí cödé.txt";
+            let bytes = (name.encode_utf16().count() * 2) as u32;
+            let mut out = Vec::new();
+            parse(&rec(l, 0, name, bytes), l, &mut out).unwrap();
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].name, name);
+            assert_eq!(out[0].name.encode_wide().count() * 2, bytes as usize);
+        }
+    }
+
+    #[test]
+    fn a_name_or_a_record_past_the_buffer_is_rejected() {
+        for l in [&EXTD, &BOTH] {
+            let mut out = Vec::new();
+            let full = rec(l, 0, "ab", 4);
+            // FileNameLength runs past the end of the batch.
+            assert!(parse(&full, l, &mut out).is_err(), "name past the buffer");
+            // The batch ends in the middle of the name.
+            assert!(
+                parse(&full[..l.name + 2], l, &mut out).is_err(),
+                "truncated name"
+            );
+            // The batch ends in the middle of EndOfFile.
+            assert!(
+                parse(&full[..l.eof + 4], l, &mut out).is_err(),
+                "truncated header"
+            );
+            // FileNameLength ends between two UTF-16 code units.
+            assert!(
+                parse(&rec(l, 0, "a", 3), l, &mut out).is_err(),
+                "odd length"
+            );
+            assert!(out.is_empty());
+        }
+    }
+
+    /// `NextEntryOffset` is kernel- and attacker-controlled: whatever it says, the walk has to
+    /// come back, and every read it makes is a checked slice index, so a panic would be the
+    /// out-of-bounds read this test is looking for.
+    #[test]
+    fn every_next_offset_and_name_length_terminates() {
+        for next in [0u32, 1, 2, 4, 8, 88, 112, 255, 256, 1000, u32::MAX] {
+            for name_len in [0u32, 1, 2, 4, 100, 1000, u32::MAX] {
+                let mut b = vec![0u8; 256];
+                b[EXTD.next..EXTD.next + 4].copy_from_slice(&next.to_le_bytes());
+                b[EXTD.name..EXTD.name + 2].copy_from_slice(&(b'a' as u16).to_le_bytes());
+                b[EXTD.name_len..EXTD.name_len + 4].copy_from_slice(&name_len.to_le_bytes());
+                for l in [&EXTD, &BOTH] {
+                    let mut out = Vec::new();
+                    let _ = parse(&b, l, &mut out);
+                }
+            }
+        }
+    }
+
+    /// `FileNameLength` is checked against the batch buffer, not against the record's own
+    /// `NextEntryOffset`, so a record that understates its size can make its name borrow the
+    /// next record's header. It cannot leave the buffer, which is why this is a correctness
+    /// note and not a safety hole.
+    #[test]
+    fn a_name_may_borrow_the_next_record_but_never_leaves_the_buffer() {
+        let mut b = vec![0u8; 224];
+        b[EXTD.next..EXTD.next + 4].copy_from_slice(&112u32.to_le_bytes());
+        // 40 bytes of name from offset 88: 24 inside record 1, 16 from record 2's header.
+        b[EXTD.name_len..EXTD.name_len + 4].copy_from_slice(&40u32.to_le_bytes());
+        for (i, c) in "ab".encode_utf16().enumerate() {
+            b[EXTD.name + i * 2..EXTD.name + i * 2 + 2].copy_from_slice(&c.to_le_bytes());
+        }
+        let s = 112;
+        b[s + EXTD.name_len..s + EXTD.name_len + 4].copy_from_slice(&4u32.to_le_bytes());
+        for (i, c) in "cd".encode_utf16().enumerate() {
+            b[s + EXTD.name + i * 2..s + EXTD.name + i * 2 + 2].copy_from_slice(&c.to_le_bytes());
+        }
+        let mut out = Vec::new();
+        parse(&b, &EXTD, &mut out).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0].name.encode_wide().count(),
+            20,
+            "borrowed past its own record"
+        );
+        assert_eq!(out[1].name, "cd");
+    }
+
+    #[test]
+    fn rd_never_reads_past_the_buffer() {
+        let buf = vec![0xFFu8; 24];
+        for off in 0..=24 {
+            assert_eq!(
+                rd::<u32>(&buf, off).is_ok(),
+                off + 4 <= buf.len(),
+                "u32 at {off}"
+            );
+            assert_eq!(
+                rd::<i64>(&buf, off).is_ok(),
+                off + 8 <= buf.len(),
+                "i64 at {off}"
+            );
+            assert_eq!(
+                rd::<[u8; 16]>(&buf, off).is_ok(),
+                off + 16 <= buf.len(),
+                "[u8; 16] at {off}"
+            );
+        }
+        assert!(rd::<u32>(&buf, usize::MAX).is_err(), "offset overflow");
     }
 }

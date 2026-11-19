@@ -61,6 +61,15 @@ pub struct PollFd {
     pub revents: c_short,
 }
 
+// `struct pollfd` (include/uapi/asm-generic/poll.h): `int fd; short events; short revents;`.
+// Asserted at compile time, so the Windows cross-check proves it as well.
+const _: () = {
+    assert!(std::mem::size_of::<PollFd>() == 8);
+    assert!(std::mem::offset_of!(PollFd, fd) == 0);
+    assert!(std::mem::offset_of!(PollFd, events) == 4);
+    assert!(std::mem::offset_of!(PollFd, revents) == 6);
+};
+
 // open (fcntl.h).
 pub const O_RDONLY: c_int = 0;
 /// A directory open never blocks in practice, but a FIFO-shaped path would.
@@ -124,6 +133,43 @@ pub struct Statx {
     pub dio_offset_align: u32,
     pub spare3: [u64; 12],
 }
+
+// `struct statx` and `struct statx_timestamp` (include/uapi/linux/stat.h). Every offset the
+// parser reads is asserted at compile time, so the check runs even in the Windows cross-build
+// where nothing here can execute.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(size_of::<StatxTimestamp>() == 16);
+    assert!(offset_of!(StatxTimestamp, tv_sec) == 0);
+    assert!(offset_of!(StatxTimestamp, tv_nsec) == 8);
+    assert!(
+        size_of::<Statx>() == 256,
+        "struct statx is a fixed 256 bytes"
+    );
+    assert!(offset_of!(Statx, mask) == 0);
+    assert!(offset_of!(Statx, blksize) == 4);
+    assert!(offset_of!(Statx, attributes) == 8);
+    assert!(offset_of!(Statx, nlink) == 16);
+    assert!(offset_of!(Statx, uid) == 20);
+    assert!(offset_of!(Statx, gid) == 24);
+    assert!(offset_of!(Statx, mode) == 28);
+    assert!(offset_of!(Statx, ino) == 32);
+    assert!(offset_of!(Statx, size) == 40);
+    assert!(offset_of!(Statx, blocks) == 48);
+    assert!(offset_of!(Statx, attributes_mask) == 56);
+    assert!(offset_of!(Statx, atime) == 64);
+    assert!(offset_of!(Statx, btime) == 80);
+    assert!(offset_of!(Statx, ctime) == 96);
+    assert!(offset_of!(Statx, mtime) == 112);
+    assert!(offset_of!(Statx, rdev_major) == 128);
+    assert!(offset_of!(Statx, rdev_minor) == 132);
+    assert!(offset_of!(Statx, dev_major) == 136);
+    assert!(offset_of!(Statx, dev_minor) == 140);
+    assert!(offset_of!(Statx, mnt_id) == 144);
+    assert!(offset_of!(Statx, dio_mem_align) == 152);
+    assert!(offset_of!(Statx, dio_offset_align) == 156);
+    assert!(offset_of!(Statx, spare3) == 160);
+};
 
 /// The 64-bit `dev_t` glibc hands out from `major`/`minor`, so a statx-derived device
 /// compares equal to `std`'s `Metadata::dev` and to `MetadataExt::dev`.
