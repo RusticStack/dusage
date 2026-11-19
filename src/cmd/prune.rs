@@ -39,26 +39,26 @@ Protected roots are always refused:
            /srv, /root, /home, $HOME and ancestors";
 
 /// Entry point for `fastdel <args>` and `dusage prune <args>`.
+/// The flags `prune` (and the `fastdel` binary) take, for [`super::accepted_flags`].
+pub(super) const VALUE_FLAGS: &[&str] = &[
+    "--age",
+    "--prefix",
+    "--threads",
+    "--log",
+    "--limit",
+    "--preset",
+];
+pub(super) const BOOL_FLAGS: &[&str] = &[
+    "--dry",
+    "--print-presets",
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+];
+
 pub fn run(raw: Vec<String>) -> Result<(), Fail> {
-    let a = Args::parse(
-        raw,
-        &[
-            "--age",
-            "--prefix",
-            "--threads",
-            "--log",
-            "--limit",
-            "--preset",
-        ],
-        &[
-            "--dry",
-            "--print-presets",
-            "-h",
-            "--help",
-            "-V",
-            "--version",
-        ],
-    )?;
+    let a = Args::parse(raw, VALUE_FLAGS, BOOL_FLAGS)?;
     if a.flag("-h") || a.flag("--help") {
         println!("{PRUNE_HELP}");
         return Ok(());
