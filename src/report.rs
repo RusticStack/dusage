@@ -332,6 +332,9 @@ pub fn render_search(
     // The CLI decides from the roots (several paths, or a directory walk); a bare
     // `dusage search needle file.txt` prints lines without a file name.
     let many = o.with_filename.unwrap_or(r.files.len() > 1);
+    // `--null-data` ends every printed record with NUL, which is what makes the output safe
+    // to pipe into `xargs -0`.
+    let end: &[u8] = if o.term == b'\n' { b"\n" } else { &[o.term] };
     let mut printed = false;
     let mut printed_heading = false;
     for f in &r.files {
@@ -339,7 +342,8 @@ pub fn render_search(
             if o.null {
                 write!(out, "{}\0", f.path)?;
             } else {
-                writeln!(out, "{}", f.path)?;
+                write!(out, "{}", f.path)?;
+                out.write_all(end)?;
             }
             continue;
         }
@@ -347,10 +351,11 @@ pub fn render_search(
             let n = if o.count_matches { f.total } else { f.matches };
             if many {
                 let sep = if o.null { '\0' } else { ':' };
-                writeln!(out, "{}{sep}{}", f.path, n)?;
+                write!(out, "{}{sep}{}", f.path, n)?;
             } else {
-                writeln!(out, "{}", n)?;
+                write!(out, "{}", n)?;
             }
+            out.write_all(end)?;
             continue;
         }
         if f.binary && !o.text {
@@ -417,7 +422,7 @@ pub fn render_search(
             } else {
                 out.write_all(&h.text)?;
             }
-            writeln!(out)?;
+            out.write_all(end)?;
         }
     }
     Ok(())
