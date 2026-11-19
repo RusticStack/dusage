@@ -275,9 +275,9 @@ those docs were written.
   reverse automaton to be run in suffix mode; that is the next engine change worth measuring.
 - No `--follow`. The walker never follows a symlink, by the same invariant the scanner and
   the pruner keep, and a followed tree needs cycle detection before it can be offered.
-- A search over a tree still collects every candidate before the readers start, which is where
-  its resident set comes from: about 350 bytes per file, so 70 MB over `/usr`. Feeding files to
-  the workers as they are found, with a bounded queue, is the change that removes it.
+- `dusage find` still collects every path before printing, because its output is the sorted
+  candidate list itself: 68 MB over `/usr` against `find(1)`'s 4.8 MB. Sorting at the end from a
+  stream is the change that would close it; `search` no longer has this shape.
 - No mmap. Files are read in 64 KiB blocks into a buffer each worker reuses, and mapping large
   files instead was measured and rejected: on `/usr` the mapping's page faults cost more than
   `read`'s copy (6.4-7.5 s against 3.7-4.8 s for the same search), and on a page-cached tree
