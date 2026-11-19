@@ -83,6 +83,8 @@ A path of `-` is standard input, and with no paths a piped stdin is searched ins
     --no-ignore-parent     do not read the ignore files above a root
     --no-ignore-files      read no ignore file at all (the three switches above)
     --no-ignore-global     accepted for compatibility; this never reads a global ignore file
+    --follow               follow symbolic links, walking each real directory once
+                           (ripgrep spells this -L; here -L means --files-without-match)
     -x, --one-filesystem   stay on the starting filesystem
     --json                 machine-readable output
     --color[=WHEN]         WHEN is always, never or auto (default auto)
@@ -125,6 +127,8 @@ OPTIONS:
     --no-ignore-parent     do not read the ignore files above a root
     --no-ignore-files      read no ignore file at all (the three switches above)
     --no-ignore-global     accepted for compatibility; this never reads a global ignore file
+    --follow               follow symbolic links, walking each real directory once
+                           (ripgrep spells this -L; here -L means --files-without-match)
     -x, --one-filesystem   stay on the starting filesystem
     --json                 machine-readable output
     --color[=WHEN]         WHEN is always, never or auto (default auto)
@@ -352,6 +356,7 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--no-ignore-parent",
     "--no-ignore-global",
     "--no-ignore-files",
+    "--follow",
     "-x",
     "--one-filesystem",
     "--one-file-system",
@@ -565,6 +570,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--no-ignore-parent",
                 "--no-ignore-global",
                 "--no-ignore-files",
+                "--follow",
                 "-x",
                 "--one-filesystem",
                 "--one-file-system",
@@ -758,6 +764,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.no_ignore_vcs = a.flag("--no-ignore-vcs") || a.flag("--no-ignore-files");
     o.no_ignore_dot = a.flag("--no-ignore-dot") || a.flag("--no-ignore-files");
     o.no_ignore_parent = a.flag("--no-ignore-parent") || a.flag("--no-ignore-files");
+    o.follow = a.flag("--follow");
     let json = a.flag("--json");
     let color = color_enabled(color_mode.as_deref());
     // Colour, the JSON report and `--column` all need each match located inside its line.

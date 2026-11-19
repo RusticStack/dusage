@@ -110,6 +110,8 @@ pub struct SearchOptions {
     pub no_ignore_dot: bool,
     /// Do not stack the rule files of a root's parent directories.
     pub no_ignore_parent: bool,
+    /// Follow symbolic links, refusing to walk a directory twice (`--follow`).
+    pub follow: bool,
 }
 
 /// One piece of a `-r` replacement: text to print, or a group of the match it came from.
@@ -178,6 +180,7 @@ impl SearchOptions {
             no_ignore_vcs: false,
             no_ignore_dot: false,
             no_ignore_parent: false,
+            follow: false,
         }
     }
 }
@@ -276,6 +279,9 @@ struct WalkJob {
     depth: usize,
     rules: Arc<IgnoreRules>,
     dev: u64,
+    /// The real paths of the directories from the root down to this one. Only kept when
+    /// `--follow` can make a walk revisit one, which is the only way a cycle forms.
+    chain: Arc<Vec<std::path::PathBuf>>,
 }
 
 /// What one job produced: the candidates it listed, its share of the statistics, and the
@@ -321,10 +327,26 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
         let name = e.name.to_string_lossy();
         let child_rel = join_rel(rel, &name);
         let is_dir = e.is_dir() && !e.is_reparse();
-        // A walk never follows a link: a reparse point is listed as a link or not at all.
+        // A reparse point or symlink is followed only when asked: `--follow` reads the
+        // target and walks it if it is a directory, otherwise the entry is left alone.
+        let mut target: Option<std::fs::Metadata> = None;
+        let mut is_dir = is_dir;
         if e.is_reparse() {
-            out.stats.entries_ignored += 1;
-            continue;
+            if !o.follow {
+                out.stats.entries_ignored += 1;
+                continue;
+            }
+            match std::fs::metadata(job.dir.join(&e.name)) {
+                Ok(md) => {
+                    is_dir = md.is_dir();
+                    target = Some(md);
+                }
+                Err(err) => {
+                    // A link to nothing is reported the way an unreadable path is.
+                    out.stats.errors.record(&err);
+                    continue;
+                }
+            }
         }
         // `--max-depth N` counts the path levels below the root that may be reported.
         if o.max_depth.is_some_and(|m| job.depth + 1 > m) {
@@ -367,18 +389,39 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
                 });
             }
             if o.max_depth.is_none_or(|m| job.depth + 1 < m) {
+                let mut chain = job.chain.clone();
+                if o.follow {
+                    // A link can point back up the tree: walk each real directory once.
+                    let Some(real) = std::fs::canonicalize(&child).ok() else {
+                        out.stats.entries_ignored += 1;
+                        continue;
+                    };
+                    if chain.contains(&real) {
+                        out.stats.entries_ignored += 1;
+                        continue;
+                    }
+                    Arc::make_mut(&mut chain).push(real);
+                }
                 out.children.push(WalkJob {
                     dir: child,
                     rel: child_rel,
                     depth: job.depth + 1,
                     rules: Arc::new(rules.clone()),
                     dev: job.dev,
+                    chain,
                 });
             }
         } else {
-            // The inode is read only when a mode prints or filters on it.
+            // The inode is read only when a mode prints or filters on it, or when `--follow`
+            // already had to read the target to know what it is.
             let (mut size, mut modified) = (0u64, None);
-            if o.details || o.max_file_size.is_some() {
+            if let Some(md) = &target {
+                if o.max_file_size.is_some_and(|limit| md.len() > limit) {
+                    continue;
+                }
+                size = md.len();
+                modified = md.modified().ok();
+            } else if o.details || o.max_file_size.is_some() {
                 let path = job.dir.join(&e.name);
                 match e.stat(&path) {
                     Ok(st) => {
@@ -447,12 +490,20 @@ fn root_jobs(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Vec<WalkJob>,
                 } else {
                     root_dev
                 };
+                let chain = if o.follow {
+                    Arc::new(vec![
+                        std::fs::canonicalize(root).unwrap_or_else(|_| root.clone())
+                    ])
+                } else {
+                    Arc::new(Vec::new())
+                };
                 jobs.push(WalkJob {
                     dir: root.clone(),
                     rel: String::new(),
                     depth: 0,
                     rules: ancestors,
                     dev,
+                    chain,
                 });
             }
             Err(e) => {
