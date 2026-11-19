@@ -135,6 +135,7 @@ OPTIONS:
     --newerct DATE         changed after DATE
     --dirs                 directories only
     --files                files only
+    --empty                only empty files and directories (find -empty)
     --long                 print size, modification time and path
     --max-depth N          do not descend more than N levels below each root
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
@@ -757,6 +758,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--ignore-case",
                 "--name",
                 "--full-path",
+                "--empty",
                 "--dirs",
                 "--files",
                 "--long",
@@ -1151,7 +1153,9 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 }
             };
             let since = stamp("--newermt")?.or(stamp("--newerat")?.or(stamp("--newerct")?));
+            let empty_only = a.flag("--empty");
             o.details = json
+                || empty_only
                 || a.flag("--long")
                 || since.is_some()
                 || a.value("--size").is_some()
@@ -1199,6 +1203,19 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 }
                 if dirs_only && !c.is_dir || files_only && c.is_dir {
                     return false;
+                }
+                // `find -empty`: a file of no bytes, or a directory with no entries.
+                if empty_only {
+                    let empty = if c.is_dir {
+                        std::fs::read_dir(&c.path)
+                            .map(|mut d| d.next().is_none())
+                            .unwrap_or(false)
+                    } else {
+                        c.size == 0
+                    };
+                    if !empty {
+                        return false;
+                    }
                 }
                 if let Some(f) = &size_filter {
                     if !f.matches(c.size) {

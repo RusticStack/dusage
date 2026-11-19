@@ -465,6 +465,7 @@ find_case find_no_match eq plain . '*.nope' '. -name *.nope'
 find_case find_mindepth eq plain . '--mindepth 2 *' '. -mindepth 2'
 find_case find_name_only eq plain . '--name *.md' '. -name *.md'
 find_case find_newermt eq plain . '--newermt 2000-01-01 *.txt' '. -newermt 2000-01-01 -name *.txt'
+find_case find_empty eq plain . '--empty *' '. -empty'
 # No `--null-data` cases here: a record may hold newlines, so the harness cannot sort the
 # outputs into a comparable order, and ripgrep's file order is whatever its workers finish
 # in. `tests/search_cli.rs` asserts the exact bytes instead.

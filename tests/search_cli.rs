@@ -1450,3 +1450,31 @@ fn null_data_splits_on_nul() {
     let zero = run(&["search", "-0", "-l", "needle"], &dir);
     assert_eq!(zero.stdout, names.stdout);
 }
+
+#[test]
+fn empty_files_and_directories() {
+    let f = Fixture::new("empty");
+    let dir = f.root.join("emp");
+    fs::create_dir_all(dir.join("hollow")).unwrap();
+    fs::create_dir_all(dir.join("full")).unwrap();
+    fs::write(dir.join("zero.txt"), "").unwrap();
+    fs::write(dir.join("full/f.txt"), "x").unwrap();
+    fs::write(dir.join("some.txt"), "x").unwrap();
+
+    // A file of no bytes and a directory with no entries, which is `find -empty`.
+    let both = stdout(&run(&["find", "--empty", "*"], &dir));
+    assert_eq!(both.lines().count(), 2, "{both}");
+    assert!(both.contains("hollow"), "{both}");
+    assert!(both.contains("zero.txt"), "{both}");
+    assert!(!both.contains("full"), "{both}");
+
+    // The type filters narrow it further, as `find -empty -type f` does.
+    assert_eq!(
+        stdout(&run(&["find", "--empty", "--files", "*"], &dir)).trim(),
+        "zero.txt"
+    );
+    assert_eq!(
+        stdout(&run(&["find", "--empty", "--dirs", "*"], &dir)).trim(),
+        "hollow"
+    );
+}
