@@ -151,6 +151,30 @@ lazy enumerator that reads types from the dirent and stats only when a mode need
 the block-oriented literal scan, the SWAR literal matcher behind it, and a 64 KiB buffered
 stdout. Each is measured in the sections below.
 
+## Memory
+
+Peak resident set (`/usr/bin/time -f '%M'`), measured on the same box:
+
+| Case | dusage | reference |
+| --- | --- | --- |
+| search `-l` over `/usr` (162k files, 7.9 GB) | **70 MB** | `rg` 13 MB |
+| search `-c` over `/usr/local/go` (15.6k files) | 18 MB | `rg` 9 MB, `grep` 4.6 MB |
+| search `-c` over one 550 MB binary | **3.3 MB** | — |
+| search `-c` over one 224 MB text file | **3.1 MB** | `rg` 233 MB |
+| scan `/usr` (180k files) | 7 MB | `du -sb` 4.3 MB |
+| find `'*'` over `/usr` | 68 MB | `find(1)` 4.8 MB |
+
+Three of those rows are deliberate and one is not:
+
+- **Big single files cost us almost nothing** because the scanner streams 64 KiB at a time and
+  then a megabyte at a time. ripgrep maps the file, so its resident set is the file.
+- **A binary file is scanned for one match and no line structure at all**, which is why a 550 MB
+  executable costs 3.3 MB and 0.09 s against 91 MB and 0.30 s before.
+- **A tree costs more than ripgrep** because the walk collects its candidates before the readers
+  start: 162k candidates at roughly 350 bytes each, plus the line buffers a worker reuses. Cutting
+  that means feeding files to the workers as they are found, with a bounded queue.
+- **`find` costs the most** for the same reason, and here the candidates *are* the output.
+
 ## Thread defaults
 
 The default is one thread per core clamped to 4..16 (`src/cli.rs`), which is 4
