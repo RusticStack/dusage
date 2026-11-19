@@ -5,6 +5,10 @@
 //! difference between reading at 1.7 GB/s and at ripgrep's 6 GB/s. Everything here answers
 //! exactly what `hay[from..].iter().position(|&b| b == needle)` answers, only faster.
 //!
+//! [`memchr`], [`memchr2`], [`memchr_ci`] and [`count`] answer for one byte (or two), and
+//! [`Prefilter`] for a small set of needles: the positions a search jumps between when it has a
+//! literal every match must contain, one per candidate run a regex can offer.
+//!
 //! This is the one module outside `src/unix` and `src/win` allowed to use `unsafe`, and it
 //! uses it for two reasons only: the x86 intrinsics, which are `unsafe` because they read past
 //! the end of a vector the CPU does not bounds-check, and the vector loads themselves, which
@@ -12,6 +16,7 @@
 //! once per process with `is_x86_feature_detected!`, so no instruction is executed on a CPU
 //! that does not advertise it, and every path falls back to the portable loop.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 /// The widest loop this CPU can run.
@@ -60,6 +65,256 @@ pub fn memchr(hay: &[u8], needle: u8, from: usize) -> Option<usize> {
         Level::Portable => {}
     }
     portable(hay, needle, from)
+}
+
+/// Needles one [`Prefilter`] looks for at once. A pattern with more alternation branches than
+/// this keeps the single mandatory run instead, since every branch's run would cost a vector
+/// compare per block for a candidate set that is no longer selective.
+pub const MAX_PREFILTER: usize = 4;
+
+/// Needle length from which the scan may also compare the second byte. A two-byte needle is
+/// already cheap to verify, so the extra compare would cost more than the candidates it removes.
+const PAIR_MIN: usize = 3;
+
+/// Candidates per haystack byte above which comparing the second byte pays: one candidate every
+/// [`PAIR_DENSITY`] bytes still leaves the compares cheaper than the verifies they save, and a
+/// rarer leading byte leaves nothing to filter.
+const PAIR_DENSITY: usize = 256;
+
+/// Bytes sampled from the first haystack a scan sees, to decide that per needle, and the least
+/// a sample may be to count: one short file at the start of a walk says nothing about the text
+/// behind it, so the decision waits for a haystack with room to answer.
+const SAMPLE: usize = 16384;
+const SAMPLE_MIN: usize = 4096;
+
+/// Set in [`Prefilter::state`] once the sampling above has run.
+const DECIDED: u8 = 0x80;
+
+/// A small set of needles scanned in one pass, for a search that jumps between the positions
+/// where a match could begin instead of stepping through every byte in between.
+///
+/// This is the multi-needle form of [`memchr`]: a block is compared against every needle's
+/// leading byte and, in the same mask, against its second byte one lane over, so a candidate
+/// that fails on its second byte never reaches a verify. Every run a match must contain is a
+/// needle here, which is what makes "no needle, no match" true.
+#[derive(Debug)]
+pub struct Prefilter {
+    /// The needles, longest first: at one offset the longest needle says most about the match
+    /// that contains it.
+    needles: Vec<Vec<u8>>,
+    /// Bit `i` means needle `i` is compared on its second byte too, and [`DECIDED`] says the
+    /// sample has been taken. Both forms answer a superset of the needle positions — the verify
+    /// step decides — so this only ever costs or saves time, and a race between two threads
+    /// costs nothing either.
+    state: AtomicU8,
+}
+
+impl Prefilter {
+    /// Prepare `needles`. `None` when there are none, or more than [`MAX_PREFILTER`].
+    pub fn new(mut needles: Vec<Vec<u8>>) -> Option<Prefilter> {
+        needles.retain(|n| !n.is_empty());
+        if needles.is_empty() || needles.len() > MAX_PREFILTER {
+            return None;
+        }
+        needles.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        needles.dedup();
+        Some(Prefilter {
+            state: AtomicU8::new(0),
+            needles,
+        })
+    }
+
+    /// Which needles are worth a second-byte compare in this haystack, from one sample, or
+    /// `None` while the sample is too small to say.
+    fn decide(&self, hay: &[u8], from: usize) -> Option<u8> {
+        let sample = &hay[from.min(hay.len())..(from + SAMPLE).min(hay.len())];
+        if sample.len() < SAMPLE_MIN {
+            return None;
+        }
+        let mut bits = 0u8;
+        for (i, n) in self.needles.iter().enumerate() {
+            if n.len() >= PAIR_MIN && count(sample, n[0]) * PAIR_DENSITY >= sample.len() {
+                bits |= 1 << i;
+            }
+        }
+        Some(bits)
+    }
+
+    /// The earliest needle at or after `from`, as its offset and its index in [`Self::needles`].
+    #[inline]
+    pub fn find_any(&self, hay: &[u8], from: usize) -> Option<(usize, usize)> {
+        if from > hay.len() {
+            return None;
+        }
+        let mut state = self.state.load(Ordering::Relaxed);
+        if state & DECIDED == 0 {
+            if let Some(bits) = self.decide(hay, from) {
+                state = bits | DECIDED;
+                self.state.store(state, Ordering::Relaxed);
+            }
+        }
+        // One needle whose leading byte is rare needs no mask at all: [`memchr`] is the same
+        // scan with three fewer operations per block.
+        if state & 1 == 0 && self.needles.len() == 1 {
+            let mut at = from;
+            while let Some(p) = memchr(hay, self.needles[0][0], at) {
+                if hay[p..].starts_with(&self.needles[0]) {
+                    return Some((p, 0));
+                }
+                at = p + 1;
+            }
+            return None;
+        }
+        #[cfg(target_arch = "x86_64")]
+        match level() {
+            // SAFETY: both check every load against the haystack length before issuing it, and
+            // the feature they need was detected at startup.
+            Level::Avx2 => return unsafe { self.find_any_avx2(hay, from, state) },
+            Level::Sse2 => return unsafe { self.find_any_sse2(hay, from, state) },
+            Level::Portable => {}
+        }
+        self.portable(hay, from)
+    }
+
+    /// The offset of the earliest needle at or after `from`.
+    #[inline]
+    pub fn find_from(&self, hay: &[u8], from: usize) -> Option<usize> {
+        self.find_any(hay, from).map(|(at, _)| at)
+    }
+
+    /// The needles, longest first.
+    pub fn needles(&self) -> &[Vec<u8>] {
+        &self.needles
+    }
+
+    /// The first candidate among the byte positions `mask` flags, counting from `base`.
+    #[inline]
+    fn first_in_mask(&self, hay: &[u8], base: usize, mut mask: u32) -> Option<(usize, usize)> {
+        while mask != 0 {
+            let at = base + mask.trailing_zeros() as usize;
+            if let Some(i) = self.verify(hay, at) {
+                return Some((at, i));
+            }
+            mask &= mask - 1;
+        }
+        None
+    }
+
+    /// The first candidate at or after `from`, a byte per step.
+    fn portable(&self, hay: &[u8], from: usize) -> Option<(usize, usize)> {
+        (from..hay.len()).find_map(|at| self.verify(hay, at).map(|i| (at, i)))
+    }
+
+    /// The index of the longest needle that starts at `at`. The bytes after the leading one are
+    /// checked from the back, which rejects a near miss on the first compare.
+    #[inline]
+    fn verify(&self, hay: &[u8], at: usize) -> Option<usize> {
+        self.needles.iter().position(|n| {
+            n.len() <= hay.len() - at
+                && n.iter()
+                    .rev()
+                    .zip(hay[at..at + n.len()].iter().rev())
+                    .all(|(a, b)| a == b)
+        })
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn find_any_avx2(&self, hay: &[u8], from: usize, mode: u8) -> Option<(usize, usize)> {
+        use std::arch::x86_64::*;
+        let len = hay.len();
+        let ptr = hay.as_ptr();
+        let mut heads = [_mm256_set1_epi8(0); MAX_PREFILTER];
+        let mut nexts = [_mm256_set1_epi8(0); MAX_PREFILTER];
+        for (i, n) in self.needles.iter().enumerate() {
+            heads[i] = _mm256_set1_epi8(n[0] as i8);
+            nexts[i] = _mm256_set1_epi8(n.get(1).copied().unwrap_or(n[0]) as i8);
+        }
+        let paired: [bool; MAX_PREFILTER] = std::array::from_fn(|k| mode & (1 << k) != 0);
+        // A paired mask looks one byte past the block for the second byte, so the next block
+        // has to start on that byte rather than after it.
+        let step = match paired[..self.needles.len()].iter().any(|&p| p) {
+            true => 31,
+            false => 32,
+        };
+        let mut i = from;
+        // SAFETY: `i + 32 <= len`, so the 32-byte load stays inside the slice.
+        while i + 32 <= len {
+            let block = unsafe { _mm256_loadu_si256(ptr.add(i) as *const __m256i) };
+            let mut any = 0u32;
+            for ((head, next), &pair) in heads
+                .iter()
+                .zip(nexts.iter())
+                .zip(paired.iter())
+                .take(self.needles.len())
+            {
+                let first = _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, *head)) as u32;
+                any |= match pair {
+                    // The second byte of a candidate at `i + k` is the block's byte at `k + 1`,
+                    // so its mask lines up with the leading mask one lane to the left.
+                    true => {
+                        let second = _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, *next)) as u32;
+                        first & (second >> 1)
+                    }
+                    false => first,
+                };
+            }
+            if any != 0 {
+                if let Some(hit) = self.first_in_mask(hay, i, any) {
+                    return Some(hit);
+                }
+            }
+            i += step;
+        }
+        self.portable(hay, i)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "sse2")]
+    unsafe fn find_any_sse2(&self, hay: &[u8], from: usize, mode: u8) -> Option<(usize, usize)> {
+        use std::arch::x86_64::*;
+        let len = hay.len();
+        let ptr = hay.as_ptr();
+        let mut heads = [_mm_set1_epi8(0); MAX_PREFILTER];
+        let mut nexts = [_mm_set1_epi8(0); MAX_PREFILTER];
+        for (i, n) in self.needles.iter().enumerate() {
+            heads[i] = _mm_set1_epi8(n[0] as i8);
+            nexts[i] = _mm_set1_epi8(n.get(1).copied().unwrap_or(n[0]) as i8);
+        }
+        let paired: [bool; MAX_PREFILTER] = std::array::from_fn(|k| mode & (1 << k) != 0);
+        let step = match paired[..self.needles.len()].iter().any(|&p| p) {
+            true => 15,
+            false => 16,
+        };
+        let mut i = from;
+        // SAFETY: `i + 16 <= len`, so the 16-byte load stays inside the slice.
+        while i + 16 <= len {
+            let block = unsafe { _mm_loadu_si128(ptr.add(i) as *const __m128i) };
+            let mut any = 0u32;
+            for ((head, next), &pair) in heads
+                .iter()
+                .zip(nexts.iter())
+                .zip(paired.iter())
+                .take(self.needles.len())
+            {
+                let first = _mm_movemask_epi8(_mm_cmpeq_epi8(block, *head)) as u32;
+                any |= match pair {
+                    true => {
+                        let second = _mm_movemask_epi8(_mm_cmpeq_epi8(block, *next)) as u32;
+                        first & (second >> 1)
+                    }
+                    false => first,
+                };
+            }
+            if any != 0 {
+                if let Some(hit) = self.first_in_mask(hay, i, any) {
+                    return Some(hit);
+                }
+            }
+            i += step;
+        }
+        self.portable(hay, i)
+    }
 }
 
 /// The first byte equal to `needle` under ASCII case folding, at or after `from`.
@@ -361,6 +616,67 @@ mod tests {
         assert_eq!(memchr2(hay, b'a', b'b', 17), Some((23, b'b')));
         assert_eq!(memchr2(hay, b'z', b'b', 0), Some((23, b'b')));
         assert_eq!(memchr2(hay, b'z', b'z', 0), None);
+    }
+
+    #[test]
+    fn a_prefilter_finds_the_earliest_needle() {
+        let hay = b"..ab..cd..abcd..";
+        let pf = Prefilter::new(vec![b"cd".to_vec(), b"ab".to_vec()]).unwrap();
+        assert_eq!(
+            pf.find_any(hay, 0)
+                .map(|(at, i)| (at, &pf.needles()[i][..])),
+            Some((2, &b"ab"[..]))
+        );
+        assert_eq!(pf.find_any(hay, 3).map(|(at, _)| at), Some(6));
+        assert_eq!(
+            pf.find_any(hay, 7).map(|(at, _)| at),
+            Some(10),
+            "the longest needle wins one offset"
+        );
+        assert_eq!(pf.find_any(hay, 14), None);
+        assert_eq!(pf.find_from(hay, 0), Some(2));
+    }
+
+    #[test]
+    fn a_prefilter_agrees_with_the_brute_force_scan() {
+        // Every length across the vector and tail paths, with needles that share a first byte
+        // and needles that do not, so the mask and the verify step are both exercised.
+        let mut hay = vec![b'.'; 200];
+        for at in [0usize, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 199] {
+            hay[at] = b'a';
+            hay[(at + 3) % 200] = b'c';
+        }
+        hay[120..124].copy_from_slice(b"abcd");
+        // Candidates straddling the vector edges, where the second byte comes from the next
+        // block or from the tail loop.
+        for at in [14usize, 15, 30, 31, 32, 46, 47, 62, 63, 64] {
+            hay[at..at + 2].copy_from_slice(b"ab");
+        }
+        let sets: [Vec<Vec<u8>>; 3] = [
+            vec![b"abc".to_vec(), b"cd".to_vec()],
+            vec![b"aaa".to_vec()],
+            vec![
+                b"ac".to_vec(),
+                b"aa".to_vec(),
+                b"ab".to_vec(),
+                b"abc".to_vec(),
+            ],
+        ];
+        for set in sets {
+            let pf = Prefilter::new(set.clone()).unwrap();
+            for from in [0usize, 1, 15, 16, 31, 32, 100, 190, 198, 199, 200] {
+                let want = (from..hay.len()).find_map(|at| {
+                    pf.needles()
+                        .iter()
+                        .position(|n| hay[at..].starts_with(n))
+                        .map(|i| (at, i))
+                });
+                assert_eq!(pf.find_any(&hay, from), want, "needles {set:?} from {from}");
+            }
+        }
+        assert!(Prefilter::new(Vec::new()).is_none());
+        assert!(Prefilter::new(vec![Vec::new()]).is_none());
+        assert!(Prefilter::new((0..5).map(|_| vec![b'x']).collect()).is_none());
     }
 
     #[test]
