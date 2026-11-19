@@ -40,11 +40,9 @@
 //! every failure prints the pattern and the haystack as escaped bytes, so a failing case
 //! reproduces from the printed text alone.
 //!
-//! The default is sized so this file is green on the code it was written against. The
-//! divergences it found are pinned by the `known_*` tests at the bottom, which assert the
-//! documented contract and are `#[ignore]`d: `cargo test --test fuzz_matchers -- --ignored`
-//! runs them and they fail. A run much larger than the default reaches those same bugs
-//! through generated cases, so it is expected to go red until they are fixed.
+//! The default is sized so this file stays quick; `DUSAGE_FUZZ_CASES` is the knob for a
+//! longer run. The three divergences this harness found are pinned as named regression tests
+//! at the bottom, so each bug stays caught by a case that does not depend on the generator.
 
 use dusage::glob::Glob;
 use dusage::pcre::Pcre;
@@ -342,17 +340,6 @@ impl PatGen {
 // Regular expression engine: DFA against the Pike VM
 // ---------------------------------------------------------------------------------------
 
-/// The one divergence this harness found, filtered out of the count above so the build
-/// stays green: see `known_captures_at_falls_through_to_byte_program`. `captures_at` runs the
-/// character program on text, and when that character program has no match it falls through
-/// to the byte program instead of answering "no match" (`src/regex.rs`, the `run_capture`
-/// call inside `captures_at`). The signature is therefore exact: a haystack the character
-/// program is responsible for, where the search reports nothing and the capture path reports
-/// something. Everything else still fails the test.
-fn known_capture_fallthrough(re: &Regex, hay: &[u8], caps: bool, found: bool) -> bool {
-    re.is_unicode() && !hay.is_ascii() && std::str::from_utf8(hay).is_ok() && !found && caps
-}
-
 /// True when the byte program is the one `find_at` itself would run, which is what makes
 /// `accept_end` (byte program only) comparable with it.
 fn byte_program_is_exact(re: &Regex, hay: &[u8]) -> bool {
@@ -370,7 +357,6 @@ fn regex_dfa_and_vm_agree() {
     let mut compiled = 0usize;
     let mut haystacks = 0usize;
     let mut hits = 0usize;
-    let mut known = 0usize;
     let mut unicode_checks = 0usize;
     let mut rejections: Vec<String> = Vec::new();
 
@@ -465,17 +451,13 @@ fn regex_dfa_and_vm_agree() {
             let whole = caps.as_ref().and_then(|c| c.first().copied().flatten());
             let want = found.map(|m| (m.start, m.end));
             if group_slots != expected_slots || whole != want {
-                if known_capture_fallthrough(&re, hay, caps.is_some(), found.is_some()) {
-                    known += 1;
-                } else {
-                    report.add(
-                        "captures_at on (pattern) and find on pattern disagree",
-                        &pattern,
-                        hay,
-                        show(whole),
-                        show(want),
-                    );
-                }
+                report.add(
+                    "captures_at on (pattern) and find on pattern disagree",
+                    &pattern,
+                    hay,
+                    show(whole),
+                    show(want),
+                );
             }
         }
     }
@@ -483,7 +465,7 @@ fn regex_dfa_and_vm_agree() {
     println!(
         "regex DFA/VM: {compiled} patterns compiled ({rejected} rejected), \
          {haystacks} haystack checks of which {hits} matched, {unicode_checks} of them on the \
-         character path, {known} known captures_at divergences, {} disagreements",
+         character path, {} disagreements",
         report.found()
     );
     if !rejections.is_empty() {
@@ -878,23 +860,21 @@ fn glob_matches_reference() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Known divergences
+// Regressions
 //
-// Each record asserts the contract the engine documents and fails on today's code, so the
-// `#[ignore]` is what keeps the build green. Delete the attribute once the bug is fixed.
+// The three divergences this harness found, each pinned as a named case so it stays caught
+// without depending on the generator reaching it.
 // ---------------------------------------------------------------------------------------
 
-/// `Regex::captures_at` falls through to the byte capture program when the character program
-/// finds nothing, instead of treating the character program's answer as final the way
-/// `find_at` does (`src/regex.rs`, the `run_capture` call inside `captures_at`).
+/// `Regex::captures_at` used to fall through to the byte capture program when the character
+/// program found nothing, instead of treating the character program's answer as final the way
+/// `find_at` does (the `run_capture` call inside `captures_at`).
 ///
-/// The mismatch: `(\B)` on `"é"` (bytes `c3 a9`). `é` is one Unicode word character, so both
+/// The case: `(\B)` on `"é"` (bytes `c3 a9`). `é` is one Unicode word character, so both
 /// positions of that one-character haystack are word boundaries and `\B` cannot match —
-/// `find` answers `None`. `captures_at` answers `Some((0, 0))`: the bytes `c3` and `a9` are
-/// both non-word, so the byte program finds a non-boundary at offset 0. This one fires inside
-/// the default case count, which is why `known_capture_fallthrough` filters it there.
+/// `find` answers `None`. The byte program sees `c3` and `a9`, both non-word, and finds a
+/// non-boundary at offset 0, which is the answer it used to fall through to.
 #[test]
-#[ignore = "known bug: captures_at falls through to the byte program on a character-path miss"]
 fn known_captures_at_falls_through_to_byte_program() {
     let hay = "é".as_bytes();
     let re = Regex::new("(\\B)").unwrap();
@@ -910,18 +890,17 @@ fn known_captures_at_falls_through_to_byte_program() {
     );
 }
 
-/// A greedy quantifier loses to the empty match that the same pattern can make at the same
-/// start offset. The module documents `*` and `+` as greedy, and `crate::pcre` (an
+/// A greedy quantifier used to lose to the empty match that the same pattern can make at the
+/// same start offset. The module documents `*` and `+` as greedy, and `crate::pcre` (an
 /// independent backtracking engine) agrees with the documentation.
 ///
-/// The mismatch: `.*` on `"abc"` answers `(0, 0)` where the greedy reading and `crate::pcre`
-/// both give `(0, 3)`; `dusage search -o '.*'` therefore prints empty matches instead of the
-/// line. The same shape reaches `a*` on `"aaa"`, `x*` on `"xa"`, `[a-z]*` and `\w*` on
-/// `"abc"`, and the capture program `(.*)` too, so it is in the shared VM step: a match
-/// recorded while seeding threads at the current position sets the pending `cut`, which also
-/// suppresses the advance of the higher-priority threads already queued for that position.
+/// The case: `.*` on `"abc"` answered `(0, 0)` where the greedy reading and `crate::pcre` both
+/// give `(0, 3)`; `dusage search -o '.*'` therefore printed empty matches instead of the line.
+/// The same shape reaches `a*` on `"aaa"`, `x*` on `"xa"`, `[a-z]*` and `\w*` on `"abc"`, and
+/// the capture program `(.*)` too, because it was in the shared VM step: a match recorded while
+/// seeding threads at the current position set the pending `cut`, which also suppressed the
+/// advance of the higher-priority threads already queued for that position.
 #[test]
-#[ignore = "known bug: a greedy repeat loses to the empty match at the same start"]
 fn known_greedy_repeat_prefers_the_empty_match() {
     let hay = b"abc";
     let want = Some((0, 3));
@@ -938,20 +917,21 @@ fn known_greedy_repeat_prefers_the_empty_match() {
     );
     assert_eq!(
         Regex::new("(.*)").unwrap().captures_at(hay, 0),
-        Some(vec![want]),
-        "the capture program shares the step"
+        Some(vec![want, want]),
+        "the capture program shares the step, and group 1 spans the whole match"
     );
 }
 
-/// `find_at` can return a match starting later than the leftmost one, and `find` can return a
-/// shorter match at the same start, when another branch could match empty at a position the
-/// search reached first. `crate::pcre` reports the leftmost-first answer in both cases.
+/// `find_at` used to return a match starting later than the leftmost one, and `find` a shorter
+/// match at the same start, when another branch could match empty at a position the search
+/// reached first. `crate::pcre` reports the leftmost-first answer in both cases.
 ///
-/// The mismatches: `.*\z|\A` at offset 4 of `"bc1bb"` answers `(5, 5)` where `(4, 5)` exists
+/// The cases: `.*\z|\A` at offset 4 of `"bc1bb"` answered `(5, 5)` where `(4, 5)` exists
 /// (`.*` consumes the last byte and `\z` holds); `a{1,3}(\z|[^abc]{1,3}|[^abc]*){2}|(\A.+)`
-/// on `"0\tabbX"` answers `(2, 3)` where `(0, 6)` exists through the `(\A.+)` branch.
+/// on `"0\tabbX"` answered `(2, 3)` where `(0, 6)` exists through the `(\A.+)` branch. Both
+/// came from the reverse automaton flipping `\A` and `\z` into each other, so it could only
+/// see the anchors at the wrong end of the haystack.
 #[test]
-#[ignore = "known bug: the search answers a later or shorter match than leftmost-first gives"]
 fn known_search_prefers_a_shorter_or_later_match() {
     let hay = b"bc1bb";
     assert_eq!(
