@@ -1,0 +1,2421 @@
+For limit with limit flush on lambda thread alpha the from limit that to thread beta the on beta rate.
+fn handle_1(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7; Ok(1) }
+2026-11-03 02:02:14 INFO scan path=/var/log/archive-2.txt entries=26 bytes=8198
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 3.
+  "key_4": {"value": 68, "ratio": 0.0040, "label": "rate"},
+Buffer of alpha on for with and of parse by.
+fn handle_6(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 42; Ok(6) }
+2026-11-08 07:07:49 INFO scan path=/var/log/archive-7.txt entries=91 bytes=28693
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 8.
+  "key_9": {"value": 153, "ratio": 0.0090, "label": "by"},
+Beta alpha omicron omicron for beta channel zeta and in alpha.
+fn handle_11(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 77; Ok(11) }
+2026-11-13 12:12:24 INFO scan path=/var/log/archive-12.txt entries=156 bytes=49188
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 13.
+  "key_14": {"value": 238, "ratio": 0.0140, "label": "limit"},
+Beta epsilon by and lambda lambda from thread the gamma is parse render that thread on omicron with of beta.
+fn handle_16(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 112; Ok(16) }
+2026-11-18 17:17:59 INFO scan path=/var/log/archive-17.txt entries=221 bytes=69683
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 18.
+  "key_19": {"value": 323, "ratio": 0.0191, "label": "buffer"},
+On flush thread omicron to alpha gamma channel delta that zeta is this in beta for render channel.
+fn handle_21(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 147; Ok(21) }
+2026-11-23 22:22:34 INFO scan path=/var/log/archive-22.txt entries=286 bytes=90178
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 23.
+  "key_24": {"value": 408, "ratio": 0.0241, "label": "parse"},
+Thread buffer rate the gamma from omicron on render zeta rate render for that is omicron is.
+fn handle_26(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 182; Ok(26) }
+2026-11-28 03:27:09 INFO scan path=/var/log/archive-27.txt entries=351 bytes=110673
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 28.
+  "key_29": {"value": 493, "ratio": 0.0291, "label": "for"},
+Parse for alpha and gamma buffer for epsilon limit by.
+fn handle_31(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 217; Ok(31) }
+2026-11-05 08:32:44 INFO scan path=/var/log/archive-32.txt entries=416 bytes=131168
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 33.
+  "key_34": {"value": 578, "ratio": 0.0341, "label": "thread"},
+Epsilon of on beta with on is queue rate with queue for is the that.
+fn handle_36(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 252; Ok(36) }
+2026-11-10 13:37:19 INFO scan path=/var/log/archive-37.txt entries=481 bytes=151663
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 38.
+  "key_39": {"value": 663, "ratio": 0.0391, "label": "for"},
+Thread limit queue render limit limit for of from on and and is on queue with omicron flush omicron thread.
+fn handle_41(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 287; Ok(41) }
+2026-11-15 18:42:54 INFO scan path=/var/log/archive-42.txt entries=546 bytes=172158
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 43.
+  "key_44": {"value": 748, "ratio": 0.0441, "label": "in"},
+From on channel by and beta beta thread for of of of on.
+fn handle_46(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 322; Ok(46) }
+2026-11-20 23:47:29 INFO scan path=/var/log/archive-47.txt entries=611 bytes=192653
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 48.
+  "key_49": {"value": 833, "ratio": 0.0491, "label": "flush"},
+Parse beta rate beta zeta by that queue zeta gamma parse render in with alpha epsilon parse.
+fn handle_51(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 357; Ok(51) }
+2026-11-25 04:52:04 INFO scan path=/var/log/archive-52.txt entries=676 bytes=213148
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 53.
+  "key_54": {"value": 918, "ratio": 0.0542, "label": "with"},
+Channel and in queue alpha omicron delta gamma that gamma from for by rate zeta.
+fn handle_56(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 392; Ok(56) }
+2026-11-02 09:57:39 INFO scan path=/var/log/archive-57.txt entries=741 bytes=233643
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 58.
+  "key_59": {"value": 1003, "ratio": 0.0592, "label": "in"},
+With on and delta lambda that thread beta delta channel channel zeta delta buffer.
+fn handle_61(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 427; Ok(61) }
+2026-11-07 14:02:14 INFO scan path=/var/log/archive-62.txt entries=806 bytes=254138
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 63.
+  "key_64": {"value": 1088, "ratio": 0.0642, "label": "and"},
+This thread rate rate for in this with parse alpha limit rate alpha channel for on on from omicron.
+fn handle_66(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 462; Ok(66) }
+2026-11-12 19:07:49 INFO scan path=/var/log/archive-67.txt entries=871 bytes=274633
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 68.
+  "key_69": {"value": 1173, "ratio": 0.0692, "label": "rate"},
+Queue thread channel buffer flush flush channel alpha thread is this omicron beta render for beta of beta from.
+fn handle_71(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 497; Ok(71) }
+2026-11-17 00:12:24 INFO scan path=/var/log/archive-72.txt entries=936 bytes=295128
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 73.
+  "key_74": {"value": 1258, "ratio": 0.0742, "label": "buffer"},
+Beta this for to of flush beta rate to flush and in is thread for epsilon render queue.
+fn handle_76(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 532; Ok(76) }
+2026-11-22 05:17:59 INFO scan path=/var/log/archive-77.txt entries=1001 bytes=315623
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 78.
+  "key_79": {"value": 1343, "ratio": 0.0792, "label": "render"},
+Omicron with that on flush in lambda that beta thread omicron.
+fn handle_81(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 567; Ok(81) }
+2026-11-27 10:22:34 INFO scan path=/var/log/archive-82.txt entries=1066 bytes=336118
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 83.
+  "key_84": {"value": 1428, "ratio": 0.0843, "label": "the"},
+By of from from flush queue lambda buffer rate this.
+fn handle_86(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 602; Ok(86) }
+2026-11-04 15:27:09 INFO scan path=/var/log/archive-87.txt entries=1131 bytes=356613
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 88.
+  "key_89": {"value": 1513, "ratio": 0.0893, "label": "omicron"},
+Buffer lambda for on omicron and of in epsilon by delta flush for this render.
+fn handle_91(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 637; Ok(91) }
+2026-11-09 20:32:44 INFO scan path=/var/log/archive-92.txt entries=1196 bytes=377108
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 93.
+  "key_94": {"value": 1598, "ratio": 0.0943, "label": "beta"},
+That that epsilon zeta from and this thread lambda omicron rate.
+fn handle_96(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 672; Ok(96) }
+2026-11-14 01:37:19 INFO scan path=/var/log/archive-97.txt entries=1261 bytes=397603
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 98.
+  "key_99": {"value": 1683, "ratio": 0.0993, "label": "gamma"},
+The alpha that with that for from render limit channel by zeta.
+fn handle_101(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 707; Ok(101) }
+2026-11-19 06:42:54 INFO scan path=/var/log/archive-102.txt entries=1326 bytes=418098
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 103.
+  "key_104": {"value": 1768, "ratio": 0.1043, "label": "flush"},
+Beta of parse parse buffer channel in thread omicron rate thread on in for with rate beta by that of.
+fn handle_106(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 742; Ok(106) }
+2026-11-24 11:47:29 INFO scan path=/var/log/archive-107.txt entries=1391 bytes=438593
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 108.
+  "key_109": {"value": 1853, "ratio": 0.1093, "label": "render"},
+Gamma zeta flush alpha on epsilon that queue parse and that in to.
+fn handle_111(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 777; Ok(111) }
+2026-11-01 16:52:04 INFO scan path=/var/log/archive-112.txt entries=1456 bytes=459088
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 113.
+  "key_114": {"value": 1938, "ratio": 0.1143, "label": "for"},
+This channel with on on zeta buffer and.
+fn handle_116(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 812; Ok(116) }
+2026-11-06 21:57:39 INFO scan path=/var/log/archive-117.txt entries=1521 bytes=479583
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 118.
+  "key_119": {"value": 2023, "ratio": 0.1194, "label": "from"},
+Thread epsilon parse with for the epsilon that that parse lambda zeta channel thread render zeta epsilon.
+fn handle_121(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 847; Ok(121) }
+2026-11-11 02:02:14 INFO scan path=/var/log/archive-122.txt entries=1586 bytes=500078
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 123.
+  "key_124": {"value": 2108, "ratio": 0.1244, "label": "queue"},
+On is in by channel lambda delta and to on.
+fn handle_126(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 882; Ok(126) }
+2026-11-16 07:07:49 INFO scan path=/var/log/archive-127.txt entries=1651 bytes=520573
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 128.
+  "key_129": {"value": 2193, "ratio": 0.1294, "label": "with"},
+That from thread thread to buffer on by buffer the omicron buffer to queue on limit buffer limit and.
+fn handle_131(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 917; Ok(131) }
+2026-11-21 12:12:24 INFO scan path=/var/log/archive-132.txt entries=1716 bytes=541068
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 133.
+  "key_134": {"value": 2278, "ratio": 0.1344, "label": "rate"},
+This in on zeta on alpha lambda gamma in from gamma gamma buffer to to.
+fn handle_136(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 952; Ok(136) }
+2026-11-26 17:17:59 INFO scan path=/var/log/archive-137.txt entries=1781 bytes=561563
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 138.
+  "key_139": {"value": 2363, "ratio": 0.1394, "label": "zeta"},
+Is omicron by epsilon to that in zeta parse by flush that and alpha this in.
+fn handle_141(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 987; Ok(141) }
+2026-11-03 22:22:34 INFO scan path=/var/log/archive-142.txt entries=1846 bytes=582058
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 143.
+  "key_144": {"value": 2448, "ratio": 0.1444, "label": "flush"},
+By of channel beta with that with lambda from zeta omicron to rate for epsilon alpha to.
+fn handle_146(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1022; Ok(146) }
+2026-11-08 03:27:09 INFO scan path=/var/log/archive-147.txt entries=1911 bytes=602553
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 148.
+  "key_149": {"value": 2533, "ratio": 0.1494, "label": "rate"},
+Zeta channel beta the epsilon of epsilon and channel of lambda and buffer by channel the gamma that.
+fn handle_151(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1057; Ok(151) }
+2026-11-13 08:32:44 INFO scan path=/var/log/archive-152.txt entries=1976 bytes=623048
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 153.
+  "key_154": {"value": 2618, "ratio": 0.1545, "label": "channel"},
+Thread for thread beta flush delta in gamma of for epsilon.
+fn handle_156(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1092; Ok(156) }
+2026-11-18 13:37:19 INFO scan path=/var/log/archive-157.txt entries=2041 bytes=643543
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 158.
+  "key_159": {"value": 2703, "ratio": 0.1595, "label": "the"},
+Is of omicron for this parse to that parse parse render limit the of flush thread.
+fn handle_161(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1127; Ok(161) }
+2026-11-23 18:42:54 INFO scan path=/var/log/archive-162.txt entries=2106 bytes=664038
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 163.
+  "key_164": {"value": 2788, "ratio": 0.1645, "label": "to"},
+Limit limit thread flush that delta this gamma limit queue delta flush epsilon delta channel.
+fn handle_166(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1162; Ok(166) }
+2026-11-28 23:47:29 INFO scan path=/var/log/archive-167.txt entries=2171 bytes=684533
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 168.
+  "key_169": {"value": 2873, "ratio": 0.1695, "label": "render"},
+Flush delta is with lambda delta render rate with the is the alpha rate.
+fn handle_171(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1197; Ok(171) }
+2026-11-05 04:52:04 INFO scan path=/var/log/archive-172.txt entries=2236 bytes=705028
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 173.
+  "key_174": {"value": 2958, "ratio": 0.1745, "label": "beta"},
+In to by in zeta this this parse lambda gamma zeta alpha zeta lambda limit gamma and beta.
+fn handle_176(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1232; Ok(176) }
+2026-11-10 09:57:39 INFO scan path=/var/log/archive-177.txt entries=2301 bytes=725523
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 178.
+  "key_179": {"value": 3043, "ratio": 0.1795, "label": "of"},
+Limit that beta omicron lambda flush in in the with that of that in in the from.
+fn handle_181(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1267; Ok(181) }
+2026-11-15 14:02:14 INFO scan path=/var/log/archive-182.txt entries=2366 bytes=746018
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 183.
+  "key_184": {"value": 3128, "ratio": 0.1846, "label": "rate"},
+Omicron zeta and rate for on flush omicron of render to epsilon is flush.
+fn handle_186(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1302; Ok(186) }
+2026-11-20 19:07:49 INFO scan path=/var/log/archive-187.txt entries=2431 bytes=766513
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 188.
+  "key_189": {"value": 3213, "ratio": 0.1896, "label": "zeta"},
+Omicron limit on in is and is the parse lambda.
+fn handle_191(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1337; Ok(191) }
+2026-11-25 00:12:24 INFO scan path=/var/log/archive-192.txt entries=2496 bytes=787008
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 193.
+  "key_194": {"value": 3298, "ratio": 0.1946, "label": "omicron"},
+Omicron for alpha and on queue zeta for parse in from limit buffer.
+fn handle_196(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1372; Ok(196) }
+2026-11-02 05:17:59 INFO scan path=/var/log/archive-197.txt entries=2561 bytes=807503
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 198.
+  "key_199": {"value": 3383, "ratio": 0.1996, "label": "for"},
+Epsilon epsilon lambda to in lambda parse rate.
+fn handle_201(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1407; Ok(201) }
+2026-11-07 10:22:34 INFO scan path=/var/log/archive-202.txt entries=2626 bytes=827998
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 203.
+  "key_204": {"value": 3468, "ratio": 0.2046, "label": "render"},
+Zeta zeta the the buffer and from from in to zeta.
+fn handle_206(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1442; Ok(206) }
+2026-11-12 15:27:09 INFO scan path=/var/log/archive-207.txt entries=2691 bytes=848493
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 208.
+  "key_209": {"value": 3553, "ratio": 0.2096, "label": "omicron"},
+Rate buffer channel and lambda to that parse with on to that flush omicron gamma flush thread zeta.
+fn handle_211(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1477; Ok(211) }
+2026-11-17 20:32:44 INFO scan path=/var/log/archive-212.txt entries=2756 bytes=868988
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 213.
+  "key_214": {"value": 3638, "ratio": 0.2146, "label": "by"},
+On queue with by that and on flush to from on.
+fn handle_216(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1512; Ok(216) }
+2026-11-22 01:37:19 INFO scan path=/var/log/archive-217.txt entries=2821 bytes=889483
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 218.
+  "key_219": {"value": 3723, "ratio": 0.2197, "label": "omicron"},
+Omicron the that gamma by is thread from render channel.
+fn handle_221(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1547; Ok(221) }
+2026-11-27 06:42:54 INFO scan path=/var/log/archive-222.txt entries=2886 bytes=909978
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 223.
+  "key_224": {"value": 3808, "ratio": 0.2247, "label": "with"},
+That epsilon delta thread and delta in beta by alpha queue of rate rate.
+fn handle_226(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1582; Ok(226) }
+2026-11-04 11:47:29 INFO scan path=/var/log/archive-227.txt entries=2951 bytes=930473
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 228.
+  "key_229": {"value": 3893, "ratio": 0.2297, "label": "to"},
+Epsilon in alpha for alpha zeta queue on.
+fn handle_231(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1617; Ok(231) }
+2026-11-09 16:52:04 INFO scan path=/var/log/archive-232.txt entries=3016 bytes=950968
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 233.
+  "key_234": {"value": 3978, "ratio": 0.2347, "label": "beta"},
+Alpha channel buffer beta for thread gamma queue of in with alpha and is by is of.
+fn handle_236(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1652; Ok(236) }
+2026-11-14 21:57:39 INFO scan path=/var/log/archive-237.txt entries=3081 bytes=971463
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 238.
+  "key_239": {"value": 4063, "ratio": 0.2397, "label": "epsilon"},
+Zeta from and buffer flush alpha alpha render beta on the rate alpha channel.
+fn handle_241(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1687; Ok(241) }
+2026-11-19 02:02:14 INFO scan path=/var/log/archive-242.txt entries=3146 bytes=991958
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 243.
+  "key_244": {"value": 4148, "ratio": 0.2447, "label": "parse"},
+Beta to lambda queue gamma that thread limit rate delta.
+fn handle_246(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1722; Ok(246) }
+2026-11-24 07:07:49 INFO scan path=/var/log/archive-247.txt entries=3211 bytes=1012453
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 248.
+  "key_249": {"value": 4233, "ratio": 0.2497, "label": "gamma"},
+Alpha beta thread beta lambda with the for from parse buffer parse gamma delta the in alpha.
+fn handle_251(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1757; Ok(251) }
+2026-11-01 12:12:24 INFO scan path=/var/log/archive-252.txt entries=3276 bytes=1032948
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 253.
+  "key_254": {"value": 4318, "ratio": 0.2548, "label": "delta"},
+Is beta epsilon render and from parse for queue the for to lambda zeta gamma of parse beta limit for.
+fn handle_256(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1792; Ok(256) }
+2026-11-06 17:17:59 INFO scan path=/var/log/archive-257.txt entries=3341 bytes=1053443
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 258.
+  "key_259": {"value": 4403, "ratio": 0.2598, "label": "gamma"},
+Is buffer render on and gamma parse to alpha this beta from flush this in.
+fn handle_261(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1827; Ok(261) }
+2026-11-11 22:22:34 INFO scan path=/var/log/archive-262.txt entries=3406 bytes=1073938
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 263.
+  "key_264": {"value": 4488, "ratio": 0.2648, "label": "zeta"},
+And on channel omicron is with from on this on by thread that in the parse.
+fn handle_266(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1862; Ok(266) }
+2026-11-16 03:27:09 INFO scan path=/var/log/archive-267.txt entries=3471 bytes=1094433
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 268.
+  "key_269": {"value": 4573, "ratio": 0.2698, "label": "queue"},
+Parse zeta is epsilon queue from by in buffer alpha rate delta delta limit for for on.
+fn handle_271(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1897; Ok(271) }
+2026-11-21 08:32:44 INFO scan path=/var/log/archive-272.txt entries=3536 bytes=1114928
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 273.
+  "key_274": {"value": 4658, "ratio": 0.2748, "label": "that"},
+By in the for delta thread gamma limit buffer.
+fn handle_276(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1932; Ok(276) }
+2026-11-26 13:37:19 INFO scan path=/var/log/archive-277.txt entries=3601 bytes=1135423
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 278.
+  "key_279": {"value": 4743, "ratio": 0.2798, "label": "flush"},
+Thread render in rate is that this delta.
+fn handle_281(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 1967; Ok(281) }
+2026-11-03 18:42:54 INFO scan path=/var/log/archive-282.txt entries=3666 bytes=1155918
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 283.
+  "key_284": {"value": 4828, "ratio": 0.2849, "label": "to"},
+Gamma epsilon delta and render render delta queue render for buffer in for render.
+fn handle_286(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2002; Ok(286) }
+2026-11-08 23:47:29 INFO scan path=/var/log/archive-287.txt entries=3731 bytes=1176413
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 288.
+  "key_289": {"value": 4913, "ratio": 0.2899, "label": "this"},
+Flush on buffer from is thread of to rate parse zeta.
+fn handle_291(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2037; Ok(291) }
+2026-11-13 04:52:04 INFO scan path=/var/log/archive-292.txt entries=3796 bytes=1196908
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 293.
+  "key_294": {"value": 4998, "ratio": 0.2949, "label": "and"},
+To channel is omicron rate with lambda omicron rate the flush beta the epsilon of from gamma to is.
+fn handle_296(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2072; Ok(296) }
+2026-11-18 09:57:39 INFO scan path=/var/log/archive-297.txt entries=3861 bytes=1217403
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 298.
+  "key_299": {"value": 5083, "ratio": 0.2999, "label": "flush"},
+Omicron zeta with for is the to lambda from and queue the from limit of.
+fn handle_301(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2107; Ok(301) }
+2026-11-23 14:02:14 INFO scan path=/var/log/archive-302.txt entries=3926 bytes=1237898
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 303.
+  "key_304": {"value": 5168, "ratio": 0.3049, "label": "flush"},
+The on and on limit parse alpha rate that to with.
+fn handle_306(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2142; Ok(306) }
+2026-11-28 19:07:49 INFO scan path=/var/log/archive-307.txt entries=3991 bytes=1258393
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 308.
+  "key_309": {"value": 5253, "ratio": 0.3099, "label": "and"},
+Queue to for that lambda delta parse with for buffer rate limit of beta and gamma in this limit.
+fn handle_311(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2177; Ok(311) }
+2026-11-05 00:12:24 INFO scan path=/var/log/archive-312.txt entries=4056 bytes=1278888
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 313.
+  "key_314": {"value": 5338, "ratio": 0.3149, "label": "rate"},
+The flush zeta omicron delta this zeta the flush alpha queue by channel delta flush and gamma render in.
+fn handle_316(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2212; Ok(316) }
+2026-11-10 05:17:59 INFO scan path=/var/log/archive-317.txt entries=4121 bytes=1299383
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 318.
+  "key_319": {"value": 5423, "ratio": 0.3200, "label": "the"},
+Alpha epsilon for from delta for channel on queue thread by the beta channel in gamma limit the this queue.
+fn handle_321(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2247; Ok(321) }
+2026-11-15 10:22:34 INFO scan path=/var/log/archive-322.txt entries=4186 bytes=1319878
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 323.
+  "key_324": {"value": 5508, "ratio": 0.3250, "label": "to"},
+Epsilon to render to delta from flush parse zeta lambda for buffer for of lambda by by and.
+fn handle_326(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2282; Ok(326) }
+2026-11-20 15:27:09 INFO scan path=/var/log/archive-327.txt entries=4251 bytes=1340373
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 328.
+  "key_329": {"value": 5593, "ratio": 0.3300, "label": "omicron"},
+Epsilon delta parse by thread buffer zeta from parse thread queue limit that buffer is queue that lambda rate queue.
+fn handle_331(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2317; Ok(331) }
+2026-11-25 20:32:44 INFO scan path=/var/log/archive-332.txt entries=4316 bytes=1360868
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 333.
+  "key_334": {"value": 5678, "ratio": 0.3350, "label": "that"},
+To omicron is on thread rate zeta buffer of.
+fn handle_336(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2352; Ok(336) }
+2026-11-02 01:37:19 INFO scan path=/var/log/archive-337.txt entries=4381 bytes=1381363
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 338.
+  "key_339": {"value": 5763, "ratio": 0.3400, "label": "zeta"},
+To this channel the of from alpha omicron queue in delta epsilon flush the rate channel of.
+fn handle_341(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2387; Ok(341) }
+2026-11-07 06:42:54 INFO scan path=/var/log/archive-342.txt entries=4446 bytes=1401858
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 343.
+  "key_344": {"value": 5848, "ratio": 0.3450, "label": "gamma"},
+Epsilon flush gamma render beta that for from.
+fn handle_346(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2422; Ok(346) }
+2026-11-12 11:47:29 INFO scan path=/var/log/archive-347.txt entries=4511 bytes=1422353
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 348.
+  "key_349": {"value": 5933, "ratio": 0.3501, "label": "and"},
+Omicron for the alpha render thread parse gamma queue alpha.
+fn handle_351(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2457; Ok(351) }
+2026-11-17 16:52:04 INFO scan path=/var/log/archive-352.txt entries=4576 bytes=1442848
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 353.
+  "key_354": {"value": 6018, "ratio": 0.3551, "label": "that"},
+Beta lambda by in epsilon flush thread gamma on parse that.
+fn handle_356(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2492; Ok(356) }
+2026-11-22 21:57:39 INFO scan path=/var/log/archive-357.txt entries=4641 bytes=1463343
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 358.
+  "key_359": {"value": 6103, "ratio": 0.3601, "label": "omicron"},
+On parse buffer gamma delta thread the for alpha that alpha omicron omicron omicron.
+fn handle_361(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2527; Ok(361) }
+2026-11-27 02:02:14 INFO scan path=/var/log/archive-362.txt entries=4706 bytes=1483838
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 363.
+  "key_364": {"value": 6188, "ratio": 0.3651, "label": "and"},
+In alpha for is on queue queue beta for and and lambda parse is rate delta and channel.
+fn handle_366(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2562; Ok(366) }
+2026-11-04 07:07:49 INFO scan path=/var/log/archive-367.txt entries=4771 bytes=1504333
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 368.
+  "key_369": {"value": 6273, "ratio": 0.3701, "label": "gamma"},
+Gamma the flush zeta beta buffer thread alpha alpha delta for queue rate for channel from.
+fn handle_371(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2597; Ok(371) }
+2026-11-09 12:12:24 INFO scan path=/var/log/archive-372.txt entries=4836 bytes=1524828
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 373.
+  "key_374": {"value": 6358, "ratio": 0.3751, "label": "channel"},
+This flush to in thread from and and queue gamma of buffer gamma.
+fn handle_376(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2632; Ok(376) }
+2026-11-14 17:17:59 INFO scan path=/var/log/archive-377.txt entries=4901 bytes=1545323
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 378.
+  "key_379": {"value": 6443, "ratio": 0.3801, "label": "zeta"},
+On thread epsilon the alpha limit alpha with thread channel that rate flush epsilon limit rate epsilon limit of alpha.
+fn handle_381(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2667; Ok(381) }
+2026-11-19 22:22:34 INFO scan path=/var/log/archive-382.txt entries=4966 bytes=1565818
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 383.
+  "key_384": {"value": 6528, "ratio": 0.3852, "label": "on"},
+Alpha for of gamma from rate and gamma of lambda that and with from zeta channel.
+fn handle_386(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2702; Ok(386) }
+2026-11-24 03:27:09 INFO scan path=/var/log/archive-387.txt entries=5031 bytes=1586313
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 388.
+  "key_389": {"value": 6613, "ratio": 0.3902, "label": "queue"},
+In epsilon rate by beta omicron in is by is buffer omicron the for.
+fn handle_391(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2737; Ok(391) }
+2026-11-01 08:32:44 INFO scan path=/var/log/archive-392.txt entries=5096 bytes=1606808
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 393.
+  "key_394": {"value": 6698, "ratio": 0.3952, "label": "thread"},
+Lambda epsilon is zeta of rate from render omicron zeta zeta.
+fn handle_396(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2772; Ok(396) }
+2026-11-06 13:37:19 INFO scan path=/var/log/archive-397.txt entries=5161 bytes=1627303
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 398.
+  "key_399": {"value": 6783, "ratio": 0.4002, "label": "delta"},
+Parse thread is flush with for zeta on zeta render by delta to.
+fn handle_401(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2807; Ok(401) }
+2026-11-11 18:42:54 INFO scan path=/var/log/archive-402.txt entries=5226 bytes=1647798
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 403.
+  "key_404": {"value": 6868, "ratio": 0.4052, "label": "buffer"},
+Render limit this to gamma epsilon and delta epsilon omicron lambda parse thread flush and on is.
+fn handle_406(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2842; Ok(406) }
+2026-11-16 23:47:29 INFO scan path=/var/log/archive-407.txt entries=5291 bytes=1668293
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 408.
+  "key_409": {"value": 6953, "ratio": 0.4102, "label": "omicron"},
+To by in buffer lambda to rate this to with zeta for that channel lambda beta delta.
+fn handle_411(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2877; Ok(411) }
+2026-11-21 04:52:04 INFO scan path=/var/log/archive-412.txt entries=5356 bytes=1688788
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 413.
+  "key_414": {"value": 7038, "ratio": 0.4152, "label": "is"},
+Buffer lambda delta zeta in beta epsilon with parse gamma limit beta and limit gamma delta.
+fn handle_416(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2912; Ok(416) }
+2026-11-26 09:57:39 INFO scan path=/var/log/archive-417.txt entries=5421 bytes=1709283
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 418.
+  "key_419": {"value": 7123, "ratio": 0.4203, "label": "of"},
+In of channel in rate of epsilon thread from queue queue in.
+fn handle_421(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2947; Ok(421) }
+2026-11-03 14:02:14 INFO scan path=/var/log/archive-422.txt entries=5486 bytes=1729778
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 423.
+  "key_424": {"value": 7208, "ratio": 0.4253, "label": "of"},
+Alpha limit from that alpha beta with buffer parse.
+fn handle_426(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 2982; Ok(426) }
+2026-11-08 19:07:49 INFO scan path=/var/log/archive-427.txt entries=5551 bytes=1750273
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 428.
+  "key_429": {"value": 7293, "ratio": 0.4303, "label": "limit"},
+Rate the on flush render with the beta limit rate on that beta gamma in thread is is beta the.
+fn handle_431(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3017; Ok(431) }
+2026-11-13 00:12:24 INFO scan path=/var/log/archive-432.txt entries=5616 bytes=1770768
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 433.
+  "key_434": {"value": 7378, "ratio": 0.4353, "label": "limit"},
+By zeta beta is epsilon rate buffer flush the omicron limit by epsilon epsilon limit by.
+fn handle_436(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3052; Ok(436) }
+2026-11-18 05:17:59 INFO scan path=/var/log/archive-437.txt entries=5681 bytes=1791263
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 438.
+  "key_439": {"value": 7463, "ratio": 0.4403, "label": "render"},
+Lambda flush buffer delta of to render zeta parse is.
+fn handle_441(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3087; Ok(441) }
+2026-11-23 10:22:34 INFO scan path=/var/log/archive-442.txt entries=5746 bytes=1811758
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 443.
+  "key_444": {"value": 7548, "ratio": 0.4453, "label": "zeta"},
+Of that that thread that beta in beta beta flush beta to.
+fn handle_446(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3122; Ok(446) }
+2026-11-28 15:27:09 INFO scan path=/var/log/archive-447.txt entries=5811 bytes=1832253
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 448.
+  "key_449": {"value": 7633, "ratio": 0.4504, "label": "epsilon"},
+Buffer to delta omicron beta parse delta rate alpha buffer.
+fn handle_451(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3157; Ok(451) }
+2026-11-05 20:32:44 INFO scan path=/var/log/archive-452.txt entries=5876 bytes=1852748
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 453.
+  "key_454": {"value": 7718, "ratio": 0.4554, "label": "rate"},
+Lambda parse this beta beta queue to channel beta and this alpha and to alpha parse in limit channel.
+fn handle_456(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3192; Ok(456) }
+2026-11-10 01:37:19 INFO scan path=/var/log/archive-457.txt entries=5941 bytes=1873243
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 458.
+  "key_459": {"value": 7803, "ratio": 0.4604, "label": "rate"},
+Gamma limit channel queue channel render to from.
+fn handle_461(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3227; Ok(461) }
+2026-11-15 06:42:54 INFO scan path=/var/log/archive-462.txt entries=6006 bytes=1893738
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 463.
+  "key_464": {"value": 7888, "ratio": 0.4654, "label": "zeta"},
+Omicron that render limit that on flush zeta in.
+fn handle_466(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3262; Ok(466) }
+2026-11-20 11:47:29 INFO scan path=/var/log/archive-467.txt entries=6071 bytes=1914233
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 468.
+  "key_469": {"value": 7973, "ratio": 0.4704, "label": "render"},
+That channel this of that this alpha beta that flush delta in alpha omicron channel that lambda this gamma in.
+fn handle_471(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3297; Ok(471) }
+2026-11-25 16:52:04 INFO scan path=/var/log/archive-472.txt entries=6136 bytes=1934728
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 473.
+  "key_474": {"value": 8058, "ratio": 0.4754, "label": "of"},
+From with render on delta to buffer of by gamma on channel this to.
+fn handle_476(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3332; Ok(476) }
+2026-11-02 21:57:39 INFO scan path=/var/log/archive-477.txt entries=6201 bytes=1955223
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 478.
+  "key_479": {"value": 8143, "ratio": 0.4804, "label": "alpha"},
+For the on that delta limit delta parse and for queue queue render.
+fn handle_481(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3367; Ok(481) }
+2026-11-07 02:02:14 INFO scan path=/var/log/archive-482.txt entries=6266 bytes=1975718
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 483.
+  "key_484": {"value": 8228, "ratio": 0.4855, "label": "and"},
+Is that delta for zeta alpha delta that that zeta on with.
+fn handle_486(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3402; Ok(486) }
+2026-11-12 07:07:49 INFO scan path=/var/log/archive-487.txt entries=6331 bytes=1996213
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 488.
+  "key_489": {"value": 8313, "ratio": 0.4905, "label": "in"},
+Zeta delta flush buffer epsilon beta queue in zeta with.
+fn handle_491(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3437; Ok(491) }
+2026-11-17 12:12:24 INFO scan path=/var/log/archive-492.txt entries=6396 bytes=2016708
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 493.
+  "key_494": {"value": 8398, "ratio": 0.4955, "label": "in"},
+To thread flush and in in omicron render and epsilon zeta.
+fn handle_496(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3472; Ok(496) }
+2026-11-22 17:17:59 INFO scan path=/var/log/archive-497.txt entries=6461 bytes=2037203
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 498.
+  "key_499": {"value": 8483, "ratio": 0.5005, "label": "the"},
+Queue omicron buffer from the for parse with queue zeta gamma channel this lambda.
+fn handle_501(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3507; Ok(501) }
+2026-11-27 22:22:34 INFO scan path=/var/log/archive-502.txt entries=6526 bytes=2057698
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 503.
+  "key_504": {"value": 8568, "ratio": 0.5055, "label": "alpha"},
+Thread by delta rate with on to alpha channel.
+fn handle_506(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3542; Ok(506) }
+2026-11-04 03:27:09 INFO scan path=/var/log/archive-507.txt entries=6591 bytes=2078193
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 508.
+  "key_509": {"value": 8653, "ratio": 0.5105, "label": "with"},
+Render by beta and the delta rate in from.
+fn handle_511(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3577; Ok(511) }
+2026-11-09 08:32:44 INFO scan path=/var/log/archive-512.txt entries=6656 bytes=2098688
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 513.
+  "key_514": {"value": 8738, "ratio": 0.5155, "label": "this"},
+Alpha parse rate by limit on lambda zeta delta omicron render is render omicron for thread zeta for that flush.
+fn handle_516(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3612; Ok(516) }
+2026-11-14 13:37:19 INFO scan path=/var/log/archive-517.txt entries=6721 bytes=2119183
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 518.
+  "key_519": {"value": 8823, "ratio": 0.5206, "label": "zeta"},
+Limit with epsilon lambda of alpha channel flush parse the buffer render.
+fn handle_521(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3647; Ok(521) }
+2026-11-19 18:42:54 INFO scan path=/var/log/archive-522.txt entries=6786 bytes=2139678
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 523.
+  "key_524": {"value": 8908, "ratio": 0.5256, "label": "queue"},
+Delta and by in in omicron this beta parse the to render omicron epsilon is.
+fn handle_526(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3682; Ok(526) }
+2026-11-24 23:47:29 INFO scan path=/var/log/archive-527.txt entries=6851 bytes=2160173
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 528.
+  "key_529": {"value": 8993, "ratio": 0.5306, "label": "in"},
+To omicron by limit thread queue zeta beta and by epsilon channel lambda limit is.
+fn handle_531(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3717; Ok(531) }
+2026-11-01 04:52:04 INFO scan path=/var/log/archive-532.txt entries=6916 bytes=2180668
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 533.
+  "key_534": {"value": 9078, "ratio": 0.5356, "label": "thread"},
+Rate for with of parse to this on gamma queue epsilon buffer this zeta.
+fn handle_536(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3752; Ok(536) }
+2026-11-06 09:57:39 INFO scan path=/var/log/archive-537.txt entries=6981 bytes=2201163
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 538.
+  "key_539": {"value": 9163, "ratio": 0.5406, "label": "with"},
+Alpha buffer on beta alpha in omicron for in omicron rate beta thread from by.
+fn handle_541(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3787; Ok(541) }
+2026-11-11 14:02:14 INFO scan path=/var/log/archive-542.txt entries=7046 bytes=2221658
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 543.
+  "key_544": {"value": 9248, "ratio": 0.5456, "label": "alpha"},
+Gamma lambda flush buffer alpha omicron in from lambda the channel flush rate and buffer omicron.
+fn handle_546(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3822; Ok(546) }
+2026-11-16 19:07:49 INFO scan path=/var/log/archive-547.txt entries=7111 bytes=2242153
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 548.
+  "key_549": {"value": 9333, "ratio": 0.5507, "label": "epsilon"},
+Beta by beta epsilon epsilon render limit with thread queue omicron in.
+fn handle_551(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3857; Ok(551) }
+2026-11-21 00:12:24 INFO scan path=/var/log/archive-552.txt entries=7176 bytes=2262648
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 553.
+  "key_554": {"value": 9418, "ratio": 0.5557, "label": "render"},
+This beta omicron the render queue by limit channel channel from render is this limit for gamma delta from lambda.
+fn handle_556(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3892; Ok(556) }
+2026-11-26 05:17:59 INFO scan path=/var/log/archive-557.txt entries=7241 bytes=2283143
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 558.
+  "key_559": {"value": 9503, "ratio": 0.5607, "label": "in"},
+For lambda render limit lambda by buffer parse buffer thread in delta thread.
+fn handle_561(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3927; Ok(561) }
+2026-11-03 10:22:34 INFO scan path=/var/log/archive-562.txt entries=7306 bytes=2303638
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 563.
+  "key_564": {"value": 9588, "ratio": 0.5657, "label": "gamma"},
+Rate beta from that with for for rate this channel.
+fn handle_566(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3962; Ok(566) }
+2026-11-08 15:27:09 INFO scan path=/var/log/archive-567.txt entries=7371 bytes=2324133
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 568.
+  "key_569": {"value": 9673, "ratio": 0.5707, "label": "by"},
+Queue zeta beta the and epsilon is epsilon that lambda.
+fn handle_571(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 3997; Ok(571) }
+2026-11-13 20:32:44 INFO scan path=/var/log/archive-572.txt entries=7436 bytes=2344628
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 573.
+  "key_574": {"value": 9758, "ratio": 0.5757, "label": "the"},
+From rate in queue alpha of omicron parse and beta beta buffer limit render with parse thread gamma in.
+fn handle_576(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4032; Ok(576) }
+2026-11-18 01:37:19 INFO scan path=/var/log/archive-577.txt entries=7501 bytes=2365123
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 578.
+  "key_579": {"value": 9843, "ratio": 0.5807, "label": "epsilon"},
+Render for channel on flush by thread from with channel of gamma parse queue buffer delta alpha.
+fn handle_581(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4067; Ok(581) }
+2026-11-23 06:42:54 INFO scan path=/var/log/archive-582.txt entries=7566 bytes=2385618
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 583.
+  "key_584": {"value": 9928, "ratio": 0.5858, "label": "omicron"},
+Buffer on beta beta for omicron parse rate the by epsilon this thread from gamma epsilon beta rate queue.
+fn handle_586(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4102; Ok(586) }
+2026-11-28 11:47:29 INFO scan path=/var/log/archive-587.txt entries=7631 bytes=2406113
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 588.
+  "key_589": {"value": 10013, "ratio": 0.5908, "label": "and"},
+Rate rate is flush this rate epsilon from gamma in on on omicron on render delta.
+fn handle_591(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4137; Ok(591) }
+2026-11-05 16:52:04 INFO scan path=/var/log/archive-592.txt entries=7696 bytes=2426608
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 593.
+  "key_594": {"value": 10098, "ratio": 0.5958, "label": "alpha"},
+This flush for on alpha that for the.
+fn handle_596(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4172; Ok(596) }
+2026-11-10 21:57:39 INFO scan path=/var/log/archive-597.txt entries=7761 bytes=2447103
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 598.
+  "key_599": {"value": 10183, "ratio": 0.6008, "label": "the"},
+Gamma on beta queue rate with rate delta.
+fn handle_601(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4207; Ok(601) }
+2026-11-15 02:02:14 INFO scan path=/var/log/archive-602.txt entries=7826 bytes=2467598
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 603.
+  "key_604": {"value": 10268, "ratio": 0.6058, "label": "epsilon"},
+Flush that is epsilon gamma by channel with buffer and to of limit thread this and.
+fn handle_606(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4242; Ok(606) }
+2026-11-20 07:07:49 INFO scan path=/var/log/archive-607.txt entries=7891 bytes=2488093
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 608.
+  "key_609": {"value": 10353, "ratio": 0.6108, "label": "omicron"},
+Zeta and flush and epsilon parse channel of is delta for.
+fn handle_611(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4277; Ok(611) }
+2026-11-25 12:12:24 INFO scan path=/var/log/archive-612.txt entries=7956 bytes=2508588
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 613.
+  "key_614": {"value": 10438, "ratio": 0.6158, "label": "gamma"},
+Of on and epsilon rate with epsilon queue channel queue queue.
+fn handle_616(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4312; Ok(616) }
+2026-11-02 17:17:59 INFO scan path=/var/log/archive-617.txt entries=8021 bytes=2529083
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 618.
+  "key_619": {"value": 10523, "ratio": 0.6209, "label": "omicron"},
+To that delta in thread thread alpha beta gamma with in channel rate of by epsilon that rate.
+fn handle_621(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4347; Ok(621) }
+2026-11-07 22:22:34 INFO scan path=/var/log/archive-622.txt entries=8086 bytes=2549578
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 623.
+  "key_624": {"value": 10608, "ratio": 0.6259, "label": "in"},
+Beta epsilon in render the limit gamma with thread gamma limit and.
+fn handle_626(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4382; Ok(626) }
+2026-11-12 03:27:09 INFO scan path=/var/log/archive-627.txt entries=8151 bytes=2570073
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 628.
+  "key_629": {"value": 10693, "ratio": 0.6309, "label": "limit"},
+Of parse channel by limit epsilon parse with for beta.
+fn handle_631(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4417; Ok(631) }
+2026-11-17 08:32:44 INFO scan path=/var/log/archive-632.txt entries=8216 bytes=2590568
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 633.
+  "key_634": {"value": 10778, "ratio": 0.6359, "label": "to"},
+Queue limit in queue the to to delta queue of rate rate alpha in parse flush the zeta from with.
+fn handle_636(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4452; Ok(636) }
+2026-11-22 13:37:19 INFO scan path=/var/log/archive-637.txt entries=8281 bytes=2611063
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 638.
+  "key_639": {"value": 10863, "ratio": 0.6409, "label": "limit"},
+Limit with limit channel buffer flush omicron limit parse the zeta in to in parse zeta alpha.
+fn handle_641(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4487; Ok(641) }
+2026-11-27 18:42:54 INFO scan path=/var/log/archive-642.txt entries=8346 bytes=2631558
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 643.
+  "key_644": {"value": 10948, "ratio": 0.6459, "label": "queue"},
+Gamma zeta buffer beta rate buffer parse channel is is by thread thread limit omicron.
+fn handle_646(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4522; Ok(646) }
+2026-11-04 23:47:29 INFO scan path=/var/log/archive-647.txt entries=8411 bytes=2652053
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 648.
+  "key_649": {"value": 11033, "ratio": 0.6510, "label": "thread"},
+Is beta flush with on for gamma thread channel.
+fn handle_651(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4557; Ok(651) }
+2026-11-09 04:52:04 INFO scan path=/var/log/archive-652.txt entries=8476 bytes=2672548
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 653.
+  "key_654": {"value": 11118, "ratio": 0.6560, "label": "queue"},
+In delta channel is from that render thread with.
+fn handle_656(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4592; Ok(656) }
+2026-11-14 09:57:39 INFO scan path=/var/log/archive-657.txt entries=8541 bytes=2693043
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 658.
+  "key_659": {"value": 11203, "ratio": 0.6610, "label": "is"},
+Delta to queue render rate on the buffer delta gamma limit for alpha alpha is render and for.
+fn handle_661(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4627; Ok(661) }
+2026-11-19 14:02:14 INFO scan path=/var/log/archive-662.txt entries=8606 bytes=2713538
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 663.
+  "key_664": {"value": 11288, "ratio": 0.6660, "label": "channel"},
+Alpha to beta is flush the for to thread.
+fn handle_666(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4662; Ok(666) }
+2026-11-24 19:07:49 INFO scan path=/var/log/archive-667.txt entries=8671 bytes=2734033
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 668.
+  "key_669": {"value": 11373, "ratio": 0.6710, "label": "alpha"},
+That render queue for on with queue of with zeta the that alpha to from alpha and.
+fn handle_671(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4697; Ok(671) }
+2026-11-01 00:12:24 INFO scan path=/var/log/archive-672.txt entries=8736 bytes=2754528
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 673.
+  "key_674": {"value": 11458, "ratio": 0.6760, "label": "in"},
+And epsilon channel lambda for omicron with and is parse.
+fn handle_676(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4732; Ok(676) }
+2026-11-06 05:17:59 INFO scan path=/var/log/archive-677.txt entries=8801 bytes=2775023
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 678.
+  "key_679": {"value": 11543, "ratio": 0.6810, "label": "thread"},
+In this buffer omicron flush omicron queue epsilon the.
+fn handle_681(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4767; Ok(681) }
+2026-11-11 10:22:34 INFO scan path=/var/log/archive-682.txt entries=8866 bytes=2795518
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 683.
+  "key_684": {"value": 11628, "ratio": 0.6861, "label": "flush"},
+Rate zeta delta with from with from thread channel channel queue flush flush channel queue.
+fn handle_686(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4802; Ok(686) }
+2026-11-16 15:27:09 INFO scan path=/var/log/archive-687.txt entries=8931 bytes=2816013
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 688.
+  "key_689": {"value": 11713, "ratio": 0.6911, "label": "and"},
+Render that to is is on channel the delta in.
+fn handle_691(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4837; Ok(691) }
+2026-11-21 20:32:44 INFO scan path=/var/log/archive-692.txt entries=8996 bytes=2836508
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 693.
+  "key_694": {"value": 11798, "ratio": 0.6961, "label": "epsilon"},
+That epsilon channel by lambda with rate parse.
+fn handle_696(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4872; Ok(696) }
+2026-11-26 01:37:19 INFO scan path=/var/log/archive-697.txt entries=9061 bytes=2857003
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 698.
+  "key_699": {"value": 11883, "ratio": 0.7011, "label": "with"},
+In delta in that alpha flush and from parse gamma this queue.
+fn handle_701(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4907; Ok(701) }
+2026-11-03 06:42:54 INFO scan path=/var/log/archive-702.txt entries=9126 bytes=2877498
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 703.
+  "key_704": {"value": 11968, "ratio": 0.7061, "label": "delta"},
+Limit for queue this parse buffer render by and to epsilon rate this by beta alpha gamma.
+fn handle_706(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4942; Ok(706) }
+2026-11-08 11:47:29 INFO scan path=/var/log/archive-707.txt entries=9191 bytes=2897993
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 708.
+  "key_709": {"value": 12053, "ratio": 0.7111, "label": "flush"},
+On of flush zeta the with limit lambda for buffer on omicron zeta parse of by.
+fn handle_711(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 4977; Ok(711) }
+2026-11-13 16:52:04 INFO scan path=/var/log/archive-712.txt entries=9256 bytes=2918488
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 713.
+  "key_714": {"value": 12138, "ratio": 0.7161, "label": "this"},
+Is alpha of that beta beta buffer that.
+fn handle_716(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5012; Ok(716) }
+2026-11-18 21:57:39 INFO scan path=/var/log/archive-717.txt entries=9321 bytes=2938983
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 718.
+  "key_719": {"value": 12223, "ratio": 0.7212, "label": "channel"},
+By delta render buffer by to parse for to from render alpha buffer parse.
+fn handle_721(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5047; Ok(721) }
+2026-11-23 02:02:14 INFO scan path=/var/log/archive-722.txt entries=9386 bytes=2959478
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 723.
+  "key_724": {"value": 12308, "ratio": 0.7262, "label": "parse"},
+Buffer buffer beta omicron by is limit limit the in by and for parse from buffer of with.
+fn handle_726(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5082; Ok(726) }
+2026-11-28 07:07:49 INFO scan path=/var/log/archive-727.txt entries=9451 bytes=2979973
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 728.
+  "key_729": {"value": 12393, "ratio": 0.7312, "label": "by"},
+Of omicron epsilon rate in to that alpha channel beta limit the.
+fn handle_731(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5117; Ok(731) }
+2026-11-05 12:12:24 INFO scan path=/var/log/archive-732.txt entries=9516 bytes=3000468
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 733.
+  "key_734": {"value": 12478, "ratio": 0.7362, "label": "for"},
+Alpha for and to the limit channel render omicron.
+fn handle_736(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5152; Ok(736) }
+2026-11-10 17:17:59 INFO scan path=/var/log/archive-737.txt entries=9581 bytes=3020963
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 738.
+  "key_739": {"value": 12563, "ratio": 0.7412, "label": "queue"},
+Beta delta from omicron of rate beta for gamma queue omicron is delta on buffer with render from on.
+fn handle_741(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5187; Ok(741) }
+2026-11-15 22:22:34 INFO scan path=/var/log/archive-742.txt entries=9646 bytes=3041458
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 743.
+  "key_744": {"value": 12648, "ratio": 0.7462, "label": "queue"},
+On by with and for alpha beta to channel gamma rate rate for thread gamma in parse.
+fn handle_746(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5222; Ok(746) }
+2026-11-20 03:27:09 INFO scan path=/var/log/archive-747.txt entries=9711 bytes=3061953
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 748.
+  "key_749": {"value": 12733, "ratio": 0.7513, "label": "parse"},
+Parse delta from in epsilon that alpha omicron channel is omicron for this beta rate render this.
+fn handle_751(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5257; Ok(751) }
+2026-11-25 08:32:44 INFO scan path=/var/log/archive-752.txt entries=9776 bytes=3082448
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 753.
+  "key_754": {"value": 12818, "ratio": 0.7563, "label": "in"},
+From epsilon for parse the that queue to beta buffer alpha.
+fn handle_756(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5292; Ok(756) }
+2026-11-02 13:37:19 INFO scan path=/var/log/archive-757.txt entries=9841 bytes=3102943
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 758.
+  "key_759": {"value": 12903, "ratio": 0.7613, "label": "in"},
+By channel alpha is render from epsilon on.
+fn handle_761(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5327; Ok(761) }
+2026-11-07 18:42:54 INFO scan path=/var/log/archive-762.txt entries=9906 bytes=3123438
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 763.
+  "key_764": {"value": 12988, "ratio": 0.7663, "label": "parse"},
+On by for render with omicron in buffer queue to beta flush that this and render parse thread.
+fn handle_766(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5362; Ok(766) }
+2026-11-12 23:47:29 INFO scan path=/var/log/archive-767.txt entries=9971 bytes=3143933
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 768.
+  "key_769": {"value": 13073, "ratio": 0.7713, "label": "channel"},
+Lambda that queue queue gamma from of beta epsilon beta delta omicron omicron alpha of alpha with alpha omicron.
+fn handle_771(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5397; Ok(771) }
+2026-11-17 04:52:04 INFO scan path=/var/log/archive-772.txt entries=10036 bytes=3164428
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 773.
+  "key_774": {"value": 13158, "ratio": 0.7763, "label": "delta"},
+Delta delta this thread omicron this the in gamma by zeta the lambda this with delta and and of in.
+fn handle_776(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5432; Ok(776) }
+2026-11-22 09:57:39 INFO scan path=/var/log/archive-777.txt entries=10101 bytes=3184923
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 778.
+  "key_779": {"value": 13243, "ratio": 0.7813, "label": "for"},
+Delta the buffer the channel with beta beta limit.
+fn handle_781(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5467; Ok(781) }
+2026-11-27 14:02:14 INFO scan path=/var/log/archive-782.txt entries=10166 bytes=3205418
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 783.
+  "key_784": {"value": 13328, "ratio": 0.7864, "label": "gamma"},
+Of and buffer beta from buffer parse epsilon parse buffer epsilon channel is that rate thread.
+fn handle_786(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5502; Ok(786) }
+2026-11-04 19:07:49 INFO scan path=/var/log/archive-787.txt entries=10231 bytes=3225913
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 788.
+  "key_789": {"value": 13413, "ratio": 0.7914, "label": "is"},
+With channel this gamma for for omicron that.
+fn handle_791(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5537; Ok(791) }
+2026-11-09 00:12:24 INFO scan path=/var/log/archive-792.txt entries=10296 bytes=3246408
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 793.
+  "key_794": {"value": 13498, "ratio": 0.7964, "label": "gamma"},
+Parse gamma delta channel this thread rate buffer omicron.
+fn handle_796(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5572; Ok(796) }
+2026-11-14 05:17:59 INFO scan path=/var/log/archive-797.txt entries=10361 bytes=3266903
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 798.
+  "key_799": {"value": 13583, "ratio": 0.8014, "label": "buffer"},
+To limit queue zeta parse with for parse by from and omicron epsilon.
+fn handle_801(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5607; Ok(801) }
+2026-11-19 10:22:34 INFO scan path=/var/log/archive-802.txt entries=10426 bytes=3287398
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 803.
+  "key_804": {"value": 13668, "ratio": 0.8064, "label": "that"},
+Is and buffer zeta and by alpha queue and that limit.
+fn handle_806(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5642; Ok(806) }
+2026-11-24 15:27:09 INFO scan path=/var/log/archive-807.txt entries=10491 bytes=3307893
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 808.
+  "key_809": {"value": 13753, "ratio": 0.8114, "label": "omicron"},
+Flush for this parse that omicron omicron gamma for buffer with on omicron this to.
+fn handle_811(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5677; Ok(811) }
+2026-11-01 20:32:44 INFO scan path=/var/log/archive-812.txt entries=10556 bytes=3328388
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 813.
+  "key_814": {"value": 13838, "ratio": 0.8164, "label": "lambda"},
+Lambda gamma on flush alpha lambda epsilon omicron to channel render.
+fn handle_816(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5712; Ok(816) }
+2026-11-06 01:37:19 INFO scan path=/var/log/archive-817.txt entries=10621 bytes=3348883
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 818.
+  "key_819": {"value": 13923, "ratio": 0.8215, "label": "omicron"},
+Epsilon queue by epsilon by limit that render of.
+fn handle_821(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5747; Ok(821) }
+2026-11-11 06:42:54 INFO scan path=/var/log/archive-822.txt entries=10686 bytes=3369378
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 823.
+  "key_824": {"value": 14008, "ratio": 0.8265, "label": "the"},
+This parse and queue queue in that of render limit and from channel epsilon in for.
+fn handle_826(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5782; Ok(826) }
+2026-11-16 11:47:29 INFO scan path=/var/log/archive-827.txt entries=10751 bytes=3389873
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 828.
+  "key_829": {"value": 14093, "ratio": 0.8315, "label": "queue"},
+Lambda and render rate that rate by by with alpha to.
+fn handle_831(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5817; Ok(831) }
+2026-11-21 16:52:04 INFO scan path=/var/log/archive-832.txt entries=10816 bytes=3410368
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 833.
+  "key_834": {"value": 14178, "ratio": 0.8365, "label": "in"},
+By on alpha epsilon is that to on parse beta the.
+fn handle_836(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5852; Ok(836) }
+2026-11-26 21:57:39 INFO scan path=/var/log/archive-837.txt entries=10881 bytes=3430863
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 838.
+  "key_839": {"value": 14263, "ratio": 0.8415, "label": "on"},
+Queue beta rate lambda rate in on of in queue lambda delta the.
+fn handle_841(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5887; Ok(841) }
+2026-11-03 02:02:14 INFO scan path=/var/log/archive-842.txt entries=10946 bytes=3451358
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 843.
+  "key_844": {"value": 14348, "ratio": 0.8465, "label": "with"},
+Thread beta on for by queue flush and thread buffer limit thread gamma this in.
+fn handle_846(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5922; Ok(846) }
+2026-11-08 07:07:49 INFO scan path=/var/log/archive-847.txt entries=11011 bytes=3471853
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 848.
+  "key_849": {"value": 14433, "ratio": 0.8516, "label": "and"},
+For for and and beta parse this render beta delta rate channel for is beta delta.
+fn handle_851(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5957; Ok(851) }
+2026-11-13 12:12:24 INFO scan path=/var/log/archive-852.txt entries=11076 bytes=3492348
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 853.
+  "key_854": {"value": 14518, "ratio": 0.8566, "label": "lambda"},
+Thread limit limit omicron in queue alpha in that.
+fn handle_856(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 5992; Ok(856) }
+2026-11-18 17:17:59 INFO scan path=/var/log/archive-857.txt entries=11141 bytes=3512843
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 858.
+  "key_859": {"value": 14603, "ratio": 0.8616, "label": "epsilon"},
+Of the channel and of the lambda delta alpha.
+fn handle_861(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6027; Ok(861) }
+2026-11-23 22:22:34 INFO scan path=/var/log/archive-862.txt entries=11206 bytes=3533338
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 863.
+  "key_864": {"value": 14688, "ratio": 0.8666, "label": "this"},
+Render and epsilon gamma the to render flush the with from in on channel.
+fn handle_866(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6062; Ok(866) }
+2026-11-28 03:27:09 INFO scan path=/var/log/archive-867.txt entries=11271 bytes=3553833
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 868.
+  "key_869": {"value": 14773, "ratio": 0.8716, "label": "is"},
+Parse this limit of rate is render delta buffer on.
+fn handle_871(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6097; Ok(871) }
+2026-11-05 08:32:44 INFO scan path=/var/log/archive-872.txt entries=11336 bytes=3574328
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 873.
+  "key_874": {"value": 14858, "ratio": 0.8766, "label": "parse"},
+And buffer gamma zeta from alpha from buffer render with parse on.
+fn handle_876(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6132; Ok(876) }
+2026-11-10 13:37:19 INFO scan path=/var/log/archive-877.txt entries=11401 bytes=3594823
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 878.
+  "key_879": {"value": 14943, "ratio": 0.8816, "label": "lambda"},
+Limit channel in that channel parse that lambda beta to that buffer and channel delta this that.
+fn handle_881(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6167; Ok(881) }
+2026-11-15 18:42:54 INFO scan path=/var/log/archive-882.txt entries=11466 bytes=3615318
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 883.
+  "key_884": {"value": 15028, "ratio": 0.8867, "label": "in"},
+Delta for render buffer to and thread delta beta.
+fn handle_886(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6202; Ok(886) }
+2026-11-20 23:47:29 INFO scan path=/var/log/archive-887.txt entries=11531 bytes=3635813
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 888.
+  "key_889": {"value": 15113, "ratio": 0.8917, "label": "thread"},
+On buffer of with alpha zeta parse thread with gamma zeta to.
+fn handle_891(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6237; Ok(891) }
+2026-11-25 04:52:04 INFO scan path=/var/log/archive-892.txt entries=11596 bytes=3656308
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 893.
+  "key_894": {"value": 15198, "ratio": 0.8967, "label": "by"},
+That the zeta this of and epsilon the for gamma and.
+fn handle_896(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6272; Ok(896) }
+2026-11-02 09:57:39 INFO scan path=/var/log/archive-897.txt entries=11661 bytes=3676803
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 898.
+  "key_899": {"value": 15283, "ratio": 0.9017, "label": "omicron"},
+Epsilon this limit gamma lambda channel buffer limit alpha lambda on parse with delta rate of alpha render.
+fn handle_901(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6307; Ok(901) }
+2026-11-07 14:02:14 INFO scan path=/var/log/archive-902.txt entries=11726 bytes=3697298
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 903.
+  "key_904": {"value": 15368, "ratio": 0.9067, "label": "and"},
+That zeta that of buffer alpha alpha epsilon alpha to.
+fn handle_906(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6342; Ok(906) }
+2026-11-12 19:07:49 INFO scan path=/var/log/archive-907.txt entries=11791 bytes=3717793
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 908.
+  "key_909": {"value": 15453, "ratio": 0.9117, "label": "thread"},
+Alpha buffer limit from from for of buffer from the.
+fn handle_911(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6377; Ok(911) }
+2026-11-17 00:12:24 INFO scan path=/var/log/archive-912.txt entries=11856 bytes=3738288
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 913.
+  "key_914": {"value": 15538, "ratio": 0.9168, "label": "epsilon"},
+Thread from delta beta of alpha on thread.
+fn handle_916(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6412; Ok(916) }
+2026-11-22 05:17:59 INFO scan path=/var/log/archive-917.txt entries=11921 bytes=3758783
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 918.
+  "key_919": {"value": 15623, "ratio": 0.9218, "label": "epsilon"},
+That channel limit to channel alpha queue is render gamma zeta of.
+fn handle_921(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6447; Ok(921) }
+2026-11-27 10:22:34 INFO scan path=/var/log/archive-922.txt entries=11986 bytes=3779278
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 923.
+  "key_924": {"value": 15708, "ratio": 0.9268, "label": "of"},
+To beta that flush epsilon rate queue queue the with delta alpha gamma omicron.
+fn handle_926(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6482; Ok(926) }
+2026-11-04 15:27:09 INFO scan path=/var/log/archive-927.txt entries=12051 bytes=3799773
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 928.
+  "key_929": {"value": 15793, "ratio": 0.9318, "label": "and"},
+By this this of is queue and of delta with buffer limit channel render alpha render lambda queue buffer.
+fn handle_931(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6517; Ok(931) }
+2026-11-09 20:32:44 INFO scan path=/var/log/archive-932.txt entries=12116 bytes=3820268
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 933.
+  "key_934": {"value": 15878, "ratio": 0.9368, "label": "flush"},
+Thread flush of by in and this to rate channel zeta zeta thread gamma in omicron alpha gamma.
+fn handle_936(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6552; Ok(936) }
+2026-11-14 01:37:19 INFO scan path=/var/log/archive-937.txt entries=12181 bytes=3840763
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 938.
+  "key_939": {"value": 15963, "ratio": 0.9418, "label": "omicron"},
+From omicron omicron alpha parse and flush epsilon gamma for the limit limit delta.
+fn handle_941(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6587; Ok(941) }
+2026-11-19 06:42:54 INFO scan path=/var/log/archive-942.txt entries=12246 bytes=3861258
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 943.
+  "key_944": {"value": 16048, "ratio": 0.9468, "label": "beta"},
+Parse channel lambda in gamma from buffer by beta to flush rate and the limit lambda for on omicron.
+fn handle_946(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6622; Ok(946) }
+2026-11-24 11:47:29 INFO scan path=/var/log/archive-947.txt entries=12311 bytes=3881753
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 948.
+  "key_949": {"value": 16133, "ratio": 0.9519, "label": "rate"},
+And channel from render gamma by by zeta lambda thread.
+fn handle_951(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6657; Ok(951) }
+2026-11-01 16:52:04 INFO scan path=/var/log/archive-952.txt entries=12376 bytes=3902248
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 953.
+  "key_954": {"value": 16218, "ratio": 0.9569, "label": "epsilon"},
+Buffer limit rate on by that this alpha for.
+fn handle_956(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6692; Ok(956) }
+2026-11-06 21:57:39 INFO scan path=/var/log/archive-957.txt entries=12441 bytes=3922743
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 958.
+  "key_959": {"value": 16303, "ratio": 0.9619, "label": "rate"},
+Alpha omicron zeta delta that zeta to rate epsilon this in render gamma that by.
+fn handle_961(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6727; Ok(961) }
+2026-11-11 02:02:14 INFO scan path=/var/log/archive-962.txt entries=12506 bytes=3943238
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 963.
+  "key_964": {"value": 16388, "ratio": 0.9669, "label": "render"},
+Lambda zeta on from epsilon thread beta flush parse the is of on beta lambda zeta is this.
+fn handle_966(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6762; Ok(966) }
+2026-11-16 07:07:49 INFO scan path=/var/log/archive-967.txt entries=12571 bytes=3963733
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 968.
+  "key_969": {"value": 16473, "ratio": 0.9719, "label": "that"},
+In with by this that beta thread zeta parse delta epsilon flush is to delta gamma render parse in.
+fn handle_971(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6797; Ok(971) }
+2026-11-21 12:12:24 INFO scan path=/var/log/archive-972.txt entries=12636 bytes=3984228
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 973.
+  "key_974": {"value": 16558, "ratio": 0.9769, "label": "is"},
+Lambda alpha and thread the epsilon for and zeta flush rate queue parse.
+fn handle_976(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6832; Ok(976) }
+2026-11-26 17:17:59 INFO scan path=/var/log/archive-977.txt entries=12701 bytes=4004723
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 978.
+  "key_979": {"value": 16643, "ratio": 0.9819, "label": "from"},
+In is for of queue beta the in channel from thread from parse thread render with parse is render.
+fn handle_981(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6867; Ok(981) }
+2026-11-03 22:22:34 INFO scan path=/var/log/archive-982.txt entries=12766 bytes=4025218
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 983.
+  "key_984": {"value": 16728, "ratio": 0.9870, "label": "render"},
+Beta render zeta lambda in is zeta for delta lambda rate zeta lambda that lambda delta.
+fn handle_986(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6902; Ok(986) }
+2026-11-08 03:27:09 INFO scan path=/var/log/archive-987.txt entries=12831 bytes=4045713
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 988.
+  "key_989": {"value": 16813, "ratio": 0.9920, "label": "from"},
+Alpha limit buffer that to of this to parse beta flush from alpha to this limit rate to delta.
+fn handle_991(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6937; Ok(991) }
+2026-11-13 08:32:44 INFO scan path=/var/log/archive-992.txt entries=12896 bytes=4066208
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 993.
+  "key_994": {"value": 16898, "ratio": 0.9970, "label": "alpha"},
+That thread that to channel beta of flush.
+fn handle_996(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 6972; Ok(996) }
+2026-11-18 13:37:19 INFO scan path=/var/log/archive-997.txt entries=12961 bytes=4086703
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 998.
+  "key_999": {"value": 16983, "ratio": 0.0020, "label": "this"},
+This buffer of delta is this zeta flush with rate queue.
+fn handle_1001(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7007; Ok(1001) }
+2026-11-23 18:42:54 INFO scan path=/var/log/archive-1002.txt entries=13026 bytes=4107198
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1003.
+  "key_1004": {"value": 17068, "ratio": 0.0070, "label": "of"},
+Alpha the this parse that and zeta channel parse epsilon beta limit queue delta render queue this is alpha.
+fn handle_1006(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7042; Ok(1006) }
+2026-11-28 23:47:29 INFO scan path=/var/log/archive-1007.txt entries=13091 bytes=4127693
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1008.
+  "key_1009": {"value": 17153, "ratio": 0.0120, "label": "this"},
+Render render buffer render this that from render is by by on epsilon.
+fn handle_1011(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7077; Ok(1011) }
+2026-11-05 04:52:04 INFO scan path=/var/log/archive-1012.txt entries=13156 bytes=4148188
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1013.
+  "key_1014": {"value": 17238, "ratio": 0.0171, "label": "parse"},
+To for on limit the beta channel alpha queue flush on parse and with for.
+fn handle_1016(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7112; Ok(1016) }
+2026-11-10 09:57:39 INFO scan path=/var/log/archive-1017.txt entries=13221 bytes=4168683
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1018.
+  "key_1019": {"value": 17323, "ratio": 0.0221, "label": "lambda"},
+Gamma queue rate with render the of gamma epsilon this epsilon is of render the epsilon buffer for.
+fn handle_1021(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7147; Ok(1021) }
+2026-11-15 14:02:14 INFO scan path=/var/log/archive-1022.txt entries=13286 bytes=4189178
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1023.
+  "key_1024": {"value": 17408, "ratio": 0.0271, "label": "omicron"},
+Epsilon the rate by by delta thread limit this parse to that limit gamma this delta from zeta zeta.
+fn handle_1026(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7182; Ok(1026) }
+2026-11-20 19:07:49 INFO scan path=/var/log/archive-1027.txt entries=13351 bytes=4209673
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1028.
+  "key_1029": {"value": 17493, "ratio": 0.0321, "label": "buffer"},
+That flush by with and gamma this limit omicron buffer and is rate with gamma gamma.
+fn handle_1031(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7217; Ok(1031) }
+2026-11-25 00:12:24 INFO scan path=/var/log/archive-1032.txt entries=13416 bytes=4230168
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1033.
+  "key_1034": {"value": 17578, "ratio": 0.0371, "label": "omicron"},
+Flush for the omicron render queue render in in to and for and.
+fn handle_1036(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7252; Ok(1036) }
+2026-11-02 05:17:59 INFO scan path=/var/log/archive-1037.txt entries=13481 bytes=4250663
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1038.
+  "key_1039": {"value": 17663, "ratio": 0.0421, "label": "for"},
+The the omicron with for to from to parse the.
+fn handle_1041(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7287; Ok(1041) }
+2026-11-07 10:22:34 INFO scan path=/var/log/archive-1042.txt entries=13546 bytes=4271158
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1043.
+  "key_1044": {"value": 17748, "ratio": 0.0471, "label": "gamma"},
+That flush rate this flush for render for channel alpha and lambda alpha delta.
+fn handle_1046(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7322; Ok(1046) }
+2026-11-12 15:27:09 INFO scan path=/var/log/archive-1047.txt entries=13611 bytes=4291653
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1048.
+  "key_1049": {"value": 17833, "ratio": 0.0522, "label": "with"},
+Delta with is delta flush channel for parse in lambda the with thread.
+fn handle_1051(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7357; Ok(1051) }
+2026-11-17 20:32:44 INFO scan path=/var/log/archive-1052.txt entries=13676 bytes=4312148
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1053.
+  "key_1054": {"value": 17918, "ratio": 0.0572, "label": "gamma"},
+By of flush rate delta that alpha on that.
+fn handle_1056(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7392; Ok(1056) }
+2026-11-22 01:37:19 INFO scan path=/var/log/archive-1057.txt entries=13741 bytes=4332643
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1058.
+  "key_1059": {"value": 18003, "ratio": 0.0622, "label": "beta"},
+Lambda epsilon zeta buffer flush from in to is lambda by thread from rate.
+fn handle_1061(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7427; Ok(1061) }
+2026-11-27 06:42:54 INFO scan path=/var/log/archive-1062.txt entries=13806 bytes=4353138
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1063.
+  "key_1064": {"value": 18088, "ratio": 0.0672, "label": "zeta"},
+Limit in gamma parse thread queue the zeta alpha gamma epsilon.
+fn handle_1066(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7462; Ok(1066) }
+2026-11-04 11:47:29 INFO scan path=/var/log/archive-1067.txt entries=13871 bytes=4373633
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1068.
+  "key_1069": {"value": 18173, "ratio": 0.0722, "label": "by"},
+Beta from flush on the buffer render on parse by by.
+fn handle_1071(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7497; Ok(1071) }
+2026-11-09 16:52:04 INFO scan path=/var/log/archive-1072.txt entries=13936 bytes=4394128
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1073.
+  "key_1074": {"value": 18258, "ratio": 0.0772, "label": "for"},
+Beta and for zeta channel render render rate with.
+fn handle_1076(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7532; Ok(1076) }
+2026-11-14 21:57:39 INFO scan path=/var/log/archive-1077.txt entries=14001 bytes=4414623
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1078.
+  "key_1079": {"value": 18343, "ratio": 0.0822, "label": "limit"},
+For delta this and buffer limit the from parse this to epsilon flush.
+fn handle_1081(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7567; Ok(1081) }
+2026-11-19 02:02:14 INFO scan path=/var/log/archive-1082.txt entries=14066 bytes=4435118
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1083.
+  "key_1084": {"value": 18428, "ratio": 0.0873, "label": "that"},
+Render by beta limit is gamma beta omicron limit this for render parse of render to thread flush with omicron.
+fn handle_1086(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7602; Ok(1086) }
+2026-11-24 07:07:49 INFO scan path=/var/log/archive-1087.txt entries=14131 bytes=4455613
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1088.
+  "key_1089": {"value": 18513, "ratio": 0.0923, "label": "beta"},
+Queue buffer to omicron rate from omicron limit.
+fn handle_1091(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7637; Ok(1091) }
+2026-11-01 12:12:24 INFO scan path=/var/log/archive-1092.txt entries=14196 bytes=4476108
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1093.
+  "key_1094": {"value": 18598, "ratio": 0.0973, "label": "from"},
+Limit gamma rate lambda that to alpha is buffer delta by rate channel rate of.
+fn handle_1096(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7672; Ok(1096) }
+2026-11-06 17:17:59 INFO scan path=/var/log/archive-1097.txt entries=14261 bytes=4496603
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1098.
+  "key_1099": {"value": 18683, "ratio": 0.1023, "label": "omicron"},
+That channel and in beta is epsilon for alpha.
+fn handle_1101(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7707; Ok(1101) }
+2026-11-11 22:22:34 INFO scan path=/var/log/archive-1102.txt entries=14326 bytes=4517098
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1103.
+  "key_1104": {"value": 18768, "ratio": 0.1073, "label": "omicron"},
+From zeta limit to and this in to for limit of on thread that of.
+fn handle_1106(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7742; Ok(1106) }
+2026-11-16 03:27:09 INFO scan path=/var/log/archive-1107.txt entries=14391 bytes=4537593
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1108.
+  "key_1109": {"value": 18853, "ratio": 0.1123, "label": "omicron"},
+This omicron and beta the channel queue and to in render for that alpha on with queue beta alpha for.
+fn handle_1111(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7777; Ok(1111) }
+2026-11-21 08:32:44 INFO scan path=/var/log/archive-1112.txt entries=14456 bytes=4558088
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1113.
+  "key_1114": {"value": 18938, "ratio": 0.1174, "label": "rate"},
+That to limit and zeta rate epsilon delta delta thread queue delta that for channel omicron epsilon rate rate.
+fn handle_1116(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7812; Ok(1116) }
+2026-11-26 13:37:19 INFO scan path=/var/log/archive-1117.txt entries=14521 bytes=4578583
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1118.
+  "key_1119": {"value": 19023, "ratio": 0.1224, "label": "render"},
+In gamma parse limit epsilon queue queue the on to omicron of.
+fn handle_1121(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7847; Ok(1121) }
+2026-11-03 18:42:54 INFO scan path=/var/log/archive-1122.txt entries=14586 bytes=4599078
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1123.
+  "key_1124": {"value": 19108, "ratio": 0.1274, "label": "in"},
+This of by the the by and channel is alpha epsilon this is omicron lambda gamma parse that with.
+fn handle_1126(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7882; Ok(1126) }
+2026-11-08 23:47:29 INFO scan path=/var/log/archive-1127.txt entries=14651 bytes=4619573
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1128.
+  "key_1129": {"value": 19193, "ratio": 0.1324, "label": "alpha"},
+Epsilon omicron for from gamma lambda is beta delta.
+fn handle_1131(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7917; Ok(1131) }
+2026-11-13 04:52:04 INFO scan path=/var/log/archive-1132.txt entries=14716 bytes=4640068
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1133.
+  "key_1134": {"value": 19278, "ratio": 0.1374, "label": "delta"},
+For that rate delta delta the buffer of render with of gamma beta for in is in on channel.
+fn handle_1136(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7952; Ok(1136) }
+2026-11-18 09:57:39 INFO scan path=/var/log/archive-1137.txt entries=14781 bytes=4660563
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1138.
+  "key_1139": {"value": 19363, "ratio": 0.1424, "label": "from"},
+By buffer by lambda render this and limit of render this omicron that parse.
+fn handle_1141(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 7987; Ok(1141) }
+2026-11-23 14:02:14 INFO scan path=/var/log/archive-1142.txt entries=14846 bytes=4681058
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1143.
+  "key_1144": {"value": 19448, "ratio": 0.1474, "label": "beta"},
+For gamma queue zeta epsilon flush this zeta beta in thread from rate by the.
+fn handle_1146(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8022; Ok(1146) }
+2026-11-28 19:07:49 INFO scan path=/var/log/archive-1147.txt entries=14911 bytes=4701553
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1148.
+  "key_1149": {"value": 19533, "ratio": 0.1525, "label": "queue"},
+Thread parse flush lambda beta channel delta with delta that for for buffer by rate gamma lambda this by.
+fn handle_1151(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8057; Ok(1151) }
+2026-11-05 00:12:24 INFO scan path=/var/log/archive-1152.txt entries=14976 bytes=4722048
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1153.
+  "key_1154": {"value": 19618, "ratio": 0.1575, "label": "thread"},
+Channel to from alpha parse alpha rate epsilon with queue is queue by rate.
+fn handle_1156(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8092; Ok(1156) }
+2026-11-10 05:17:59 INFO scan path=/var/log/archive-1157.txt entries=15041 bytes=4742543
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1158.
+  "key_1159": {"value": 19703, "ratio": 0.1625, "label": "queue"},
+Zeta thread queue by delta is rate buffer in and alpha the flush is gamma channel.
+fn handle_1161(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8127; Ok(1161) }
+2026-11-15 10:22:34 INFO scan path=/var/log/archive-1162.txt entries=15106 bytes=4763038
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1163.
+  "key_1164": {"value": 19788, "ratio": 0.1675, "label": "delta"},
+Parse delta render this is parse lambda this render the thread with to is delta flush flush with is zeta.
+fn handle_1166(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8162; Ok(1166) }
+2026-11-20 15:27:09 INFO scan path=/var/log/archive-1167.txt entries=15171 bytes=4783533
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1168.
+  "key_1169": {"value": 19873, "ratio": 0.1725, "label": "zeta"},
+On is channel to parse parse in flush.
+fn handle_1171(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8197; Ok(1171) }
+2026-11-25 20:32:44 INFO scan path=/var/log/archive-1172.txt entries=15236 bytes=4804028
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1173.
+  "key_1174": {"value": 19958, "ratio": 0.1775, "label": "gamma"},
+Flush delta queue zeta the render this channel parse that.
+fn handle_1176(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8232; Ok(1176) }
+2026-11-02 01:37:19 INFO scan path=/var/log/archive-1177.txt entries=15301 bytes=4824523
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1178.
+  "key_1179": {"value": 20043, "ratio": 0.1825, "label": "epsilon"},
+That on gamma for parse limit omicron for.
+fn handle_1181(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8267; Ok(1181) }
+2026-11-07 06:42:54 INFO scan path=/var/log/archive-1182.txt entries=15366 bytes=4845018
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1183.
+  "key_1184": {"value": 20128, "ratio": 0.1876, "label": "omicron"},
+With of beta delta epsilon to from epsilon to on by the for of render.
+fn handle_1186(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8302; Ok(1186) }
+2026-11-12 11:47:29 INFO scan path=/var/log/archive-1187.txt entries=15431 bytes=4865513
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1188.
+  "key_1189": {"value": 20213, "ratio": 0.1926, "label": "buffer"},
+With with by flush and omicron gamma gamma buffer with render flush parse lambda.
+fn handle_1191(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8337; Ok(1191) }
+2026-11-17 16:52:04 INFO scan path=/var/log/archive-1192.txt entries=15496 bytes=4886008
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1193.
+  "key_1194": {"value": 20298, "ratio": 0.1976, "label": "channel"},
+To in epsilon limit is rate that alpha of this and with rate buffer.
+fn handle_1196(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8372; Ok(1196) }
+2026-11-22 21:57:39 INFO scan path=/var/log/archive-1197.txt entries=15561 bytes=4906503
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1198.
+  "key_1199": {"value": 20383, "ratio": 0.2026, "label": "queue"},
+Parse parse epsilon and from parse and rate epsilon of in.
+fn handle_1201(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8407; Ok(1201) }
+2026-11-27 02:02:14 INFO scan path=/var/log/archive-1202.txt entries=15626 bytes=4926998
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1203.
+  "key_1204": {"value": 20468, "ratio": 0.2076, "label": "lambda"},
+In and limit channel of with gamma omicron lambda for.
+fn handle_1206(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8442; Ok(1206) }
+2026-11-04 07:07:49 INFO scan path=/var/log/archive-1207.txt entries=15691 bytes=4947493
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1208.
+  "key_1209": {"value": 20553, "ratio": 0.2126, "label": "channel"},
+To that in parse in queue channel queue thread buffer omicron of beta that buffer delta for on.
+fn handle_1211(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8477; Ok(1211) }
+2026-11-09 12:12:24 INFO scan path=/var/log/archive-1212.txt entries=15756 bytes=4967988
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1213.
+  "key_1214": {"value": 20638, "ratio": 0.2177, "label": "by"},
+Of on to that beta flush for epsilon zeta render gamma from gamma epsilon delta and lambda.
+fn handle_1216(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8512; Ok(1216) }
+2026-11-14 17:17:59 INFO scan path=/var/log/archive-1217.txt entries=15821 bytes=4988483
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1218.
+  "key_1219": {"value": 20723, "ratio": 0.2227, "label": "from"},
+Is from epsilon delta thread from of beta lambda zeta queue that to omicron rate flush.
+fn handle_1221(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8547; Ok(1221) }
+2026-11-19 22:22:34 INFO scan path=/var/log/archive-1222.txt entries=15886 bytes=5008978
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1223.
+  "key_1224": {"value": 20808, "ratio": 0.2277, "label": "and"},
+Of parse queue flush beta parse parse in thread rate in omicron.
+fn handle_1226(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8582; Ok(1226) }
+2026-11-24 03:27:09 INFO scan path=/var/log/archive-1227.txt entries=15951 bytes=5029473
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1228.
+  "key_1229": {"value": 20893, "ratio": 0.2327, "label": "lambda"},
+Queue omicron this that queue to to of the delta limit rate in of.
+fn handle_1231(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8617; Ok(1231) }
+2026-11-01 08:32:44 INFO scan path=/var/log/archive-1232.txt entries=16016 bytes=5049968
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1233.
+  "key_1234": {"value": 20978, "ratio": 0.2377, "label": "rate"},
+From is of zeta gamma omicron render beta queue that that delta parse flush lambda of is the render.
+fn handle_1236(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8652; Ok(1236) }
+2026-11-06 13:37:19 INFO scan path=/var/log/archive-1237.txt entries=16081 bytes=5070463
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1238.
+  "key_1239": {"value": 21063, "ratio": 0.2427, "label": "by"},
+And parse limit from channel zeta in flush this zeta epsilon beta lambda.
+fn handle_1241(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8687; Ok(1241) }
+2026-11-11 18:42:54 INFO scan path=/var/log/archive-1242.txt entries=16146 bytes=5090958
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1243.
+  "key_1244": {"value": 21148, "ratio": 0.2477, "label": "to"},
+Of delta gamma for omicron channel with thread omicron and queue limit.
+fn handle_1246(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8722; Ok(1246) }
+2026-11-16 23:47:29 INFO scan path=/var/log/archive-1247.txt entries=16211 bytes=5111453
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1248.
+  "key_1249": {"value": 21233, "ratio": 0.2528, "label": "gamma"},
+With in from the with buffer flush beta omicron.
+fn handle_1251(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8757; Ok(1251) }
+2026-11-21 04:52:04 INFO scan path=/var/log/archive-1252.txt entries=16276 bytes=5131948
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1253.
+  "key_1254": {"value": 21318, "ratio": 0.2578, "label": "of"},
+Delta rate beta lambda buffer and parse in is render thread buffer gamma delta this parse.
+fn handle_1256(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8792; Ok(1256) }
+2026-11-26 09:57:39 INFO scan path=/var/log/archive-1257.txt entries=16341 bytes=5152443
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1258.
+  "key_1259": {"value": 21403, "ratio": 0.2628, "label": "gamma"},
+Queue for flush render is delta on epsilon limit.
+fn handle_1261(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8827; Ok(1261) }
+2026-11-03 14:02:14 INFO scan path=/var/log/archive-1262.txt entries=16406 bytes=5172938
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1263.
+  "key_1264": {"value": 21488, "ratio": 0.2678, "label": "this"},
+By lambda parse render delta for by queue render on lambda on with from omicron on queue render beta.
+fn handle_1266(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8862; Ok(1266) }
+2026-11-08 19:07:49 INFO scan path=/var/log/archive-1267.txt entries=16471 bytes=5193433
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1268.
+  "key_1269": {"value": 21573, "ratio": 0.2728, "label": "channel"},
+Epsilon is is omicron the render on is.
+fn handle_1271(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8897; Ok(1271) }
+2026-11-13 00:12:24 INFO scan path=/var/log/archive-1272.txt entries=16536 bytes=5213928
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1273.
+  "key_1274": {"value": 21658, "ratio": 0.2778, "label": "alpha"},
+Flush gamma on for delta flush and gamma queue for on lambda.
+fn handle_1276(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8932; Ok(1276) }
+2026-11-18 05:17:59 INFO scan path=/var/log/archive-1277.txt entries=16601 bytes=5234423
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1278.
+  "key_1279": {"value": 21743, "ratio": 0.2828, "label": "that"},
+In the render that queue gamma in by thread buffer limit thread channel in channel omicron and alpha.
+fn handle_1281(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 8967; Ok(1281) }
+2026-11-23 10:22:34 INFO scan path=/var/log/archive-1282.txt entries=16666 bytes=5254918
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1283.
+  "key_1284": {"value": 21828, "ratio": 0.2879, "label": "beta"},
+By queue limit render queue from beta delta gamma to that.
+fn handle_1286(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9002; Ok(1286) }
+2026-11-28 15:27:09 INFO scan path=/var/log/archive-1287.txt entries=16731 bytes=5275413
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1288.
+  "key_1289": {"value": 21913, "ratio": 0.2929, "label": "limit"},
+And rate channel queue lambda limit zeta on and of flush beta omicron of alpha thread.
+fn handle_1291(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9037; Ok(1291) }
+2026-11-05 20:32:44 INFO scan path=/var/log/archive-1292.txt entries=16796 bytes=5295908
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1293.
+  "key_1294": {"value": 21998, "ratio": 0.2979, "label": "alpha"},
+Thread rate render channel buffer with on flush zeta lambda by flush.
+fn handle_1296(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9072; Ok(1296) }
+2026-11-10 01:37:19 INFO scan path=/var/log/archive-1297.txt entries=16861 bytes=5316403
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1298.
+  "key_1299": {"value": 22083, "ratio": 0.3029, "label": "to"},
+From beta delta to to rate rate parse with flush gamma epsilon the beta thread.
+fn handle_1301(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9107; Ok(1301) }
+2026-11-15 06:42:54 INFO scan path=/var/log/archive-1302.txt entries=16926 bytes=5336898
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1303.
+  "key_1304": {"value": 22168, "ratio": 0.3079, "label": "alpha"},
+Queue buffer buffer to alpha with that flush flush thread.
+fn handle_1306(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9142; Ok(1306) }
+2026-11-20 11:47:29 INFO scan path=/var/log/archive-1307.txt entries=16991 bytes=5357393
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1308.
+  "key_1309": {"value": 22253, "ratio": 0.3129, "label": "and"},
+Of is flush this channel zeta omicron channel gamma parse buffer beta in rate queue on.
+fn handle_1311(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9177; Ok(1311) }
+2026-11-25 16:52:04 INFO scan path=/var/log/archive-1312.txt entries=17056 bytes=5377888
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1313.
+  "key_1314": {"value": 22338, "ratio": 0.3180, "label": "limit"},
+Parse thread alpha the parse beta buffer is queue with delta from on beta channel.
+fn handle_1316(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9212; Ok(1316) }
+2026-11-02 21:57:39 INFO scan path=/var/log/archive-1317.txt entries=17121 bytes=5398383
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1318.
+  "key_1319": {"value": 22423, "ratio": 0.3230, "label": "lambda"},
+Beta channel from alpha queue render with alpha by for to render from epsilon flush.
+fn handle_1321(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9247; Ok(1321) }
+2026-11-07 02:02:14 INFO scan path=/var/log/archive-1322.txt entries=17186 bytes=5418878
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1323.
+  "key_1324": {"value": 22508, "ratio": 0.3280, "label": "parse"},
+Parse is on this limit that epsilon queue and lambda this delta rate omicron that omicron zeta.
+fn handle_1326(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9282; Ok(1326) }
+2026-11-12 07:07:49 INFO scan path=/var/log/archive-1327.txt entries=17251 bytes=5439373
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1328.
+  "key_1329": {"value": 22593, "ratio": 0.3330, "label": "parse"},
+On from zeta epsilon of parse omicron queue flush queue flush of epsilon limit on this thread by.
+fn handle_1331(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9317; Ok(1331) }
+2026-11-17 12:12:24 INFO scan path=/var/log/archive-1332.txt entries=17316 bytes=5459868
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1333.
+  "key_1334": {"value": 22678, "ratio": 0.3380, "label": "alpha"},
+Alpha queue parse parse queue that from channel on rate.
+fn handle_1336(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9352; Ok(1336) }
+2026-11-22 17:17:59 INFO scan path=/var/log/archive-1337.txt entries=17381 bytes=5480363
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1338.
+  "key_1339": {"value": 22763, "ratio": 0.3430, "label": "this"},
+Is and queue the zeta flush on this epsilon this thread rate beta to channel thread omicron delta with parse.
+fn handle_1341(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9387; Ok(1341) }
+2026-11-27 22:22:34 INFO scan path=/var/log/archive-1342.txt entries=17446 bytes=5500858
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1343.
+  "key_1344": {"value": 22848, "ratio": 0.3480, "label": "gamma"},
+Lambda in parse is omicron is thread is limit render buffer.
+fn handle_1346(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9422; Ok(1346) }
+2026-11-04 03:27:09 INFO scan path=/var/log/archive-1347.txt entries=17511 bytes=5521353
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1348.
+  "key_1349": {"value": 22933, "ratio": 0.3531, "label": "for"},
+Queue the of zeta the thread this the with epsilon this limit from channel for of render for gamma buffer.
+fn handle_1351(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9457; Ok(1351) }
+2026-11-09 08:32:44 INFO scan path=/var/log/archive-1352.txt entries=17576 bytes=5541848
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1353.
+  "key_1354": {"value": 23018, "ratio": 0.3581, "label": "lambda"},
+The for buffer for of thread queue queue by gamma with channel is that is that lambda lambda zeta limit.
+fn handle_1356(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9492; Ok(1356) }
+2026-11-14 13:37:19 INFO scan path=/var/log/archive-1357.txt entries=17641 bytes=5562343
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1358.
+  "key_1359": {"value": 23103, "ratio": 0.3631, "label": "delta"},
+By gamma for buffer limit lambda parse rate delta queue that.
+fn handle_1361(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9527; Ok(1361) }
+2026-11-19 18:42:54 INFO scan path=/var/log/archive-1362.txt entries=17706 bytes=5582838
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1363.
+  "key_1364": {"value": 23188, "ratio": 0.3681, "label": "the"},
+To zeta and in thread the from is flush omicron by omicron of channel buffer limit.
+fn handle_1366(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9562; Ok(1366) }
+2026-11-24 23:47:29 INFO scan path=/var/log/archive-1367.txt entries=17771 bytes=5603333
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1368.
+  "key_1369": {"value": 23273, "ratio": 0.3731, "label": "omicron"},
+The by epsilon that alpha on render omicron limit by.
+fn handle_1371(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9597; Ok(1371) }
+2026-11-01 04:52:04 INFO scan path=/var/log/archive-1372.txt entries=17836 bytes=5623828
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1373.
+  "key_1374": {"value": 23358, "ratio": 0.3781, "label": "rate"},
+Zeta zeta delta with on for that of epsilon thread render from thread beta in in that is is.
+fn handle_1376(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9632; Ok(1376) }
+2026-11-06 09:57:39 INFO scan path=/var/log/archive-1377.txt entries=17901 bytes=5644323
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1378.
+  "key_1379": {"value": 23443, "ratio": 0.3831, "label": "the"},
+Is parse beta for rate in with by for lambda flush zeta omicron flush and lambda epsilon.
+fn handle_1381(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9667; Ok(1381) }
+2026-11-11 14:02:14 INFO scan path=/var/log/archive-1382.txt entries=17966 bytes=5664818
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1383.
+  "key_1384": {"value": 23528, "ratio": 0.3882, "label": "flush"},
+Parse on is epsilon parse of channel buffer of thread gamma is beta this epsilon by gamma for from.
+fn handle_1386(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9702; Ok(1386) }
+2026-11-16 19:07:49 INFO scan path=/var/log/archive-1387.txt entries=18031 bytes=5685313
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1388.
+  "key_1389": {"value": 23613, "ratio": 0.3932, "label": "render"},
+The by lambda thread epsilon buffer channel from thread that to buffer channel lambda.
+fn handle_1391(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9737; Ok(1391) }
+2026-11-21 00:12:24 INFO scan path=/var/log/archive-1392.txt entries=18096 bytes=5705808
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1393.
+  "key_1394": {"value": 23698, "ratio": 0.3982, "label": "buffer"},
+Thread alpha flush zeta thread on from alpha that the flush the flush delta limit zeta epsilon.
+fn handle_1396(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9772; Ok(1396) }
+2026-11-26 05:17:59 INFO scan path=/var/log/archive-1397.txt entries=18161 bytes=5726303
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1398.
+  "key_1399": {"value": 23783, "ratio": 0.4032, "label": "the"},
+Is to channel is render lambda by thread lambda by queue alpha from of parse of alpha.
+fn handle_1401(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9807; Ok(1401) }
+2026-11-03 10:22:34 INFO scan path=/var/log/archive-1402.txt entries=18226 bytes=5746798
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1403.
+  "key_1404": {"value": 23868, "ratio": 0.4082, "label": "from"},
+Thread of limit with channel zeta omicron in this parse delta parse for thread beta from.
+fn handle_1406(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9842; Ok(1406) }
+2026-11-08 15:27:09 INFO scan path=/var/log/archive-1407.txt entries=18291 bytes=5767293
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1408.
+  "key_1409": {"value": 23953, "ratio": 0.4132, "label": "is"},
+On rate rate queue buffer delta render gamma from lambda for buffer flush omicron of.
+fn handle_1411(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9877; Ok(1411) }
+2026-11-13 20:32:44 INFO scan path=/var/log/archive-1412.txt entries=18356 bytes=5787788
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1413.
+  "key_1414": {"value": 24038, "ratio": 0.4183, "label": "lambda"},
+This render this epsilon gamma this the thread render thread thread parse parse that render with buffer channel.
+fn handle_1416(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9912; Ok(1416) }
+2026-11-18 01:37:19 INFO scan path=/var/log/archive-1417.txt entries=18421 bytes=5808283
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1418.
+  "key_1419": {"value": 24123, "ratio": 0.4233, "label": "is"},
+Is buffer and delta queue thread to flush that the flush lambda.
+fn handle_1421(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9947; Ok(1421) }
+2026-11-23 06:42:54 INFO scan path=/var/log/archive-1422.txt entries=18486 bytes=5828778
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1423.
+  "key_1424": {"value": 24208, "ratio": 0.4283, "label": "the"},
+Flush lambda of and zeta render zeta buffer epsilon channel with by gamma alpha flush.
+fn handle_1426(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 9982; Ok(1426) }
+2026-11-28 11:47:29 INFO scan path=/var/log/archive-1427.txt entries=18551 bytes=5849273
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1428.
+  "key_1429": {"value": 24293, "ratio": 0.4333, "label": "buffer"},
+Gamma epsilon alpha limit gamma queue queue limit omicron and rate flush parse and parse buffer delta.
+fn handle_1431(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10017; Ok(1431) }
+2026-11-05 16:52:04 INFO scan path=/var/log/archive-1432.txt entries=18616 bytes=5869768
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1433.
+  "key_1434": {"value": 24378, "ratio": 0.4383, "label": "channel"},
+Is channel lambda omicron limit render omicron parse by alpha that delta rate for thread in.
+fn handle_1436(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10052; Ok(1436) }
+2026-11-10 21:57:39 INFO scan path=/var/log/archive-1437.txt entries=18681 bytes=5890263
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1438.
+  "key_1439": {"value": 24463, "ratio": 0.4433, "label": "the"},
+For thread omicron alpha that that queue limit limit parse of.
+fn handle_1441(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10087; Ok(1441) }
+2026-11-15 02:02:14 INFO scan path=/var/log/archive-1442.txt entries=18746 bytes=5910758
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1443.
+  "key_1444": {"value": 24548, "ratio": 0.4483, "label": "in"},
+Limit rate with thread on queue flush of with is is.
+fn handle_1446(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10122; Ok(1446) }
+2026-11-20 07:07:49 INFO scan path=/var/log/archive-1447.txt entries=18811 bytes=5931253
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1448.
+  "key_1449": {"value": 24633, "ratio": 0.4534, "label": "in"},
+Beta by lambda limit with epsilon the from lambda and gamma limit render this zeta omicron flush.
+fn handle_1451(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10157; Ok(1451) }
+2026-11-25 12:12:24 INFO scan path=/var/log/archive-1452.txt entries=18876 bytes=5951748
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1453.
+  "key_1454": {"value": 24718, "ratio": 0.4584, "label": "and"},
+In delta alpha epsilon for thread render thread alpha omicron gamma beta delta render flush from rate on queue.
+fn handle_1456(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10192; Ok(1456) }
+2026-11-02 17:17:59 INFO scan path=/var/log/archive-1457.txt entries=18941 bytes=5972243
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1458.
+  "key_1459": {"value": 24803, "ratio": 0.4634, "label": "thread"},
+Beta gamma of of thread the limit in on limit this epsilon thread epsilon flush zeta with with.
+fn handle_1461(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10227; Ok(1461) }
+2026-11-07 22:22:34 INFO scan path=/var/log/archive-1462.txt entries=19006 bytes=5992738
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1463.
+  "key_1464": {"value": 24888, "ratio": 0.4684, "label": "with"},
+With alpha limit is flush and that that buffer gamma to thread zeta queue.
+fn handle_1466(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10262; Ok(1466) }
+2026-11-12 03:27:09 INFO scan path=/var/log/archive-1467.txt entries=19071 bytes=6013233
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1468.
+  "key_1469": {"value": 24973, "ratio": 0.4734, "label": "in"},
+Flush alpha that delta on thread beta parse zeta omicron for zeta flush and flush gamma beta that.
+fn handle_1471(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10297; Ok(1471) }
+2026-11-17 08:32:44 INFO scan path=/var/log/archive-1472.txt entries=19136 bytes=6033728
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1473.
+  "key_1474": {"value": 25058, "ratio": 0.4784, "label": "in"},
+Render thread render omicron rate is epsilon lambda gamma.
+fn handle_1476(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10332; Ok(1476) }
+2026-11-22 13:37:19 INFO scan path=/var/log/archive-1477.txt entries=19201 bytes=6054223
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1478.
+  "key_1479": {"value": 25143, "ratio": 0.4835, "label": "omicron"},
+Delta limit render lambda render beta beta for of queue epsilon queue that gamma render parse alpha.
+fn handle_1481(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10367; Ok(1481) }
+2026-11-27 18:42:54 INFO scan path=/var/log/archive-1482.txt entries=19266 bytes=6074718
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1483.
+  "key_1484": {"value": 25228, "ratio": 0.4885, "label": "buffer"},
+For buffer flush delta in alpha lambda in with is beta delta for omicron alpha epsilon delta of.
+fn handle_1486(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10402; Ok(1486) }
+2026-11-04 23:47:29 INFO scan path=/var/log/archive-1487.txt entries=19331 bytes=6095213
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1488.
+  "key_1489": {"value": 25313, "ratio": 0.4935, "label": "is"},
+In gamma channel omicron by omicron delta buffer this for zeta buffer.
+fn handle_1491(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10437; Ok(1491) }
+2026-11-09 04:52:04 INFO scan path=/var/log/archive-1492.txt entries=19396 bytes=6115708
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1493.
+  "key_1494": {"value": 25398, "ratio": 0.4985, "label": "to"},
+Is in by this with that beta epsilon flush with that and channel on channel queue beta buffer epsilon channel.
+fn handle_1496(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10472; Ok(1496) }
+2026-11-14 09:57:39 INFO scan path=/var/log/archive-1497.txt entries=19461 bytes=6136203
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1498.
+  "key_1499": {"value": 25483, "ratio": 0.5035, "label": "gamma"},
+To that rate delta lambda limit flush gamma gamma beta flush by thread epsilon for beta channel that with flush.
+fn handle_1501(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10507; Ok(1501) }
+2026-11-19 14:02:14 INFO scan path=/var/log/archive-1502.txt entries=19526 bytes=6156698
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1503.
+  "key_1504": {"value": 25568, "ratio": 0.5085, "label": "queue"},
+Epsilon channel channel channel by thread rate alpha epsilon with with this on beta lambda alpha beta.
+fn handle_1506(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10542; Ok(1506) }
+2026-11-24 19:07:49 INFO scan path=/var/log/archive-1507.txt entries=19591 bytes=6177193
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1508.
+  "key_1509": {"value": 25653, "ratio": 0.5135, "label": "the"},
+That buffer that parse for by lambda on gamma for alpha is lambda for.
+fn handle_1511(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10577; Ok(1511) }
+2026-11-01 00:12:24 INFO scan path=/var/log/archive-1512.txt entries=19656 bytes=6197688
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1513.
+  "key_1514": {"value": 25738, "ratio": 0.5186, "label": "queue"},
+By this omicron render to in from limit with of buffer in zeta rate lambda render channel rate zeta.
+fn handle_1516(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10612; Ok(1516) }
+2026-11-06 05:17:59 INFO scan path=/var/log/archive-1517.txt entries=19721 bytes=6218183
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1518.
+  "key_1519": {"value": 25823, "ratio": 0.5236, "label": "gamma"},
+That for by to thread and omicron beta buffer thread this by delta by lambda lambda parse the.
+fn handle_1521(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10647; Ok(1521) }
+2026-11-11 10:22:34 INFO scan path=/var/log/archive-1522.txt entries=19786 bytes=6238678
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1523.
+  "key_1524": {"value": 25908, "ratio": 0.5286, "label": "by"},
+Flush flush for on on thread limit buffer.
+fn handle_1526(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10682; Ok(1526) }
+2026-11-16 15:27:09 INFO scan path=/var/log/archive-1527.txt entries=19851 bytes=6259173
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1528.
+  "key_1529": {"value": 25993, "ratio": 0.5336, "label": "delta"},
+Gamma delta limit this to render channel flush on flush gamma.
+fn handle_1531(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10717; Ok(1531) }
+2026-11-21 20:32:44 INFO scan path=/var/log/archive-1532.txt entries=19916 bytes=6279668
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1533.
+  "key_1534": {"value": 26078, "ratio": 0.5386, "label": "of"},
+Lambda in flush flush lambda in this and of delta render.
+fn handle_1536(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10752; Ok(1536) }
+2026-11-26 01:37:19 INFO scan path=/var/log/archive-1537.txt entries=19981 bytes=6300163
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1538.
+  "key_1539": {"value": 26163, "ratio": 0.5436, "label": "channel"},
+Alpha zeta parse buffer on beta from queue gamma for flush queue lambda with thread limit and alpha.
+fn handle_1541(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10787; Ok(1541) }
+2026-11-03 06:42:54 INFO scan path=/var/log/archive-1542.txt entries=20046 bytes=6320658
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1543.
+  "key_1544": {"value": 26248, "ratio": 0.5486, "label": "flush"},
+Of to render this in buffer to parse parse to.
+fn handle_1546(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10822; Ok(1546) }
+2026-11-08 11:47:29 INFO scan path=/var/log/archive-1547.txt entries=20111 bytes=6341153
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1548.
+  "key_1549": {"value": 26333, "ratio": 0.5537, "label": "on"},
+Thread is parse from thread the beta for lambda buffer and parse.
+fn handle_1551(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10857; Ok(1551) }
+2026-11-13 16:52:04 INFO scan path=/var/log/archive-1552.txt entries=20176 bytes=6361648
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1553.
+  "key_1554": {"value": 26418, "ratio": 0.5587, "label": "zeta"},
+Rate of for epsilon for for omicron from the on channel omicron that queue.
+fn handle_1556(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10892; Ok(1556) }
+2026-11-18 21:57:39 INFO scan path=/var/log/archive-1557.txt entries=20241 bytes=6382143
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1558.
+  "key_1559": {"value": 26503, "ratio": 0.5637, "label": "for"},
+Rate on render parse channel alpha render for beta buffer channel.
+fn handle_1561(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10927; Ok(1561) }
+2026-11-23 02:02:14 INFO scan path=/var/log/archive-1562.txt entries=20306 bytes=6402638
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1563.
+  "key_1564": {"value": 26588, "ratio": 0.5687, "label": "this"},
+Limit for to is flush on gamma on parse flush delta.
+fn handle_1566(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10962; Ok(1566) }
+2026-11-28 07:07:49 INFO scan path=/var/log/archive-1567.txt entries=20371 bytes=6423133
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1568.
+  "key_1569": {"value": 26673, "ratio": 0.5737, "label": "delta"},
+Alpha the delta to this this limit gamma the epsilon buffer by from zeta parse the to this the.
+fn handle_1571(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 10997; Ok(1571) }
+2026-11-05 12:12:24 INFO scan path=/var/log/archive-1572.txt entries=20436 bytes=6443628
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1573.
+  "key_1574": {"value": 26758, "ratio": 0.5787, "label": "gamma"},
+Beta by omicron beta that that by of channel and channel limit that that.
+fn handle_1576(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11032; Ok(1576) }
+2026-11-10 17:17:59 INFO scan path=/var/log/archive-1577.txt entries=20501 bytes=6464123
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1578.
+  "key_1579": {"value": 26843, "ratio": 0.5838, "label": "is"},
+Thread and thread is render gamma flush of the the by zeta buffer lambda.
+fn handle_1581(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11067; Ok(1581) }
+2026-11-15 22:22:34 INFO scan path=/var/log/archive-1582.txt entries=20566 bytes=6484618
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1583.
+  "key_1584": {"value": 26928, "ratio": 0.5888, "label": "flush"},
+Beta is queue channel limit on this render in omicron zeta delta epsilon epsilon of and.
+fn handle_1586(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11102; Ok(1586) }
+2026-11-20 03:27:09 INFO scan path=/var/log/archive-1587.txt entries=20631 bytes=6505113
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1588.
+  "key_1589": {"value": 27013, "ratio": 0.5938, "label": "and"},
+With rate and queue gamma that rate the lambda and for to lambda channel thread this.
+fn handle_1591(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11137; Ok(1591) }
+2026-11-25 08:32:44 INFO scan path=/var/log/archive-1592.txt entries=20696 bytes=6525608
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1593.
+  "key_1594": {"value": 27098, "ratio": 0.5988, "label": "render"},
+Queue omicron rate parse omicron on is by from by.
+fn handle_1596(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11172; Ok(1596) }
+2026-11-02 13:37:19 INFO scan path=/var/log/archive-1597.txt entries=20761 bytes=6546103
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1598.
+  "key_1599": {"value": 27183, "ratio": 0.6038, "label": "from"},
+Render zeta of that buffer channel rate of.
+fn handle_1601(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11207; Ok(1601) }
+2026-11-07 18:42:54 INFO scan path=/var/log/archive-1602.txt entries=20826 bytes=6566598
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1603.
+  "key_1604": {"value": 27268, "ratio": 0.6088, "label": "lambda"},
+To channel beta limit for in this omicron epsilon with in limit that thread limit.
+fn handle_1606(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11242; Ok(1606) }
+2026-11-12 23:47:29 INFO scan path=/var/log/archive-1607.txt entries=20891 bytes=6587093
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1608.
+  "key_1609": {"value": 27353, "ratio": 0.6138, "label": "epsilon"},
+Lambda flush parse gamma render in in flush this delta thread alpha buffer delta with zeta of thread.
+fn handle_1611(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11277; Ok(1611) }
+2026-11-17 04:52:04 INFO scan path=/var/log/archive-1612.txt entries=20956 bytes=6607588
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1613.
+  "key_1614": {"value": 27438, "ratio": 0.6189, "label": "channel"},
+To from this lambda delta this from this buffer queue to.
+fn handle_1616(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11312; Ok(1616) }
+2026-11-22 09:57:39 INFO scan path=/var/log/archive-1617.txt entries=21021 bytes=6628083
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1618.
+  "key_1619": {"value": 27523, "ratio": 0.6239, "label": "omicron"},
+Rate epsilon epsilon by beta is parse on beta beta beta rate epsilon gamma from and omicron.
+fn handle_1621(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11347; Ok(1621) }
+2026-11-27 14:02:14 INFO scan path=/var/log/archive-1622.txt entries=21086 bytes=6648578
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1623.
+  "key_1624": {"value": 27608, "ratio": 0.6289, "label": "is"},
+That thread and lambda render queue with is omicron from flush buffer lambda flush this from buffer that channel flush.
+fn handle_1626(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11382; Ok(1626) }
+2026-11-04 19:07:49 INFO scan path=/var/log/archive-1627.txt entries=21151 bytes=6669073
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1628.
+  "key_1629": {"value": 27693, "ratio": 0.6339, "label": "of"},
+Thread by is zeta lambda with queue gamma parse with.
+fn handle_1631(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11417; Ok(1631) }
+2026-11-09 00:12:24 INFO scan path=/var/log/archive-1632.txt entries=21216 bytes=6689568
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1633.
+  "key_1634": {"value": 27778, "ratio": 0.6389, "label": "on"},
+Buffer and for beta limit alpha epsilon the omicron on.
+fn handle_1636(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11452; Ok(1636) }
+2026-11-14 05:17:59 INFO scan path=/var/log/archive-1637.txt entries=21281 bytes=6710063
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1638.
+  "key_1639": {"value": 27863, "ratio": 0.6439, "label": "and"},
+On lambda and the lambda this alpha on beta with render delta render with.
+fn handle_1641(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11487; Ok(1641) }
+2026-11-19 10:22:34 INFO scan path=/var/log/archive-1642.txt entries=21346 bytes=6730558
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1643.
+  "key_1644": {"value": 27948, "ratio": 0.6489, "label": "for"},
+Delta and omicron that on limit with flush channel to.
+fn handle_1646(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11522; Ok(1646) }
+2026-11-24 15:27:09 INFO scan path=/var/log/archive-1647.txt entries=21411 bytes=6751053
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1648.
+  "key_1649": {"value": 28033, "ratio": 0.6540, "label": "is"},
+Render from in for by in queue this zeta beta and limit for by alpha delta delta.
+fn handle_1651(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11557; Ok(1651) }
+2026-11-01 20:32:44 INFO scan path=/var/log/archive-1652.txt entries=21476 bytes=6771548
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1653.
+  "key_1654": {"value": 28118, "ratio": 0.6590, "label": "channel"},
+Buffer and with that to that by by buffer queue beta with.
+fn handle_1656(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11592; Ok(1656) }
+2026-11-06 01:37:19 INFO scan path=/var/log/archive-1657.txt entries=21541 bytes=6792043
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1658.
+  "key_1659": {"value": 28203, "ratio": 0.6640, "label": "that"},
+This zeta with omicron is queue by from beta for zeta queue on alpha parse.
+fn handle_1661(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11627; Ok(1661) }
+2026-11-11 06:42:54 INFO scan path=/var/log/archive-1662.txt entries=21606 bytes=6812538
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1663.
+  "key_1664": {"value": 28288, "ratio": 0.6690, "label": "rate"},
+On by this gamma zeta parse from epsilon buffer gamma delta.
+fn handle_1666(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11662; Ok(1666) }
+2026-11-16 11:47:29 INFO scan path=/var/log/archive-1667.txt entries=21671 bytes=6833033
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1668.
+  "key_1669": {"value": 28373, "ratio": 0.6740, "label": "render"},
+Queue and by flush limit in by thread to flush.
+fn handle_1671(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11697; Ok(1671) }
+2026-11-21 16:52:04 INFO scan path=/var/log/archive-1672.txt entries=21736 bytes=6853528
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1673.
+  "key_1674": {"value": 28458, "ratio": 0.6790, "label": "buffer"},
+On this on thread for parse omicron epsilon to to is lambda.
+fn handle_1676(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11732; Ok(1676) }
+2026-11-26 21:57:39 INFO scan path=/var/log/archive-1677.txt entries=21801 bytes=6874023
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1678.
+  "key_1679": {"value": 28543, "ratio": 0.6841, "label": "by"},
+Beta render flush rate to flush epsilon buffer with that flush limit limit in from gamma.
+fn handle_1681(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11767; Ok(1681) }
+2026-11-03 02:02:14 INFO scan path=/var/log/archive-1682.txt entries=21866 bytes=6894518
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1683.
+  "key_1684": {"value": 28628, "ratio": 0.6891, "label": "and"},
+In omicron rate by channel this epsilon delta the lambda epsilon parse gamma lambda by buffer.
+fn handle_1686(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11802; Ok(1686) }
+2026-11-08 07:07:49 INFO scan path=/var/log/archive-1687.txt entries=21931 bytes=6915013
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1688.
+  "key_1689": {"value": 28713, "ratio": 0.6941, "label": "alpha"},
+That lambda of delta lambda on zeta gamma rate buffer by.
+fn handle_1691(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11837; Ok(1691) }
+2026-11-13 12:12:24 INFO scan path=/var/log/archive-1692.txt entries=21996 bytes=6935508
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1693.
+  "key_1694": {"value": 28798, "ratio": 0.6991, "label": "alpha"},
+Buffer lambda the parse flush channel buffer epsilon omicron in this and epsilon.
+fn handle_1696(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11872; Ok(1696) }
+2026-11-18 17:17:59 INFO scan path=/var/log/archive-1697.txt entries=22061 bytes=6956003
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1698.
+  "key_1699": {"value": 28883, "ratio": 0.7041, "label": "from"},
+Of limit queue beta with channel with that beta buffer omicron in and alpha this by the in beta.
+fn handle_1701(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11907; Ok(1701) }
+2026-11-23 22:22:34 INFO scan path=/var/log/archive-1702.txt entries=22126 bytes=6976498
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1703.
+  "key_1704": {"value": 28968, "ratio": 0.7091, "label": "rate"},
+Of for zeta is channel is is alpha gamma is limit from of render.
+fn handle_1706(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11942; Ok(1706) }
+2026-11-28 03:27:09 INFO scan path=/var/log/archive-1707.txt entries=22191 bytes=6996993
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1708.
+  "key_1709": {"value": 29053, "ratio": 0.7141, "label": "parse"},
+Rate channel zeta to limit thread gamma beta render by thread.
+fn handle_1711(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 11977; Ok(1711) }
+2026-11-05 08:32:44 INFO scan path=/var/log/archive-1712.txt entries=22256 bytes=7017488
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1713.
+  "key_1714": {"value": 29138, "ratio": 0.7192, "label": "that"},
+Channel render by channel of and render on queue limit from from.
+fn handle_1716(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12012; Ok(1716) }
+2026-11-10 13:37:19 INFO scan path=/var/log/archive-1717.txt entries=22321 bytes=7037983
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1718.
+  "key_1719": {"value": 29223, "ratio": 0.7242, "label": "queue"},
+To the to buffer with in buffer and buffer that from flush on to gamma beta with on the beta.
+fn handle_1721(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12047; Ok(1721) }
+2026-11-15 18:42:54 INFO scan path=/var/log/archive-1722.txt entries=22386 bytes=7058478
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1723.
+  "key_1724": {"value": 29308, "ratio": 0.7292, "label": "and"},
+Flush zeta gamma alpha with to for on zeta limit epsilon from epsilon limit epsilon from by channel to.
+fn handle_1726(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12082; Ok(1726) }
+2026-11-20 23:47:29 INFO scan path=/var/log/archive-1727.txt entries=22451 bytes=7078973
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1728.
+  "key_1729": {"value": 29393, "ratio": 0.7342, "label": "alpha"},
+Render omicron beta of buffer of the and.
+fn handle_1731(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12117; Ok(1731) }
+2026-11-25 04:52:04 INFO scan path=/var/log/archive-1732.txt entries=22516 bytes=7099468
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1733.
+  "key_1734": {"value": 29478, "ratio": 0.7392, "label": "for"},
+Beta on thread and is in flush parse queue in of and.
+fn handle_1736(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12152; Ok(1736) }
+2026-11-02 09:57:39 INFO scan path=/var/log/archive-1737.txt entries=22581 bytes=7119963
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1738.
+  "key_1739": {"value": 29563, "ratio": 0.7442, "label": "delta"},
+Is for with flush that beta for of parse omicron render from zeta.
+fn handle_1741(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12187; Ok(1741) }
+2026-11-07 14:02:14 INFO scan path=/var/log/archive-1742.txt entries=22646 bytes=7140458
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1743.
+  "key_1744": {"value": 29648, "ratio": 0.7492, "label": "beta"},
+On rate omicron omicron lambda lambda rate the.
+fn handle_1746(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12222; Ok(1746) }
+2026-11-12 19:07:49 INFO scan path=/var/log/archive-1747.txt entries=22711 bytes=7160953
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1748.
+  "key_1749": {"value": 29733, "ratio": 0.7543, "label": "lambda"},
+Queue that that render in gamma and delta epsilon on with the flush zeta the gamma render.
+fn handle_1751(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12257; Ok(1751) }
+2026-11-17 00:12:24 INFO scan path=/var/log/archive-1752.txt entries=22776 bytes=7181448
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1753.
+  "key_1754": {"value": 29818, "ratio": 0.7593, "label": "buffer"},
+With gamma epsilon that of rate thread in.
+fn handle_1756(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12292; Ok(1756) }
+2026-11-22 05:17:59 INFO scan path=/var/log/archive-1757.txt entries=22841 bytes=7201943
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1758.
+  "key_1759": {"value": 29903, "ratio": 0.7643, "label": "flush"},
+Buffer with alpha thread render flush on flush gamma flush gamma with by alpha gamma thread.
+fn handle_1761(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12327; Ok(1761) }
+2026-11-27 10:22:34 INFO scan path=/var/log/archive-1762.txt entries=22906 bytes=7222438
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1763.
+  "key_1764": {"value": 29988, "ratio": 0.7693, "label": "flush"},
+Delta and gamma this epsilon for render beta thread on.
+fn handle_1766(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12362; Ok(1766) }
+2026-11-04 15:27:09 INFO scan path=/var/log/archive-1767.txt entries=22971 bytes=7242933
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1768.
+  "key_1769": {"value": 30073, "ratio": 0.7743, "label": "with"},
+Rate is alpha in and lambda flush and beta of the delta omicron flush gamma from is that thread of.
+fn handle_1771(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12397; Ok(1771) }
+2026-11-09 20:32:44 INFO scan path=/var/log/archive-1772.txt entries=23036 bytes=7263428
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1773.
+  "key_1774": {"value": 30158, "ratio": 0.7793, "label": "and"},
+Channel beta to on in is for queue parse and of lambda channel zeta zeta from the delta.
+fn handle_1776(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12432; Ok(1776) }
+2026-11-14 01:37:19 INFO scan path=/var/log/archive-1777.txt entries=23101 bytes=7283923
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1778.
+  "key_1779": {"value": 30243, "ratio": 0.7844, "label": "the"},
+Channel this zeta omicron beta flush on of that the beta omicron zeta alpha and zeta with with channel is.
+fn handle_1781(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12467; Ok(1781) }
+2026-11-19 06:42:54 INFO scan path=/var/log/archive-1782.txt entries=23166 bytes=7304418
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1783.
+  "key_1784": {"value": 30328, "ratio": 0.7894, "label": "for"},
+Thread limit thread epsilon channel thread in that for with this limit.
+fn handle_1786(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12502; Ok(1786) }
+2026-11-24 11:47:29 INFO scan path=/var/log/archive-1787.txt entries=23231 bytes=7324913
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1788.
+  "key_1789": {"value": 30413, "ratio": 0.7944, "label": "parse"},
+From to from parse with of with by on lambda render delta render gamma to lambda.
+fn handle_1791(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12537; Ok(1791) }
+2026-11-01 16:52:04 INFO scan path=/var/log/archive-1792.txt entries=23296 bytes=7345408
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1793.
+  "key_1794": {"value": 30498, "ratio": 0.7994, "label": "limit"},
+Is that by parse of the for by limit and parse render and queue rate flush omicron render that is.
+fn handle_1796(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12572; Ok(1796) }
+2026-11-06 21:57:39 INFO scan path=/var/log/archive-1797.txt entries=23361 bytes=7365903
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1798.
+  "key_1799": {"value": 30583, "ratio": 0.8044, "label": "parse"},
+Rate the thread render from alpha render render for delta by by alpha zeta and with.
+fn handle_1801(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12607; Ok(1801) }
+2026-11-11 02:02:14 INFO scan path=/var/log/archive-1802.txt entries=23426 bytes=7386398
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1803.
+  "key_1804": {"value": 30668, "ratio": 0.8094, "label": "omicron"},
+With is render thread to gamma rate from render for by and by gamma alpha delta in render of.
+fn handle_1806(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12642; Ok(1806) }
+2026-11-16 07:07:49 INFO scan path=/var/log/archive-1807.txt entries=23491 bytes=7406893
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1808.
+  "key_1809": {"value": 30753, "ratio": 0.8144, "label": "zeta"},
+Beta on omicron flush flush queue render limit omicron rate thread zeta parse rate beta buffer flush.
+fn handle_1811(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12677; Ok(1811) }
+2026-11-21 12:12:24 INFO scan path=/var/log/archive-1812.txt entries=23556 bytes=7427388
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1813.
+  "key_1814": {"value": 30838, "ratio": 0.8195, "label": "alpha"},
+Render omicron alpha queue for lambda zeta and render for.
+fn handle_1816(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12712; Ok(1816) }
+2026-11-26 17:17:59 INFO scan path=/var/log/archive-1817.txt entries=23621 bytes=7447883
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1818.
+  "key_1819": {"value": 30923, "ratio": 0.8245, "label": "limit"},
+Epsilon rate that from beta gamma omicron on on rate channel channel thread lambda parse zeta epsilon for render.
+fn handle_1821(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12747; Ok(1821) }
+2026-11-03 22:22:34 INFO scan path=/var/log/archive-1822.txt entries=23686 bytes=7468378
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1823.
+  "key_1824": {"value": 31008, "ratio": 0.8295, "label": "gamma"},
+Delta with is on thread thread with render omicron rate in.
+fn handle_1826(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12782; Ok(1826) }
+2026-11-08 03:27:09 INFO scan path=/var/log/archive-1827.txt entries=23751 bytes=7488873
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1828.
+  "key_1829": {"value": 31093, "ratio": 0.8345, "label": "that"},
+For rate gamma parse thread render in in from parse of flush from on channel that from omicron delta.
+fn handle_1831(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12817; Ok(1831) }
+2026-11-13 08:32:44 INFO scan path=/var/log/archive-1832.txt entries=23816 bytes=7509368
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1833.
+  "key_1834": {"value": 31178, "ratio": 0.8395, "label": "queue"},
+Parse with buffer flush from queue omicron channel the beta delta alpha alpha gamma parse by.
+fn handle_1836(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12852; Ok(1836) }
+2026-11-18 13:37:19 INFO scan path=/var/log/archive-1837.txt entries=23881 bytes=7529863
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1838.
+  "key_1839": {"value": 31263, "ratio": 0.8445, "label": "to"},
+This channel epsilon thread parse rate and that.
+fn handle_1841(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12887; Ok(1841) }
+2026-11-23 18:42:54 INFO scan path=/var/log/archive-1842.txt entries=23946 bytes=7550358
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1843.
+  "key_1844": {"value": 31348, "ratio": 0.8495, "label": "limit"},
+On thread omicron lambda channel to with to in render flush zeta in in delta with.
+fn handle_1846(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12922; Ok(1846) }
+2026-11-28 23:47:29 INFO scan path=/var/log/archive-1847.txt entries=24011 bytes=7570853
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1848.
+  "key_1849": {"value": 31433, "ratio": 0.8546, "label": "of"},
+To flush and by buffer and queue with thread epsilon queue in buffer the flush.
+fn handle_1851(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12957; Ok(1851) }
+2026-11-05 04:52:04 INFO scan path=/var/log/archive-1852.txt entries=24076 bytes=7591348
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1853.
+  "key_1854": {"value": 31518, "ratio": 0.8596, "label": "omicron"},
+Epsilon beta thread lambda limit zeta thread on.
+fn handle_1856(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 12992; Ok(1856) }
+2026-11-10 09:57:39 INFO scan path=/var/log/archive-1857.txt entries=24141 bytes=7611843
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1858.
+  "key_1859": {"value": 31603, "ratio": 0.8646, "label": "gamma"},
+Alpha epsilon beta epsilon beta delta epsilon parse zeta in rate omicron beta in for limit.
+fn handle_1861(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13027; Ok(1861) }
+2026-11-15 14:02:14 INFO scan path=/var/log/archive-1862.txt entries=24206 bytes=7632338
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1863.
+  "key_1864": {"value": 31688, "ratio": 0.8696, "label": "and"},
+With this parse by flush gamma channel channel thread rate gamma render from omicron is on lambda zeta.
+fn handle_1866(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13062; Ok(1866) }
+2026-11-20 19:07:49 INFO scan path=/var/log/archive-1867.txt entries=24271 bytes=7652833
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1868.
+  "key_1869": {"value": 31773, "ratio": 0.8746, "label": "with"},
+Thread to is for render to by is beta from alpha of in limit rate omicron by is beta.
+fn handle_1871(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13097; Ok(1871) }
+2026-11-25 00:12:24 INFO scan path=/var/log/archive-1872.txt entries=24336 bytes=7673328
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1873.
+  "key_1874": {"value": 31858, "ratio": 0.8796, "label": "alpha"},
+In thread by gamma zeta the delta parse gamma alpha on from gamma omicron zeta zeta omicron thread and.
+fn handle_1876(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13132; Ok(1876) }
+2026-11-02 05:17:59 INFO scan path=/var/log/archive-1877.txt entries=24401 bytes=7693823
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1878.
+  "key_1879": {"value": 31943, "ratio": 0.8847, "label": "of"},
+With delta queue by gamma limit delta is alpha render alpha delta.
+fn handle_1881(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13167; Ok(1881) }
+2026-11-07 10:22:34 INFO scan path=/var/log/archive-1882.txt entries=24466 bytes=7714318
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1883.
+  "key_1884": {"value": 32028, "ratio": 0.8897, "label": "limit"},
+From thread thread buffer that this omicron is gamma rate with from queue of.
+fn handle_1886(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13202; Ok(1886) }
+2026-11-12 15:27:09 INFO scan path=/var/log/archive-1887.txt entries=24531 bytes=7734813
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1888.
+  "key_1889": {"value": 32113, "ratio": 0.8947, "label": "of"},
+Of omicron delta and render the zeta and in omicron is of the.
+fn handle_1891(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13237; Ok(1891) }
+2026-11-17 20:32:44 INFO scan path=/var/log/archive-1892.txt entries=24596 bytes=7755308
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1893.
+  "key_1894": {"value": 32198, "ratio": 0.8997, "label": "the"},
+From delta and epsilon parse rate gamma queue the with limit beta omicron from channel parse.
+fn handle_1896(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13272; Ok(1896) }
+2026-11-22 01:37:19 INFO scan path=/var/log/archive-1897.txt entries=24661 bytes=7775803
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1898.
+  "key_1899": {"value": 32283, "ratio": 0.9047, "label": "and"},
+Thread render with channel for zeta buffer of epsilon by thread that lambda parse by.
+fn handle_1901(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13307; Ok(1901) }
+2026-11-27 06:42:54 INFO scan path=/var/log/archive-1902.txt entries=24726 bytes=7796298
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1903.
+  "key_1904": {"value": 32368, "ratio": 0.9097, "label": "to"},
+Zeta from buffer channel this zeta in alpha that channel to limit render thread buffer.
+fn handle_1906(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13342; Ok(1906) }
+2026-11-04 11:47:29 INFO scan path=/var/log/archive-1907.txt entries=24791 bytes=7816793
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1908.
+  "key_1909": {"value": 32453, "ratio": 0.9147, "label": "with"},
+With lambda flush epsilon epsilon rate on delta is to omicron parse channel from.
+fn handle_1911(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13377; Ok(1911) }
+2026-11-09 16:52:04 INFO scan path=/var/log/archive-1912.txt entries=24856 bytes=7837288
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1913.
+  "key_1914": {"value": 32538, "ratio": 0.9198, "label": "is"},
+Of in from with rate to thread alpha beta render the.
+fn handle_1916(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13412; Ok(1916) }
+2026-11-14 21:57:39 INFO scan path=/var/log/archive-1917.txt entries=24921 bytes=7857783
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1918.
+  "key_1919": {"value": 32623, "ratio": 0.9248, "label": "zeta"},
+Flush flush zeta delta of gamma parse in from alpha the.
+fn handle_1921(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13447; Ok(1921) }
+2026-11-19 02:02:14 INFO scan path=/var/log/archive-1922.txt entries=24986 bytes=7878278
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1923.
+  "key_1924": {"value": 32708, "ratio": 0.9298, "label": "epsilon"},
+And buffer with gamma channel epsilon that thread this that of zeta that by with by channel.
+fn handle_1926(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13482; Ok(1926) }
+2026-11-24 07:07:49 INFO scan path=/var/log/archive-1927.txt entries=25051 bytes=7898773
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1928.
+  "key_1929": {"value": 32793, "ratio": 0.9348, "label": "render"},
+Buffer delta render that beta flush beta flush.
+fn handle_1931(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13517; Ok(1931) }
+2026-11-01 12:12:24 INFO scan path=/var/log/archive-1932.txt entries=25116 bytes=7919268
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1933.
+  "key_1934": {"value": 32878, "ratio": 0.9398, "label": "zeta"},
+Rate for the render that this gamma alpha the is from.
+fn handle_1936(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13552; Ok(1936) }
+2026-11-06 17:17:59 INFO scan path=/var/log/archive-1937.txt entries=25181 bytes=7939763
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1938.
+  "key_1939": {"value": 32963, "ratio": 0.9448, "label": "that"},
+Render zeta this queue omicron this beta gamma epsilon lambda.
+fn handle_1941(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13587; Ok(1941) }
+2026-11-11 22:22:34 INFO scan path=/var/log/archive-1942.txt entries=25246 bytes=7960258
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1943.
+  "key_1944": {"value": 33048, "ratio": 0.9498, "label": "with"},
+Of channel lambda rate delta beta rate lambda omicron omicron beta delta delta omicron on epsilon.
+fn handle_1946(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13622; Ok(1946) }
+2026-11-16 03:27:09 INFO scan path=/var/log/archive-1947.txt entries=25311 bytes=7980753
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1948.
+  "key_1949": {"value": 33133, "ratio": 0.9549, "label": "for"},
+To channel the limit is rate parse delta channel rate the queue gamma in alpha and channel by this.
+fn handle_1951(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13657; Ok(1951) }
+2026-11-21 08:32:44 INFO scan path=/var/log/archive-1952.txt entries=25376 bytes=8001248
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1953.
+  "key_1954": {"value": 33218, "ratio": 0.9599, "label": "to"},
+Beta in this beta on omicron omicron this the the.
+fn handle_1956(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13692; Ok(1956) }
+2026-11-26 13:37:19 INFO scan path=/var/log/archive-1957.txt entries=25441 bytes=8021743
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1958.
+  "key_1959": {"value": 33303, "ratio": 0.9649, "label": "channel"},
+Queue channel lambda that flush delta zeta parse buffer on queue on buffer and beta on lambda this by and.
+fn handle_1961(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13727; Ok(1961) }
+2026-11-03 18:42:54 INFO scan path=/var/log/archive-1962.txt entries=25506 bytes=8042238
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1963.
+  "key_1964": {"value": 33388, "ratio": 0.9699, "label": "omicron"},
+On to on gamma alpha and channel this.
+fn handle_1966(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13762; Ok(1966) }
+2026-11-08 23:47:29 INFO scan path=/var/log/archive-1967.txt entries=25571 bytes=8062733
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1968.
+  "key_1969": {"value": 33473, "ratio": 0.9749, "label": "buffer"},
+Render on epsilon the rate lambda render flush from in buffer and that in render is and parse.
+fn handle_1971(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13797; Ok(1971) }
+2026-11-13 04:52:04 INFO scan path=/var/log/archive-1972.txt entries=25636 bytes=8083228
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1973.
+  "key_1974": {"value": 33558, "ratio": 0.9799, "label": "thread"},
+Rate flush parse parse gamma on by buffer.
+fn handle_1976(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13832; Ok(1976) }
+2026-11-18 09:57:39 INFO scan path=/var/log/archive-1977.txt entries=25701 bytes=8103723
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1978.
+  "key_1979": {"value": 33643, "ratio": 0.9850, "label": "channel"},
+The delta beta epsilon and thread buffer channel is in limit zeta.
+fn handle_1981(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13867; Ok(1981) }
+2026-11-23 14:02:14 INFO scan path=/var/log/archive-1982.txt entries=25766 bytes=8124218
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1983.
+  "key_1984": {"value": 33728, "ratio": 0.9900, "label": "channel"},
+By render render epsilon by by lambda gamma lambda gamma queue with delta the to.
+fn handle_1986(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13902; Ok(1986) }
+2026-11-28 19:07:49 INFO scan path=/var/log/archive-1987.txt entries=25831 bytes=8144713
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1988.
+  "key_1989": {"value": 33813, "ratio": 0.9950, "label": "for"},
+Limit beta of to zeta that for by with.
+fn handle_1991(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13937; Ok(1991) }
+2026-11-05 00:12:24 INFO scan path=/var/log/archive-1992.txt entries=25896 bytes=8165208
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1993.
+  "key_1994": {"value": 33898, "ratio": 0.0000, "label": "rate"},
+Epsilon flush delta of is in for flush flush of for alpha on.
+fn handle_1996(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 13972; Ok(1996) }
+2026-11-10 05:17:59 INFO scan path=/var/log/archive-1997.txt entries=25961 bytes=8185703
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 1998.
+  "key_1999": {"value": 33983, "ratio": 0.0050, "label": "render"},
+Rate by limit and in queue gamma zeta that on omicron channel alpha by and gamma from with that.
+fn handle_2001(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14007; Ok(2001) }
+2026-11-15 10:22:34 INFO scan path=/var/log/archive-2002.txt entries=26026 bytes=8206198
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2003.
+  "key_2004": {"value": 34068, "ratio": 0.0100, "label": "queue"},
+Queue limit that zeta from thread buffer of epsilon epsilon to lambda render alpha and delta.
+fn handle_2006(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14042; Ok(2006) }
+2026-11-20 15:27:09 INFO scan path=/var/log/archive-2007.txt entries=26091 bytes=8226693
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2008.
+  "key_2009": {"value": 34153, "ratio": 0.0150, "label": "beta"},
+In to beta from flush alpha by of and lambda zeta by the.
+fn handle_2011(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14077; Ok(2011) }
+2026-11-25 20:32:44 INFO scan path=/var/log/archive-2012.txt entries=26156 bytes=8247188
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2013.
+  "key_2014": {"value": 34238, "ratio": 0.0201, "label": "that"},
+The for gamma on queue this alpha for for.
+fn handle_2016(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14112; Ok(2016) }
+2026-11-02 01:37:19 INFO scan path=/var/log/archive-2017.txt entries=26221 bytes=8267683
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2018.
+  "key_2019": {"value": 34323, "ratio": 0.0251, "label": "limit"},
+Parse omicron rate delta to that for in thread in parse.
+fn handle_2021(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14147; Ok(2021) }
+2026-11-07 06:42:54 INFO scan path=/var/log/archive-2022.txt entries=26286 bytes=8288178
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2023.
+  "key_2024": {"value": 34408, "ratio": 0.0301, "label": "buffer"},
+Queue to for channel epsilon thread this zeta render that thread on on thread the thread.
+fn handle_2026(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14182; Ok(2026) }
+2026-11-12 11:47:29 INFO scan path=/var/log/archive-2027.txt entries=26351 bytes=8308673
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2028.
+  "key_2029": {"value": 34493, "ratio": 0.0351, "label": "buffer"},
+Zeta channel beta omicron the lambda beta beta alpha.
+fn handle_2031(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14217; Ok(2031) }
+2026-11-17 16:52:04 INFO scan path=/var/log/archive-2032.txt entries=26416 bytes=8329168
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2033.
+  "key_2034": {"value": 34578, "ratio": 0.0401, "label": "to"},
+Epsilon on render gamma epsilon parse thread zeta.
+fn handle_2036(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14252; Ok(2036) }
+2026-11-22 21:57:39 INFO scan path=/var/log/archive-2037.txt entries=26481 bytes=8349663
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2038.
+  "key_2039": {"value": 34663, "ratio": 0.0451, "label": "render"},
+Of by buffer render rate channel alpha with beta in beta gamma from on in omicron.
+fn handle_2041(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14287; Ok(2041) }
+2026-11-27 02:02:14 INFO scan path=/var/log/archive-2042.txt entries=26546 bytes=8370158
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2043.
+  "key_2044": {"value": 34748, "ratio": 0.0502, "label": "limit"},
+With this flush buffer buffer and flush that is delta thread with for buffer on delta.
+fn handle_2046(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14322; Ok(2046) }
+2026-11-04 07:07:49 INFO scan path=/var/log/archive-2047.txt entries=26611 bytes=8390653
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2048.
+  "key_2049": {"value": 34833, "ratio": 0.0552, "label": "of"},
+For limit rate in of render from to of limit render channel lambda on for for epsilon thread parse.
+fn handle_2051(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14357; Ok(2051) }
+2026-11-09 12:12:24 INFO scan path=/var/log/archive-2052.txt entries=26676 bytes=8411148
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2053.
+  "key_2054": {"value": 34918, "ratio": 0.0602, "label": "thread"},
+In is buffer thread lambda that in on omicron is with and.
+fn handle_2056(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14392; Ok(2056) }
+2026-11-14 17:17:59 INFO scan path=/var/log/archive-2057.txt entries=26741 bytes=8431643
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2058.
+  "key_2059": {"value": 35003, "ratio": 0.0652, "label": "and"},
+Of on of alpha delta lambda of with of of for from delta by from.
+fn handle_2061(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14427; Ok(2061) }
+2026-11-19 22:22:34 INFO scan path=/var/log/archive-2062.txt entries=26806 bytes=8452138
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2063.
+  "key_2064": {"value": 35088, "ratio": 0.0702, "label": "from"},
+The channel epsilon lambda is of with delta the zeta.
+fn handle_2066(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14462; Ok(2066) }
+2026-11-24 03:27:09 INFO scan path=/var/log/archive-2067.txt entries=26871 bytes=8472633
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2068.
+  "key_2069": {"value": 35173, "ratio": 0.0752, "label": "limit"},
+Omicron the flush with of to of omicron that the render to from that.
+fn handle_2071(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14497; Ok(2071) }
+2026-11-01 08:32:44 INFO scan path=/var/log/archive-2072.txt entries=26936 bytes=8493128
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2073.
+  "key_2074": {"value": 35258, "ratio": 0.0802, "label": "alpha"},
+Rate from rate of delta is to to to that is thread limit.
+fn handle_2076(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14532; Ok(2076) }
+2026-11-06 13:37:19 INFO scan path=/var/log/archive-2077.txt entries=27001 bytes=8513623
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2078.
+  "key_2079": {"value": 35343, "ratio": 0.0853, "label": "gamma"},
+Limit and epsilon flush that for zeta flush thread by to channel beta flush.
+fn handle_2081(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14567; Ok(2081) }
+2026-11-11 18:42:54 INFO scan path=/var/log/archive-2082.txt entries=27066 bytes=8534118
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2083.
+  "key_2084": {"value": 35428, "ratio": 0.0903, "label": "to"},
+Epsilon rate for with with this queue rate.
+fn handle_2086(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14602; Ok(2086) }
+2026-11-16 23:47:29 INFO scan path=/var/log/archive-2087.txt entries=27131 bytes=8554613
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2088.
+  "key_2089": {"value": 35513, "ratio": 0.0953, "label": "beta"},
+Limit for buffer that zeta queue rate channel gamma alpha flush gamma queue lambda.
+fn handle_2091(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14637; Ok(2091) }
+2026-11-21 04:52:04 INFO scan path=/var/log/archive-2092.txt entries=27196 bytes=8575108
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2093.
+  "key_2094": {"value": 35598, "ratio": 0.1003, "label": "on"},
+With buffer that for alpha flush rate channel in and parse to on that render thread render to.
+fn handle_2096(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14672; Ok(2096) }
+2026-11-26 09:57:39 INFO scan path=/var/log/archive-2097.txt entries=27261 bytes=8595603
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2098.
+  "key_2099": {"value": 35683, "ratio": 0.1053, "label": "epsilon"},
+Channel by delta buffer is buffer render delta thread delta by lambda this flush in rate that the for.
+fn handle_2101(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14707; Ok(2101) }
+2026-11-03 14:02:14 INFO scan path=/var/log/archive-2102.txt entries=27326 bytes=8616098
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2103.
+  "key_2104": {"value": 35768, "ratio": 0.1103, "label": "flush"},
+Gamma with zeta in with from render omicron channel thread lambda.
+fn handle_2106(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14742; Ok(2106) }
+2026-11-08 19:07:49 INFO scan path=/var/log/archive-2107.txt entries=27391 bytes=8636593
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2108.
+  "key_2109": {"value": 35853, "ratio": 0.1153, "label": "with"},
+Queue by zeta flush limit delta is render and parse of beta the epsilon.
+fn handle_2111(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14777; Ok(2111) }
+2026-11-13 00:12:24 INFO scan path=/var/log/archive-2112.txt entries=27456 bytes=8657088
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2113.
+  "key_2114": {"value": 35938, "ratio": 0.1204, "label": "lambda"},
+This rate omicron flush of to from buffer in in limit lambda lambda rate by buffer gamma flush epsilon zeta.
+fn handle_2116(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14812; Ok(2116) }
+2026-11-18 05:17:59 INFO scan path=/var/log/archive-2117.txt entries=27521 bytes=8677583
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2118.
+  "key_2119": {"value": 36023, "ratio": 0.1254, "label": "channel"},
+Limit thread zeta by alpha with lambda zeta.
+fn handle_2121(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14847; Ok(2121) }
+2026-11-23 10:22:34 INFO scan path=/var/log/archive-2122.txt entries=27586 bytes=8698078
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2123.
+  "key_2124": {"value": 36108, "ratio": 0.1304, "label": "render"},
+Zeta beta channel render the flush buffer beta queue.
+fn handle_2126(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14882; Ok(2126) }
+2026-11-28 15:27:09 INFO scan path=/var/log/archive-2127.txt entries=27651 bytes=8718573
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2128.
+  "key_2129": {"value": 36193, "ratio": 0.1354, "label": "zeta"},
+Parse flush to with thread of beta omicron for buffer channel to that for buffer in limit with by.
+fn handle_2131(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14917; Ok(2131) }
+2026-11-05 20:32:44 INFO scan path=/var/log/archive-2132.txt entries=27716 bytes=8739068
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2133.
+  "key_2134": {"value": 36278, "ratio": 0.1404, "label": "lambda"},
+On thread for flush gamma of queue rate parse the queue of by from and queue epsilon of thread epsilon.
+fn handle_2136(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14952; Ok(2136) }
+2026-11-10 01:37:19 INFO scan path=/var/log/archive-2137.txt entries=27781 bytes=8759563
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2138.
+  "key_2139": {"value": 36363, "ratio": 0.1454, "label": "alpha"},
+Alpha beta by and in to delta limit.
+fn handle_2141(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 14987; Ok(2141) }
+2026-11-15 06:42:54 INFO scan path=/var/log/archive-2142.txt entries=27846 bytes=8780058
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2143.
+  "key_2144": {"value": 36448, "ratio": 0.1505, "label": "limit"},
+Parse delta in this and and epsilon omicron lambda channel on lambda parse for.
+fn handle_2146(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15022; Ok(2146) }
+2026-11-20 11:47:29 INFO scan path=/var/log/archive-2147.txt entries=27911 bytes=8800553
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2148.
+  "key_2149": {"value": 36533, "ratio": 0.1555, "label": "gamma"},
+Parse on delta queue with in to limit beta the alpha queue on.
+fn handle_2151(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15057; Ok(2151) }
+2026-11-25 16:52:04 INFO scan path=/var/log/archive-2152.txt entries=27976 bytes=8821048
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2153.
+  "key_2154": {"value": 36618, "ratio": 0.1605, "label": "rate"},
+Of is in channel for lambda in with.
+fn handle_2156(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15092; Ok(2156) }
+2026-11-02 21:57:39 INFO scan path=/var/log/archive-2157.txt entries=28041 bytes=8841543
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2158.
+  "key_2159": {"value": 36703, "ratio": 0.1655, "label": "and"},
+Omicron on on buffer with epsilon parse that alpha.
+fn handle_2161(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15127; Ok(2161) }
+2026-11-07 02:02:14 INFO scan path=/var/log/archive-2162.txt entries=28106 bytes=8862038
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2163.
+  "key_2164": {"value": 36788, "ratio": 0.1705, "label": "flush"},
+Epsilon in flush and and omicron on for to lambda is.
+fn handle_2166(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15162; Ok(2166) }
+2026-11-12 07:07:49 INFO scan path=/var/log/archive-2167.txt entries=28171 bytes=8882533
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2168.
+  "key_2169": {"value": 36873, "ratio": 0.1755, "label": "the"},
+On parse and limit epsilon thread of in for epsilon on this gamma thread.
+fn handle_2171(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15197; Ok(2171) }
+2026-11-17 12:12:24 INFO scan path=/var/log/archive-2172.txt entries=28236 bytes=8903028
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2173.
+  "key_2174": {"value": 36958, "ratio": 0.1805, "label": "the"},
+Parse zeta with epsilon epsilon this thread to with render this and.
+fn handle_2176(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15232; Ok(2176) }
+2026-11-22 17:17:59 INFO scan path=/var/log/archive-2177.txt entries=28301 bytes=8923523
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2178.
+  "key_2179": {"value": 37043, "ratio": 0.1856, "label": "thread"},
+Render with rate limit limit omicron omicron in rate parse beta with.
+fn handle_2181(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15267; Ok(2181) }
+2026-11-27 22:22:34 INFO scan path=/var/log/archive-2182.txt entries=28366 bytes=8944018
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2183.
+  "key_2184": {"value": 37128, "ratio": 0.1906, "label": "lambda"},
+By the with thread epsilon thread parse epsilon beta lambda in render limit this epsilon rate of render.
+fn handle_2186(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15302; Ok(2186) }
+2026-11-04 03:27:09 INFO scan path=/var/log/archive-2187.txt entries=28431 bytes=8964513
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2188.
+  "key_2189": {"value": 37213, "ratio": 0.1956, "label": "of"},
+Lambda by in gamma on by to with of parse parse delta of flush omicron on queue.
+fn handle_2191(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15337; Ok(2191) }
+2026-11-09 08:32:44 INFO scan path=/var/log/archive-2192.txt entries=28496 bytes=8985008
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2193.
+  "key_2194": {"value": 37298, "ratio": 0.2006, "label": "beta"},
+Rate gamma by for thread on in the zeta in the this to with and thread beta epsilon delta by.
+fn handle_2196(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15372; Ok(2196) }
+2026-11-14 13:37:19 INFO scan path=/var/log/archive-2197.txt entries=28561 bytes=9005503
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2198.
+  "key_2199": {"value": 37383, "ratio": 0.2056, "label": "omicron"},
+Epsilon lambda in parse limit flush buffer on.
+fn handle_2201(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15407; Ok(2201) }
+2026-11-19 18:42:54 INFO scan path=/var/log/archive-2202.txt entries=28626 bytes=9025998
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2203.
+  "key_2204": {"value": 37468, "ratio": 0.2106, "label": "epsilon"},
+Channel by lambda zeta to the by by zeta channel channel is omicron delta by channel limit from limit delta.
+fn handle_2206(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15442; Ok(2206) }
+2026-11-24 23:47:29 INFO scan path=/var/log/archive-2207.txt entries=28691 bytes=9046493
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2208.
+  "key_2209": {"value": 37553, "ratio": 0.2156, "label": "beta"},
+By in for the parse this gamma of.
+fn handle_2211(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15477; Ok(2211) }
+2026-11-01 04:52:04 INFO scan path=/var/log/archive-2212.txt entries=28756 bytes=9066988
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2213.
+  "key_2214": {"value": 37638, "ratio": 0.2207, "label": "epsilon"},
+And lambda to thread omicron buffer with with render omicron zeta buffer this.
+fn handle_2216(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15512; Ok(2216) }
+2026-11-06 09:57:39 INFO scan path=/var/log/archive-2217.txt entries=28821 bytes=9087483
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2218.
+  "key_2219": {"value": 37723, "ratio": 0.2257, "label": "in"},
+This to thread parse by zeta to omicron and.
+fn handle_2221(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15547; Ok(2221) }
+2026-11-11 14:02:14 INFO scan path=/var/log/archive-2222.txt entries=28886 bytes=9107978
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2223.
+  "key_2224": {"value": 37808, "ratio": 0.2307, "label": "parse"},
+To for gamma alpha and lambda in gamma with zeta rate from alpha gamma for the that epsilon of.
+fn handle_2226(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15582; Ok(2226) }
+2026-11-16 19:07:49 INFO scan path=/var/log/archive-2227.txt entries=28951 bytes=9128473
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2228.
+  "key_2229": {"value": 37893, "ratio": 0.2357, "label": "gamma"},
+Epsilon delta by from by this and delta epsilon to is channel.
+fn handle_2231(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15617; Ok(2231) }
+2026-11-21 00:12:24 INFO scan path=/var/log/archive-2232.txt entries=29016 bytes=9148968
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2233.
+  "key_2234": {"value": 37978, "ratio": 0.2407, "label": "limit"},
+For buffer channel is delta zeta to with by thread the channel.
+fn handle_2236(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15652; Ok(2236) }
+2026-11-26 05:17:59 INFO scan path=/var/log/archive-2237.txt entries=29081 bytes=9169463
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2238.
+  "key_2239": {"value": 38063, "ratio": 0.2457, "label": "gamma"},
+Thread in from rate this parse by rate on lambda alpha with parse from.
+fn handle_2241(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15687; Ok(2241) }
+2026-11-03 10:22:34 INFO scan path=/var/log/archive-2242.txt entries=29146 bytes=9189958
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2243.
+  "key_2244": {"value": 38148, "ratio": 0.2508, "label": "for"},
+Omicron lambda on of this from thread beta thread is from for for buffer.
+fn handle_2246(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15722; Ok(2246) }
+2026-11-08 15:27:09 INFO scan path=/var/log/archive-2247.txt entries=29211 bytes=9210453
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2248.
+  "key_2249": {"value": 38233, "ratio": 0.2558, "label": "delta"},
+That zeta with with beta channel in alpha with alpha queue on.
+fn handle_2251(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15757; Ok(2251) }
+2026-11-13 20:32:44 INFO scan path=/var/log/archive-2252.txt entries=29276 bytes=9230948
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2253.
+  "key_2254": {"value": 38318, "ratio": 0.2608, "label": "beta"},
+And zeta of channel channel flush from beta of gamma delta parse epsilon.
+fn handle_2256(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15792; Ok(2256) }
+2026-11-18 01:37:19 INFO scan path=/var/log/archive-2257.txt entries=29341 bytes=9251443
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2258.
+  "key_2259": {"value": 38403, "ratio": 0.2658, "label": "the"},
+Render the channel gamma zeta is delta gamma.
+fn handle_2261(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15827; Ok(2261) }
+2026-11-23 06:42:54 INFO scan path=/var/log/archive-2262.txt entries=29406 bytes=9271938
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2263.
+  "key_2264": {"value": 38488, "ratio": 0.2708, "label": "delta"},
+For parse channel epsilon on for alpha to buffer flush channel with beta for from channel from buffer.
+fn handle_2266(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15862; Ok(2266) }
+2026-11-28 11:47:29 INFO scan path=/var/log/archive-2267.txt entries=29471 bytes=9292433
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2268.
+  "key_2269": {"value": 38573, "ratio": 0.2758, "label": "in"},
+Thread queue omicron buffer and with delta this queue queue thread on of delta to.
+fn handle_2271(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15897; Ok(2271) }
+2026-11-05 16:52:04 INFO scan path=/var/log/archive-2272.txt entries=29536 bytes=9312928
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2273.
+  "key_2274": {"value": 38658, "ratio": 0.2808, "label": "that"},
+For flush thread alpha rate zeta that queue epsilon epsilon this.
+fn handle_2276(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15932; Ok(2276) }
+2026-11-10 21:57:39 INFO scan path=/var/log/archive-2277.txt entries=29601 bytes=9333423
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2278.
+  "key_2279": {"value": 38743, "ratio": 0.2859, "label": "queue"},
+For from rate and lambda by delta to for.
+fn handle_2281(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 15967; Ok(2281) }
+2026-11-15 02:02:14 INFO scan path=/var/log/archive-2282.txt entries=29666 bytes=9353918
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2283.
+  "key_2284": {"value": 38828, "ratio": 0.2909, "label": "rate"},
+That on to to zeta and parse by gamma.
+fn handle_2286(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16002; Ok(2286) }
+2026-11-20 07:07:49 INFO scan path=/var/log/archive-2287.txt entries=29731 bytes=9374413
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2288.
+  "key_2289": {"value": 38913, "ratio": 0.2959, "label": "flush"},
+Is limit on on by channel beta beta by buffer.
+fn handle_2291(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16037; Ok(2291) }
+2026-11-25 12:12:24 INFO scan path=/var/log/archive-2292.txt entries=29796 bytes=9394908
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2293.
+  "key_2294": {"value": 38998, "ratio": 0.3009, "label": "on"},
+This delta flush in is gamma rate the the is.
+fn handle_2296(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16072; Ok(2296) }
+2026-11-02 17:17:59 INFO scan path=/var/log/archive-2297.txt entries=29861 bytes=9415403
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2298.
+  "key_2299": {"value": 39083, "ratio": 0.3059, "label": "parse"},
+Channel on that is render on from beta epsilon lambda and from with parse the thread the rate.
+fn handle_2301(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16107; Ok(2301) }
+2026-11-07 22:22:34 INFO scan path=/var/log/archive-2302.txt entries=29926 bytes=9435898
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2303.
+  "key_2304": {"value": 39168, "ratio": 0.3109, "label": "zeta"},
+Gamma in from limit with rate queue to.
+fn handle_2306(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16142; Ok(2306) }
+2026-11-12 03:27:09 INFO scan path=/var/log/archive-2307.txt entries=29991 bytes=9456393
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2308.
+  "key_2309": {"value": 39253, "ratio": 0.3159, "label": "queue"},
+Limit beta is the alpha limit alpha alpha.
+fn handle_2311(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16177; Ok(2311) }
+2026-11-17 08:32:44 INFO scan path=/var/log/archive-2312.txt entries=30056 bytes=9476888
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2313.
+  "key_2314": {"value": 39338, "ratio": 0.3210, "label": "thread"},
+Limit flush zeta alpha thread gamma epsilon rate is lambda beta epsilon zeta to buffer parse epsilon on thread.
+fn handle_2316(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16212; Ok(2316) }
+2026-11-22 13:37:19 INFO scan path=/var/log/archive-2317.txt entries=30121 bytes=9497383
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2318.
+  "key_2319": {"value": 39423, "ratio": 0.3260, "label": "beta"},
+By from in gamma on on gamma channel by limit in for limit rate omicron queue is alpha that epsilon.
+fn handle_2321(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16247; Ok(2321) }
+2026-11-27 18:42:54 INFO scan path=/var/log/archive-2322.txt entries=30186 bytes=9517878
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2323.
+  "key_2324": {"value": 39508, "ratio": 0.3310, "label": "limit"},
+This parse the with thread gamma queue omicron rate in epsilon parse.
+fn handle_2326(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16282; Ok(2326) }
+2026-11-04 23:47:29 INFO scan path=/var/log/archive-2327.txt entries=30251 bytes=9538373
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2328.
+  "key_2329": {"value": 39593, "ratio": 0.3360, "label": "of"},
+On the zeta flush of to and buffer parse epsilon of flush gamma on omicron buffer this rate and.
+fn handle_2331(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16317; Ok(2331) }
+2026-11-09 04:52:04 INFO scan path=/var/log/archive-2332.txt entries=30316 bytes=9558868
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2333.
+  "key_2334": {"value": 39678, "ratio": 0.3410, "label": "delta"},
+Render for by zeta on this and render render render for flush zeta that beta in omicron that.
+fn handle_2336(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16352; Ok(2336) }
+2026-11-14 09:57:39 INFO scan path=/var/log/archive-2337.txt entries=30381 bytes=9579363
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2338.
+  "key_2339": {"value": 39763, "ratio": 0.3460, "label": "channel"},
+Limit to flush of the epsilon delta the for buffer buffer and on and beta omicron zeta that for for.
+fn handle_2341(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16387; Ok(2341) }
+2026-11-19 14:02:14 INFO scan path=/var/log/archive-2342.txt entries=30446 bytes=9599858
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2343.
+  "key_2344": {"value": 39848, "ratio": 0.3511, "label": "is"},
+Is in lambda for alpha gamma limit for and limit.
+fn handle_2346(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16422; Ok(2346) }
+2026-11-24 19:07:49 INFO scan path=/var/log/archive-2347.txt entries=30511 bytes=9620353
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2348.
+  "key_2349": {"value": 39933, "ratio": 0.3561, "label": "on"},
+This channel lambda render thread limit render and of epsilon lambda for on buffer alpha.
+fn handle_2351(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16457; Ok(2351) }
+2026-11-01 00:12:24 INFO scan path=/var/log/archive-2352.txt entries=30576 bytes=9640848
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2353.
+  "key_2354": {"value": 40018, "ratio": 0.3611, "label": "this"},
+Queue with for is with to channel of lambda parse of.
+fn handle_2356(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16492; Ok(2356) }
+2026-11-06 05:17:59 INFO scan path=/var/log/archive-2357.txt entries=30641 bytes=9661343
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2358.
+  "key_2359": {"value": 40103, "ratio": 0.3661, "label": "on"},
+Thread alpha buffer epsilon of to from by.
+fn handle_2361(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16527; Ok(2361) }
+2026-11-11 10:22:34 INFO scan path=/var/log/archive-2362.txt entries=30706 bytes=9681838
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2363.
+  "key_2364": {"value": 40188, "ratio": 0.3711, "label": "render"},
+Buffer gamma thread to rate with beta for.
+fn handle_2366(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16562; Ok(2366) }
+2026-11-16 15:27:09 INFO scan path=/var/log/archive-2367.txt entries=30771 bytes=9702333
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2368.
+  "key_2369": {"value": 40273, "ratio": 0.3761, "label": "beta"},
+In with channel queue rate thread buffer parse epsilon flush lambda delta with parse.
+fn handle_2371(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16597; Ok(2371) }
+2026-11-21 20:32:44 INFO scan path=/var/log/archive-2372.txt entries=30836 bytes=9722828
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2373.
+  "key_2374": {"value": 40358, "ratio": 0.3811, "label": "the"},
+Render delta channel parse the by delta parse and channel alpha of and epsilon the this thread with.
+fn handle_2376(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16632; Ok(2376) }
+2026-11-26 01:37:19 INFO scan path=/var/log/archive-2377.txt entries=30901 bytes=9743323
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2378.
+  "key_2379": {"value": 40443, "ratio": 0.3862, "label": "this"},
+Gamma queue delta the flush with flush omicron buffer delta.
+fn handle_2381(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16667; Ok(2381) }
+2026-11-03 06:42:54 INFO scan path=/var/log/archive-2382.txt entries=30966 bytes=9763818
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2383.
+  "key_2384": {"value": 40528, "ratio": 0.3912, "label": "parse"},
+Queue of this parse is parse rate flush delta and by queue thread in on queue epsilon lambda delta.
+fn handle_2386(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16702; Ok(2386) }
+2026-11-08 11:47:29 INFO scan path=/var/log/archive-2387.txt entries=31031 bytes=9784313
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2388.
+  "key_2389": {"value": 40613, "ratio": 0.3962, "label": "alpha"},
+Zeta flush of queue epsilon rate thread lambda limit and of epsilon limit from alpha for this and omicron render.
+fn handle_2391(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16737; Ok(2391) }
+2026-11-13 16:52:04 INFO scan path=/var/log/archive-2392.txt entries=31096 bytes=9804808
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2393.
+  "key_2394": {"value": 40698, "ratio": 0.4012, "label": "queue"},
+On beta rate beta this zeta channel parse by of.
+fn handle_2396(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16772; Ok(2396) }
+2026-11-18 21:57:39 INFO scan path=/var/log/archive-2397.txt entries=31161 bytes=9825303
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2398.
+  "key_2399": {"value": 40783, "ratio": 0.4062, "label": "parse"},
+In thread is render gamma the of to in with.
+fn handle_2401(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16807; Ok(2401) }
+2026-11-23 02:02:14 INFO scan path=/var/log/archive-2402.txt entries=31226 bytes=9845798
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2403.
+  "key_2404": {"value": 40868, "ratio": 0.4112, "label": "from"},
+For flush of omicron alpha this this rate render render parse and epsilon from by alpha.
+fn handle_2406(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16842; Ok(2406) }
+2026-11-28 07:07:49 INFO scan path=/var/log/archive-2407.txt entries=31291 bytes=9866293
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2408.
+  "key_2409": {"value": 40953, "ratio": 0.4162, "label": "rate"},
+And alpha parse channel that is from zeta this thread parse epsilon for the render zeta limit delta thread.
+fn handle_2411(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16877; Ok(2411) }
+2026-11-05 12:12:24 INFO scan path=/var/log/archive-2412.txt entries=31356 bytes=9886788
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2413.
+  "key_2414": {"value": 41038, "ratio": 0.4213, "label": "lambda"},
+Lambda queue omicron lambda flush thread lambda limit limit from parse.
+fn handle_2416(ctx: &mut Ctx) -> Result<usize, Error> { ctx.bytes += 16912; Ok(2416) }
+2026-11-10 17:17:59 INFO scan path=/var/log/archive-2417.txt entries=31421 bytes=9907283
+Café, naïve, Straße, Ελληνικά, русский текст, 日本語のテキスト — line 2418.
+  "key_2419": {"value": 41123, "ratio": 0.4263, "label": "flush"},
+Queue on by thread with for is thread that parse the beta epsilon for this delta this epsilon buffer lambda.
