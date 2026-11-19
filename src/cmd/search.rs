@@ -93,6 +93,9 @@ OPTIONS:
                            ruby, markdown, json, toml, yaml, sh, html, css, xml, txt, log, lock
     -T, --type-not NAME    exclude a type; repeatable
         --type-list        print the type names and their extensions
+    --type-add NAME:GLOB[,GLOB]
+                           define a type, or add globs to one that exists; repeatable
+    --type-clear NAME      drop a type, so it can be defined again
     -u, --unrestricted     repeatable: -u drops ignore rules, -uu also looks at hidden paths,
                            -uuu also searches binary files
     --max-depth N          do not descend more than N levels below each root
@@ -122,9 +125,15 @@ A path of `-` is standard input, and with no paths a piped stdin is searched ins
                            match the --ignore-file patterns without case
     --mmap, --no-mmap      accepted and ignored: this reads in blocks, and mapping the file
                            was measured slower (docs/BENCHMARKS.md)
+    --binary, --line-buffered, --block-buffered
+                           accepted and ignored, so a ripgrep command line runs unchanged: a
+                           binary file is reported by name, and the output buffer is the
+                           caller's
+    --sort-files           accepted and ignored: it asks for the default --sort path order
     --follow               follow symbolic links, walking each real directory once
                            (ripgrep spells this -L; here -L means --files-without-match)
-    -x, --one-filesystem   stay on the starting filesystem
+    -x, --one-filesystem, --one-file-system
+                           stay on the starting filesystem
     --json                 machine-readable output
     --color[=WHEN]         WHEN is always, never or auto (default auto)
     --stats                print a summary line on stderr
@@ -180,6 +189,10 @@ a message naming the expression spelling (-F, -i, --name, --full-path, --size, -
 --newer, --newermt, --newerat, --newerct, -Z, --long, --sort, --sortr, --json), because
 silently ignoring them would print what they did not ask for.
 
+find matches paths, not contents, so the flags that say how bytes are read (--pre,
+--pre-glob, --binary-files, -I) and how a directory tree is descended (-d/--directories) are
+unknown options here, not silently ignored; `dusage search` is the front end that takes them.
+
 OPTIONS:
     -F, --fixed            match the pattern as a substring of the path
     -i, --ignore-case      match the glob without case
@@ -219,17 +232,17 @@ OPTIONS:
         --ignore-file-case-insensitive
                            match the --ignore-file patterns without case
     --follow               follow symbolic links, walking each real directory once
-                           (ripgrep spells this -L; here -L means --files-without-match)
-    -x, --one-filesystem   stay on the starting filesystem
+    -x, --one-filesystem, --one-file-system
+                           stay on the starting filesystem
+    -u, --unrestricted     repeatable: -u drops ignore rules, -uu also looks at hidden paths
+    -Z, --null, -0         end each printed path with NUL instead of a newline (xargs -0)
+        --no-messages      do not report paths that could not be read
+        --type-list        print the type names and their extensions
     --allow-exec           let an expression's -exec and -execdir run commands
     --json                 machine-readable output (the glob form; not with an expression)
     --color[=WHEN]         WHEN is always, never or auto (default auto)
     -h, --help             this text
     -V, --version          print the version
-
-find matches paths, not contents, so it has no content-search flags: --binary-files, -I,
--d/--directories and the --pre pair describe how bytes are read, and they are unknown options
-here (`dusage search` takes them).
 
 Exit status: 0 when something matched, 1 when nothing did, 2 on an error.";
 
@@ -425,7 +438,8 @@ impl Types {
     }
 }
 
-const SEARCH_VALUE_FLAGS: &[&str] = &[
+/// The flags `search` takes, for [`super::accepted_flags`].
+pub(super) const SEARCH_VALUE_FLAGS: &[&str] = &[
     "-e",
     "--regexp",
     "-f",
@@ -475,7 +489,7 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--sortr",
 ];
 
-const SEARCH_BOOL_FLAGS: &[&str] = &[
+pub(super) const SEARCH_BOOL_FLAGS: &[&str] = &[
     "-F",
     "--fixed-strings",
     "-P",
@@ -851,7 +865,8 @@ fn walk_globs(a: &Args) -> (Vec<String>, Vec<String>) {
 /// The flags `dusage find` takes before its pattern or expression, and the ones that carry
 /// a value. The expression splitter reads the same tables, so a flag's value is never
 /// mistaken for the start of an expression.
-const FIND_VALUE_FLAGS: &[&str] = &[
+/// The flags `find` takes, for [`super::accepted_flags`].
+pub(super) const FIND_VALUE_FLAGS: &[&str] = &[
     "-g",
     "--glob",
     "--include",
@@ -871,9 +886,10 @@ const FIND_VALUE_FLAGS: &[&str] = &[
     "--mindepth",
     "--sort",
     "--sortr",
+    "--ignore-file",
 ];
 
-const FIND_BOOL_FLAGS: &[&str] = &[
+pub(super) const FIND_BOOL_FLAGS: &[&str] = &[
     "-F",
     "--fixed",
     "-i",
@@ -903,6 +919,7 @@ const FIND_BOOL_FLAGS: &[&str] = &[
     "-Z",
     "--null",
     "--allow-exec",
+    "-h",
     "--help",
     "-V",
     "--version",
@@ -945,7 +962,9 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         }
         return write_out(&text);
     }
-    if a.flag("--help") {
+    // `-h` is help in `find`, which has no file-name suppression to spend it on; in
+    // `search` it stays `--no-filename`, which is what grep means by it.
+    if a.flag("--help") || (scope == Scope::Paths && a.flag("-h")) {
         let text = if scope == Scope::Content {
             SEARCH_HELP
         } else {
@@ -1192,7 +1211,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         let groups = o.pattern.group_count();
         o.replace = Some(parse_replacement(template, groups, o.pattern.is_pcre())?);
     }
-    // `--sort-files` is ripgrep's older spelling of `--sort path`.
+    // `--sort-files` is ripgrep's older spelling of `--sort path`, which is the fallthrough.
     let (sort, sort_reverse) = match (a.value("--sort"), a.value("--sortr")) {
         (_, Some(v)) => (parse_sort(v)?, true),
         (Some(v), None) => (parse_sort(v)?, false),

@@ -1145,7 +1145,8 @@ fn report_stats(run: &Run, elapsed: Duration) {
     eprintln!("{line}");
 }
 
-const VALUE_FLAGS: &[&str] = &[
+/// The flags `du` takes, for [`super::accepted_flags`].
+pub(super) const VALUE_FLAGS: &[&str] = &[
     "--max-depth",
     "-d",
     "--threshold",
@@ -1157,7 +1158,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--threads",
 ];
 
-const BOOL_FLAGS: &[&str] = &[
+pub(super) const BOOL_FLAGS: &[&str] = &[
     "-a",
     "--all",
     "-b",

@@ -111,25 +111,26 @@ fn parse_secs(s: &str) -> Result<Duration, String> {
     }
 }
 
+/// The flags `scan`, `big` and the top-level form take, for [`super::accepted_flags`].
+pub(super) const VALUE_FLAGS: &[&str] =
+    &["--min-big", "--threads", "--top", "--backend", "--watch"];
+pub(super) const BOOL_FLAGS: &[&str] = &[
+    "--json",
+    "--by-ext",
+    "--on-disk",
+    "--dedup-hardlinks",
+    "--streams",
+    "--one-filesystem",
+    "--mft",
+    "-x",
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+];
+
 pub fn run(raw: Vec<String>, mode: Mode) -> Result<(), Fail> {
-    let a = Args::parse(
-        raw,
-        &["--min-big", "--threads", "--top", "--backend", "--watch"],
-        &[
-            "--json",
-            "--by-ext",
-            "--on-disk",
-            "--dedup-hardlinks",
-            "--streams",
-            "--one-filesystem",
-            "--mft",
-            "-x",
-            "-h",
-            "--help",
-            "-V",
-            "--version",
-        ],
-    )?;
+    let a = Args::parse(raw, VALUE_FLAGS, BOOL_FLAGS)?;
     if a.flag("-h") || a.flag("--help") {
         print!(
             "{}",

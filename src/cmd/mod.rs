@@ -13,6 +13,31 @@ pub mod search;
 
 use std::process::exit;
 
+/// A command line whose flag tables [`accepted_flags`] returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontEnd {
+    /// `dusage scan`, `dusage big`, and the top-level `<root> ...` form, which is `scan`.
+    Scan,
+    Du,
+    Search,
+    Find,
+    Prune,
+}
+
+/// The flags a front end's parser accepts: the ones that take a value, then the switches.
+/// The tables are the parser's own, so a test can compare them with what the help text
+/// advertises and catch either kind of drift — a documented flag the parser rejects, or an
+/// accepted flag nobody can discover.
+pub fn accepted_flags(fe: FrontEnd) -> (&'static [&'static str], &'static [&'static str]) {
+    match fe {
+        FrontEnd::Scan => (scan::VALUE_FLAGS, scan::BOOL_FLAGS),
+        FrontEnd::Du => (du::VALUE_FLAGS, du::BOOL_FLAGS),
+        FrontEnd::Search => (search::SEARCH_VALUE_FLAGS, search::SEARCH_BOOL_FLAGS),
+        FrontEnd::Find => (search::FIND_VALUE_FLAGS, search::FIND_BOOL_FLAGS),
+        FrontEnd::Prune => (prune::VALUE_FLAGS, prune::BOOL_FLAGS),
+    }
+}
+
 /// Exit code and message: 2 for misuse, 1 for a failed run.
 #[derive(Debug)]
 pub struct Fail(pub i32, pub String);
