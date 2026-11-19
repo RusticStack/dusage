@@ -2712,10 +2712,16 @@ fn find_ls_prints_finds_columns_and_a_link_target() {
         target.trim_end().ends_with("b.md"),
         "the target is the file it points at: {linked}"
     );
+    // Windows exposes no POSIX permission bits, so the mode column there is `l---------`;
+    // what both platforms have to say is that it is ten characters and starts with `l`.
+    let mode = linked.split_whitespace().nth(2).unwrap_or_default();
+    assert_eq!(mode.len(), 10, "a mode column: {linked}");
     assert!(
-        linked.contains("lrwxrwxrwx"),
+        mode.starts_with('l'),
         "a symlink's mode starts with l: {linked}"
     );
+    #[cfg(unix)]
+    assert_eq!(mode, "lrwxrwxrwx", "{linked}");
 }
 
 #[test]
