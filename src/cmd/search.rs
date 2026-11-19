@@ -27,11 +27,17 @@ OPTIONS:
     -F, --fixed-strings    treat the pattern as literal text
     -P, --pcre2            force the backtracking engine (lookaround, backreferences)
     -i, --ignore-case      case-insensitive (ASCII folding)
+    -s, --case-sensitive   case-sensitive, overriding an earlier -i
+    -S, --smart-case       ignore case unless the pattern holds an uppercase letter
     -w, --word-regexp      match whole words only
     -v, --invert-match     select lines that do not match
     -e, --regexp PATTERN   pattern to search for; repeatable
     -f, --file PATH        read patterns from PATH, one per line; repeatable
     -n, --line-number      print line numbers
+        --column           print the column of the first match on each line
+        --byte-offset      print the byte offset of each line within its file
+        --heading          print the file name on its own line above its matches
+        --line-regexp      match only whole lines
     -H, --with-filename    always print the file name
     -h, --no-filename      never print the file name
     -l, --files-with-matches
@@ -39,6 +45,7 @@ OPTIONS:
     -L, --files-without-match
                            print only the names of files with no match
     -c, --count            print the number of matching lines per file
+        --include-zero     with -c, also print files that matched nothing
         --count-matches    print the number of individual matches per file
     -o, --only-matching    print only the matching part of each line
     -q, --quiet            print nothing; exit 0 on the first match
@@ -49,8 +56,13 @@ OPTIONS:
     -a, --text             search binary files instead of reporting them
     -j, --threads N        worker threads (default: one per core, 4 to 16)
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
+        --iglob PATTERN    the same, matched without case
     -t, --type NAME        include files of a type: rust, python, js, ts, c, cpp, go, java,
-                           ruby, md, json, toml, yaml, sh, html, css, xml, txt, log, lock
+                           ruby, markdown, json, toml, yaml, sh, html, css, xml, txt, log, lock
+    -T, --type-not NAME    exclude a type; repeatable
+        --type-list        print the type names and their extensions
+    -u, --unrestricted     repeatable: -u drops ignore rules, -uu also looks at hidden paths,
+                           -uuu also searches binary files
     --max-depth N          do not descend more than N levels below each root
     --max-filesize SIZE    skip files larger than SIZE (e.g. 10M)
     --max-columns N        truncate printed lines at N bytes
@@ -65,6 +77,7 @@ A path of `-` is standard input, and with no paths a piped stdin is searched ins
     --json                 machine-readable output
     --color[=WHEN]         WHEN is always, never or auto (default auto)
     --stats                print a summary line on stderr
+        --no-messages      do not report paths that could not be read
     -h, --help             this text (note: -h alone means --no-filename)
     -V, --version          print the version
 
@@ -92,6 +105,7 @@ OPTIONS:
     --long                 print size, modification time and path
     --max-depth N          do not descend more than N levels below each root
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
+        --iglob PATTERN    the same, matched without case
     --hidden               also look at hidden files and directories
     --no-ignore            do not skip .gitignore/.ignore rules or cache directories
     -x, --one-filesystem   stay on the starting filesystem
@@ -101,6 +115,16 @@ OPTIONS:
     -V, --version          print the version
 
 Exit status: 0 when something matched, 1 when nothing did, 2 on an error.";
+
+/// Write a whole cold-path output (`--help`, `--version`, `--type-list`) and treat a reader
+/// that went away as success, since `println!` would panic on it.
+fn write_out(text: &str) -> Result<(), Fail> {
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    out.write_all(text.as_bytes())
+        .and_then(|()| out.flush())
+        .map_err(Fail::output)
+}
 
 /// `--color=WHEN`, which the shared parser cannot express as a value flag.
 fn take_color_flag(raw: &mut Vec<String>) -> Option<String> {
@@ -182,6 +206,31 @@ fn read_pattern_file(path: &str) -> Result<Vec<String>, Fail> {
         .collect())
 }
 
+/// Every type `-t` accepts, with the extensions it stands for, in the order `--type-list`
+/// prints them.
+const TYPE_TABLE: &[(&str, &[&str])] = &[
+    ("rust", &["rs"]),
+    ("python", &["py", "pyi"]),
+    ("js", &["js", "jsx", "mjs", "cjs"]),
+    ("ts", &["ts", "tsx"]),
+    ("c", &["c", "h"]),
+    ("cpp", &["cpp", "cc", "cxx", "hpp", "hh", "hxx"]),
+    ("go", &["go"]),
+    ("java", &["java"]),
+    ("ruby", &["rb"]),
+    ("markdown", &["md", "markdown"]),
+    ("json", &["json"]),
+    ("toml", &["toml"]),
+    ("yaml", &["yaml", "yml"]),
+    ("sh", &["sh", "bash", "zsh"]),
+    ("html", &["html", "htm"]),
+    ("css", &["css"]),
+    ("xml", &["xml"]),
+    ("txt", &["txt"]),
+    ("log", &["log"]),
+    ("lock", &["lock"]),
+];
+
 fn ext_globs(t: &str) -> Result<Vec<String>, String> {
     let exts: &[&str] = match t {
         "rust" | "rs" => &["rs"],
@@ -218,6 +267,9 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--regexp",
     "-f",
     "--file",
+    "-T",
+    "--type-not",
+    "--iglob",
     "-A",
     "--after-context",
     "-B",
@@ -245,6 +297,10 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--pcre2",
     "-i",
     "--ignore-case",
+    "-s",
+    "--case-sensitive",
+    "-S",
+    "--smart-case",
     "-w",
     "--word-regexp",
     "-v",
@@ -272,6 +328,14 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--no-ignore",
     "-x",
     "--one-filesystem",
+    "--one-file-system",
+    "--column",
+    "--byte-offset",
+    "--heading",
+    "--no-messages",
+    "--include-zero",
+    "--line-regexp",
+    "--type-list",
     "--json",
     "--color",
     "-Z",
@@ -282,8 +346,35 @@ const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--version",
 ];
 
+/// Count and remove `-u`/`--unrestricted`, which repeat: one widen, two widen more, three
+/// search binaries too, the way ripgrep's do.
+fn take_unrestricted(raw: &mut Vec<String>) -> u8 {
+    let mut n = 0u8;
+    let mut i = 0;
+    while i < raw.len() {
+        let tok = raw[i].as_str();
+        if tok == "--unrestricted" {
+            n = n.saturating_add(1);
+            raw.remove(i);
+            continue;
+        }
+        // `-uu` and `-uuu` are one token; `-u` alone is one.
+        if tok.starts_with('-') && !tok.starts_with("--") && tok.len() > 1 {
+            let body = &tok[1..];
+            if !body.is_empty() && body.bytes().all(|b| b == b'u') {
+                n = n.saturating_add(body.len() as u8);
+                raw.remove(i);
+                continue;
+            }
+        }
+        i += 1;
+    }
+    n
+}
+
 fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let color_mode = take_color_flag(&mut raw);
+    let unrestricted = take_unrestricted(&mut raw);
     let (value_flags, bool_flags): (&[&str], &[&str]) = if scope == Scope::Content {
         (SEARCH_VALUE_FLAGS, SEARCH_BOOL_FLAGS)
     } else {
@@ -309,6 +400,9 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 "--no-ignore",
                 "-x",
                 "--one-filesystem",
+                "--one-file-system",
+                "--no-messages",
+                "--type-list",
                 "--json",
                 "--color",
                 "-Z",
@@ -321,19 +415,25 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     };
     let a = Args::parse(raw, value_flags, bool_flags)?;
     if a.flag("--help") {
-        println!(
-            "{}",
-            if scope == Scope::Content {
-                SEARCH_HELP
-            } else {
-                FIND_HELP
-            }
-        );
-        return Ok(());
+        let text = if scope == Scope::Content {
+            SEARCH_HELP
+        } else {
+            FIND_HELP
+        };
+        return write_out(&format!("{text}\n"));
     }
     if a.flag("-V") || a.flag("--version") {
-        println!("dusage {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        return write_out(&format!("dusage {}\n", env!("CARGO_PKG_VERSION")));
+    }
+    if a.flag("--type-list") {
+        let mut text = String::new();
+        for (name, exts) in TYPE_TABLE {
+            text.push_str(name);
+            text.push_str(": ");
+            text.push_str(&exts.join(", "));
+            text.push('\n');
+        }
+        return write_out(&text);
     }
     let mut multi_pattern = false;
     let mut given: Vec<String> = a.values("-e").to_vec();
@@ -363,6 +463,13 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     if pattern_text.is_empty() {
         return Err("empty pattern".to_string().into());
     }
+    // `--line-regexp` asks for the whole line, which is an anchor pair around whatever the
+    // pattern is: an alternation has to be grouped so the anchors cover all of it.
+    let pattern_text = if a.flag("--line-regexp") {
+        format!("^(?:{pattern_text})$")
+    } else {
+        pattern_text
+    };
     // `-` is standard input, as in grep and rg.
     let stdin_wanted = paths.iter().any(|p| p == "-");
     let piped = scope == Scope::Content && !std::io::stdin().is_terminal();
@@ -405,6 +512,15 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     for t in a.values("-t").iter().chain(a.values("--type").iter()) {
         type_globs.extend(ext_globs(t)?);
     }
+    // `-T` excludes a type: every extension of it becomes an exclusion glob.
+    for t in a.values("-T").iter().chain(a.values("--type-not").iter()) {
+        for glob in ext_globs(t)? {
+            type_globs.push(format!("!{glob}"));
+        }
+    }
+    // `--iglob` is `-g` without case: it is an override like `-g`, so it switches the ignore
+    // files off the same way.
+    let iglobs: Vec<String> = a.values("--iglob").to_vec();
     for exts in a.values("--ext") {
         for e in exts.split(',').filter(|e| !e.is_empty()) {
             type_globs.push(format!("*.{e}"));
@@ -424,11 +540,19 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     // Path mode never compiles the pattern as a regex: it is a glob (or a substring
     // with `--fixed`), so a literal placeholder is all the engine needs.
     let fixed = (a.flag("-F") || a.flag("--fixed-strings")) && !multi_pattern;
+    // The last case mode wins, as in ripgrep; smart case decides from the pattern itself.
+    let mut ignore_case = a.flag("-i") || a.flag("--ignore-case");
+    if a.flag("-s") || a.flag("--case-sensitive") {
+        ignore_case = false;
+    }
+    if a.flag("-S") || a.flag("--smart-case") {
+        ignore_case = !pattern_text.chars().any(|c| c.is_uppercase());
+    }
     let mut o = SearchOptions::new(
         Pattern::with_engine(
             &pattern_text,
             scope == Scope::Paths || fixed,
-            a.flag("-i") || a.flag("--ignore-case"),
+            ignore_case,
             a.flag("-w") || a.flag("--word-regexp"),
             a.flag("-P") || a.flag("--pcre2"),
         )?,
@@ -436,15 +560,24 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     );
     o.scope = scope;
     o.globs = globs.clone();
+    o.iglobs = iglobs.clone();
     o.type_globs = type_globs.clone();
-    o.hidden = a.flag("--hidden");
-    o.no_ignore = a.flag("--no-ignore");
-    o.one_filesystem = a.flag("-x") || a.flag("--one-filesystem");
+    // `-u` widens the walk: one drops the ignore files, two also takes hidden paths, three
+    // searches binary files as text.
+    o.hidden = a.flag("--hidden") || unrestricted >= 2;
+    o.no_ignore = a.flag("--no-ignore") || unrestricted >= 1;
+    o.text = a.flag("-a") || a.flag("--text") || unrestricted >= 3;
+    o.one_filesystem = a.flag("-x") || a.flag("--one-filesystem") || a.flag("--one-file-system");
     o.null = a.flag("-Z") || a.flag("--null");
+    o.heading = a.flag("--heading");
+    o.column = a.flag("--column");
+    o.byte_offset = a.flag("--byte-offset");
+    o.include_zero = a.flag("--include-zero");
+    o.quiet_errors = a.flag("--no-messages");
     let json = a.flag("--json");
     let color = color_enabled(color_mode.as_deref());
-    // Colour and the JSON report both need each match located inside its line.
-    o.paint = color || json;
+    // Colour, the JSON report and `--column` all need each match located inside its line.
+    o.paint = color || json || o.column;
     if let Some(v) = a.value("-j").or(a.value("--threads")) {
         o.threads = cli::parse_threads(v)?;
     }
@@ -585,7 +718,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             };
             res.and_then(|()| out.flush()).map_err(Fail::output)?;
             let errs = r.stats.errors.total();
-            if errs > 0 {
+            if errs > 0 && !a.flag("--no-messages") {
                 eprintln!("dusage: {errs} path(s) could not be read");
             }
             return if r.paths.is_empty() {
@@ -602,7 +735,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         o.with_filename = Some(true);
     }
     let errs = report.stats.errors.total();
-    if errs > 0 && !a.flag("-q") && !a.flag("--quiet") {
+    if errs > 0 && !a.flag("-q") && !a.flag("--quiet") && !a.flag("--no-messages") {
         eprintln!("dusage: {errs} path(s) could not be read");
     }
     let stats = a.flag("--stats");

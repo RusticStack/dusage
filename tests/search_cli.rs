@@ -663,3 +663,154 @@ fn a_closed_pipe_is_not_a_failure() {
     assert_eq!(o.status.code(), Some(0), "stderr: {err}");
     assert!(err.is_empty(), "no noise on a closed pipe: {err}");
 }
+
+#[test]
+fn case_modes_and_line_regexp() {
+    let f = Fixture::new("cases");
+    fs::write(f.root.join("shape.txt"), "Needle here\nneedle there\n").unwrap();
+    let plain = run(&["search", "-c", "needle"], &f.root);
+    let sensitive = run(&["search", "-c", "-s", "needle"], &f.root);
+    let smart_lower = run(&["search", "-c", "-S", "needle"], &f.root);
+    let smart_upper = run(&["search", "-c", "-S", "Needle"], &f.root);
+    assert!(stdout(&plain).contains("shape.txt:1"), "{}", stdout(&plain));
+    assert!(
+        stdout(&sensitive).contains("shape.txt:1"),
+        "{}",
+        stdout(&sensitive)
+    );
+    assert!(
+        stdout(&smart_lower).contains("shape.txt:2"),
+        "-S folds a lowercase pattern: {}",
+        stdout(&smart_lower)
+    );
+    assert!(
+        stdout(&smart_upper).contains("shape.txt:1"),
+        "-S keeps an uppercase pattern exact"
+    );
+
+    // `-s` after `-i` wins, as in ripgrep.
+    let o = run(&["search", "-c", "-i", "-s", "NEEDLE"], &f.root);
+    assert_eq!(code(&o), 1, "-i then -s is case-sensitive: {}", stdout(&o));
+
+    // `--line-regexp` requires the whole line.
+    let o = run(&["search", "--line-regexp", "needle"], &f.root);
+    assert_eq!(code(&o), 1, "{}", stdout(&o));
+    let o = run(&["search", "--line-regexp", "needle there"], &f.root);
+    assert_eq!(code(&o), 0, "{}", stdout(&o));
+}
+
+#[test]
+fn types_unrestricted_and_iglob() {
+    let f = Fixture::new("types");
+    fs::write(f.root.join("keep.rs"), "needle\n").unwrap();
+    fs::write(f.root.join("drop.py"), "needle\n").unwrap();
+    let o = run(&["search", "-l", "-t", "rust", "needle"], &f.root);
+    assert!(stdout(&o).contains("keep.rs"), "{}", stdout(&o));
+    assert!(
+        !stdout(&o).contains("drop.py"),
+        "-t narrows: {}",
+        stdout(&o)
+    );
+
+    let o = run(&["search", "-l", "-T", "rust", "needle"], &f.root);
+    assert!(
+        !stdout(&o).contains("keep.rs"),
+        "-T excludes: {}",
+        stdout(&o)
+    );
+    assert!(stdout(&o).contains("drop.py"), "{}", stdout(&o));
+
+    let o = run(&["search", "--type-list"], &f.root);
+    assert!(stdout(&o).contains("rust: rs"), "{}", stdout(&o));
+
+    // `-u` drops the ignore rules, `-uu` also takes hidden paths.
+    let o = run(&["search", "-l", "needle"], &f.root);
+    assert!(!stdout(&o).contains("node_modules"), "{}", stdout(&o));
+    let o = run(&["search", "-l", "-u", "needle"], &f.root);
+    assert!(
+        stdout(&o).contains("node_modules"),
+        "-u ignores rules: {}",
+        stdout(&o)
+    );
+    fs::write(f.root.join(".hidden.txt"), "needle\n").unwrap();
+    let o = run(&["search", "-l", "-u", "needle"], &f.root);
+    assert!(
+        !stdout(&o).contains(".hidden.txt"),
+        "-u keeps hidden out: {}",
+        stdout(&o)
+    );
+    let o = run(&["search", "-l", "-uu", "needle"], &f.root);
+    assert!(
+        stdout(&o).contains(".hidden.txt"),
+        "-uu takes hidden: {}",
+        stdout(&o)
+    );
+
+    // `--iglob` matches without case and is an override like `-g`.
+    let o = run(&["search", "-l", "--iglob", "*.RS", "needle"], &f.root);
+    assert!(stdout(&o).contains("keep.rs"), "{}", stdout(&o));
+    assert!(!stdout(&o).contains("drop.py"), "{}", stdout(&o));
+}
+
+#[test]
+fn column_offset_heading_and_include_zero() {
+    let f = Fixture::new("positions");
+    fs::write(
+        f.root.join("pos.txt"),
+        "alpha needle beta\nsecond line\nneedle here\n",
+    )
+    .unwrap();
+    // `-h` keeps the file name out, so the shapes below are the prefix alone.
+    let o = run(
+        &[
+            "search", "-h", "-n", "--column", "--iglob", "pos.txt", "needle",
+        ],
+        &f.root,
+    );
+    assert_eq!(stdout(&o), "1:7:alpha needle beta\n3:1:needle here\n");
+    let o = run(
+        &[
+            "search",
+            "-h",
+            "-n",
+            "--byte-offset",
+            "--iglob",
+            "pos.txt",
+            "needle",
+        ],
+        &f.root,
+    );
+    assert_eq!(stdout(&o), "1:0:alpha needle beta\n3:30:needle here\n");
+    let o = run(
+        &[
+            "search",
+            "-h",
+            "-n",
+            "--column",
+            "--byte-offset",
+            "--iglob",
+            "pos.txt",
+            "needle",
+        ],
+        &f.root,
+    );
+    assert_eq!(stdout(&o), "1:7:0:alpha needle beta\n3:1:30:needle here\n");
+
+    // `--heading` prints the name once, above, and a blank line between files.
+    fs::write(f.root.join("other.txt"), "needle again\n").unwrap();
+    let o = run(&["search", "-n", "--heading", "needle"], &f.root);
+    let out = stdout(&o);
+    let headings = out.lines().filter(|l| !l.contains(':')).count();
+    assert!(headings >= 3, "one heading per matching file: {out}");
+    assert!(out.contains("\n\n"), "files are separated: {out:?}");
+    assert!(
+        out.lines().any(|l| l == "1:alpha needle beta"),
+        "lines under a heading carry no file name: {out}"
+    );
+
+    // `-c --include-zero` prints the files that matched nothing.
+    fs::write(f.root.join("zero.txt"), "nothing here\n").unwrap();
+    let o = run(&["search", "-c", "--include-zero", "needle"], &f.root);
+    let out = stdout(&o);
+    assert!(out.contains("zero.txt:0"), "{out}");
+}

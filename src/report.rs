@@ -333,6 +333,7 @@ pub fn render_search(
     // `dusage search needle file.txt` prints lines without a file name.
     let many = o.with_filename.unwrap_or(r.files.len() > 1);
     let mut printed = false;
+    let mut printed_heading = false;
     for f in &r.files {
         if o.files_with_matches || o.files_without_matches {
             if o.null {
@@ -356,6 +357,19 @@ pub fn render_search(
             writeln!(out, "Binary file {} matches", f.path)?;
             continue;
         }
+        // `--heading` puts the file name on its own line and drops it from the lines below.
+        // Without a name to print — one file, no `-H` — it is the same as no heading at all.
+        if o.heading && many {
+            if printed_heading {
+                writeln!(out)?;
+            }
+            if color {
+                writeln!(out, "{}{}{}", color::PATH, f.path, color::RESET)?;
+            } else {
+                writeln!(out, "{}", f.path)?;
+            }
+            printed_heading = true;
+        }
         // grep and ripgrep print a `--` only between context groups; a plain match list has
         // no separator at all.
         let grouped = o.before > 0 || o.after > 0;
@@ -368,7 +382,8 @@ pub fn render_search(
             printed = true;
             last = Some(h.number);
             let colon = if h.matched { ':' } else { '-' };
-            if many {
+            let named = many && !o.heading;
+            if named {
                 if color {
                     write!(out, "{}{}{}", color::PATH, f.path, color::RESET)?;
                 } else {
@@ -387,6 +402,15 @@ pub fn render_search(
                     write!(out, "{}", h.number)?;
                     write!(out, "{colon}")?;
                 }
+            }
+            // The column of the first match, then the byte offset of the line itself, in the
+            // order ripgrep prints them.
+            if o.column {
+                let col = h.spans.first().map_or(1, |(s, _)| s + 1);
+                write!(out, "{col}{colon}")?;
+            }
+            if o.byte_offset {
+                write!(out, "{}{colon}", h.offset)?;
             }
             if h.matched {
                 write_match_line(out, &h.text, &h.spans, color)?;
@@ -902,12 +926,14 @@ mod tests {
                 hits: vec![
                     LineHit {
                         number: 2,
+                        offset: 22,
                         text: b"a needle".to_vec(),
                         matched: true,
                         spans: vec![(2, 8)],
                     },
                     LineHit {
                         number: 5,
+                        offset: 64,
                         text: b"another needle".to_vec(),
                         matched: true,
                         spans: vec![(8, 14)],
