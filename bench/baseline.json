@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "generated": "2026-11-19T20:18:08Z",
+  "machine": {"uname": "Linux 6.1.158+ x86_64", "cpus": 2},
+  "runs": 5,
+  "tolerance_pct": 25,
+  "cases": {
+    "search-rare": {"dusage_ms": 51.2, "reference_tool": "rg", "reference_ms": 45.9},
+    "search-regex-nomatch": {"dusage_ms": 46.4, "reference_tool": "rg", "reference_ms": 46.0},
+    "search-count": {"dusage_ms": 66.6, "reference_tool": "grep -rIc", "reference_ms": 64.6}
+  }
+}

@@ -38,30 +38,142 @@ left at their own defaults.
 
 ```console
 $ cargo build --release
-$ ./bench/run.sh
+$ ./bench/run.sh        # measures everything, writes bench/results.json
+$ ./bench/summary.sh    # renders the tables below from that file
 ```
 
-The exact command used for the table below was `./bench/run.sh` from the
-repository root, with no environment overrides. The script warms every command
-once, then runs five interleaved rounds — one run of each command per round, so
-machine drift hits every tool alike — and reports the median of the five.
+`bench/run.sh` warms every command once, then runs five interleaved rounds — one
+run of every row per round, so machine drift hits all tools alike — and reports
+the median of the five. That is the wall-clock half. The run also measures peak
+memory and a cold-cache pass, which the old warm-cache table did not.
 
-Knobs, all optional:
+### The cases are data
+
+`bench/cases.sh` declares one line per measured row and nothing else:
+
+```sh
+bench_row <case> <section> <cache> <role> <tool> <command> <evict-root>
+```
+
+`case` is a stable id (what `bench/baseline.json` and the CI guard key off),
+`section` is the group the row prints under, `cache` is `warm`, `cold` or `both`,
+`role` is `primary` (dusage) or `reference` (the tool it replaces), and
+`evict-root` names the tree the cold pass drops. Both `bench/run.sh` and
+`scripts/perf-guard.sh` source that file, so the suite and the guard can never
+measure different command lines. Each case names its reference: `rg`, `grep`,
+`find` or `du`. The modes covered are the ones the binary has — literal,
+frequent and rare literals, case-insensitive, regex that matches and regex that
+never does, `-l`, `-c`, `-o`, `-U`, `-z` over a gzip tree built from the search
+tree on first run, `find` by name, by path and by `-t` type, `du -s`, `du`, and
+`scan` across a thread sweep.
+
+### Peak memory
+
+Peak RSS is measured in a pass of its own, after the timing rounds and before
+the cold ones, so the measurement never perturbs the clock: `/usr/bin/time -v`
+reading `Maximum resident set size`, with three samples per row and the largest
+kept (a peak that only shows up under repetition is still a peak). Where GNU
+time is absent the harness samples `/proc/<pid>/status` `VmHWM` every 10 ms for
+the process and its direct children and keeps the maximum; that sampler is
+approximate — a short-lived grandchild can finish between two samples — and the
+header line `# rss-method,` says which method produced the numbers. Pipeline
+rows (`find … | awk …`) report the largest single process in the pipeline, not
+the sum.
+
+### Cold cache, and how honest it is
+
+The cold pass runs last, so it cannot disturb a warm number, and only the rows
+marked `cold` or `both` are measured in it. Each run is preceded by its own
+cache drop, and warm and cold rows are never mixed in one table or one median.
+
+Three methods, in the order the harness tries them, recorded on the
+`# cold-method,` header line and in `results.json`:
+
+1. **`drop_caches`** — `echo 3 > /proc/sys/vm/drop_caches`. Needs root, and is
+   the only method that also evicts dentries and inodes. Used when it works.
+2. **`fadvise`** — `bench/evict.py`, one `posix_fadvise(POSIX_FADV_DONTNEED)`
+   per file, the way `vmtouch -e` works. This is a real eviction of file data,
+   not an approximation, and it needs no privileges — but it does **not** touch
+   dentries or inodes. A content search therefore comes back genuinely cold
+   (measured here: `search -c` over `/usr/local/go` goes 0.06 s warm to 0.27 s
+   cold), while a metadata walk — `scan`, `du`, `find` — stays effectively warm
+   and its cold row is close to a duplicate of its warm one. Read those rows as
+   "data cold, metadata warm", which is what the label says.
+3. **`read-evict`** — the last resort, when neither of the above is available:
+   read a large unrelated file to push pages out by LRU pressure. **This one is
+   an approximation**: it evicts by whatever the replacement policy happens to
+   pick and proves nothing about any particular tree. Numbers from a run with
+   this method are labelled with it and should not be quoted next to `drop_caches`
+   numbers.
+
+On a box where nothing can be dropped the cold table still prints; it just says
+which of the three happened.
+
+### The result file and the rendered table
+
+`bench/run.sh` writes `bench/results.json` (schema 1): the machine, the tree
+sizes, the run counts, the RSS and cold methods, and one object per row with
+`case`, `section`, `cache`, `role`, `tool`, `command`, `median_ms`, `min_ms`,
+`max_ms`, `runs` and `maxrss_kb`. One row per line, so `grep` works on it. The
+CSV on stdout keeps its original seven columns and appends `cache` and
+`maxrss_kb`.
+
+`bench/summary.sh` renders that file as the Markdown tables below: one table per
+cache pass, one line per case, the fastest reference of the case named beside
+its own median, and both peak-RSS columns. It is POSIX `sh` plus `awk`.
+
+### The regression guard
+
+```console
+$ ./scripts/perf-guard.sh                  # 0 pass, 1 regression, 2 setup error
+$ ./scripts/perf-guard.sh --update-baseline
+```
+
+It runs three of the cheapest cases (`search-rare`, `search-regex-nomatch`,
+`search-count` by default, `DUSAGE_PERF_CASES` to change that), warm cache,
+medians of five alternating runs, and fails when dusage is more than 25% slower
+than the fastest reference on the same box **or** more than 25% above its own
+median in `bench/baseline.json`. `DUSAGE_PERF_TOL` moves the threshold,
+`--runs` the round count. The baseline is machine specific; a run on a box with
+a different CPU count still works but says so on stderr. Re-record it with
+`--update-baseline` after a deliberate change, on the machine CI runs on.
+
+CI does not run the guard yet; the step to add to the Linux job in
+`.github/workflows/ci.yml`, after the release build, is:
+
+```yaml
+      - name: Performance guard
+        run: bash scripts/perf-guard.sh
+```
+
+### Knobs, all optional
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `N` | `5` | runs per command, median reported |
-| `DUSAGE_BENCH_SCAN_ROOT` | `/usr` | large tree for the scan and `find` cases |
+| `N` | `5` | runs per row in the warm pass, median reported |
+| `DUSAGE_BENCH_COLD_RUNS` | `3` | runs per cold row; `0` skips the cold pass |
+| `DUSAGE_BENCH_RSS_RUNS` | `3` | RSS samples per row, largest kept; `0` skips RSS |
+| `DUSAGE_BENCH_COLD_METHOD` | `auto` | `drop_caches`, `fadvise` or `read-evict` |
+| `DUSAGE_BENCH_RESULTS` | `bench/results.json` | where the result file goes |
+| `DUSAGE_BENCH_BIN` | `target/release/dusage` | binary under test |
+| `DUSAGE_BENCH_WORK` | `target/bench` | scratch dir for the gzip tree and eviction file |
+| `DUSAGE_BENCH_SCAN_ROOT` | `/usr` | large tree for the scan, `du` and `find` cases |
 | `DUSAGE_BENCH_SEARCH_ROOT` | `/usr/local/go`, else `$HOME` | mid-size text tree |
+| `DUSAGE_BENCH_ZIP_ROOT` | `$DUSAGE_BENCH_WORK/gzip-tree` | gzip tree for `-z`, built on first run |
+| `DUSAGE_BENCH_ZIP_FILES` | `1200` | files copied into the gzip tree |
 | `DUSAGE_BENCH_PAT_RARE` | `asyncpreemptoff` | rare literal |
 | `DUSAGE_BENCH_PAT_COMMON` | `func ` | frequent literal |
 | `DUSAGE_BENCH_PAT_REGEX` | `[A-Z][a-zA-Z0-9_]*\.go` | regex case |
 | `DUSAGE_BENCH_PAT_CI` | `memmove` | case-insensitive case |
-| `DUSAGE_BENCH_GLOB` | `*.go` | glob for the `find` comparison |
+| `DUSAGE_BENCH_PAT_NOMATCH` | `[Z]{6}[a-z]{9}` | regex that never matches |
+| `DUSAGE_BENCH_PAT_MULTILINE` | `func \w+\(\) \{\n` | pattern for the `-U` case |
+| `DUSAGE_BENCH_GLOB` | `*.go` | glob for the `find -name` comparison |
+| `DUSAGE_PERF_RUNS`, `DUSAGE_PERF_TOL`, `DUSAGE_PERF_CASES` | `5`, `25`, three cases | guard knobs |
 
-`hyperfine` is used for a single cross-check line on stderr when it is
-installed, and is never required. It was absent on this machine, so no
-cross-check line appears.
+`gzip` is needed for the `-z` case and `python3` for the `fadvise` fallback; a
+missing one drops or relabels only what needs it. `hyperfine` is used for a
+single cross-check line on stderr when it is installed, and is never required.
+`bench/run.sh` is bash; `bench/summary.sh` is POSIX `sh`.
 
 ## Raw output
 
