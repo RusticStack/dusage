@@ -299,6 +299,32 @@ impl Pattern {
     }
 
     /// Every non-overlapping match on the line, for `-o` and for colouring.
+    /// How many capturing groups the pattern has, which bounds what `-r` may refer to.
+    pub fn group_count(&self) -> usize {
+        match self.kind {
+            PatternKind::Regex => self.re.as_ref().map_or(0, |re| re.group_count()),
+            PatternKind::Literal | PatternKind::Pcre => 0,
+        }
+    }
+
+    /// The capture spans of the match at or after `from`: index 0 is the whole match. The
+    /// backtracking engine does not record groups, so it answers with the whole match only;
+    /// `dusage search` refuses a `-r` group reference in that case rather than guessing.
+    pub fn captures_at(&self, hay: &[u8], from: usize) -> Option<Vec<Option<(usize, usize)>>> {
+        match self.kind {
+            PatternKind::Regex => self.re.as_ref()?.captures_at(hay, from),
+            PatternKind::Literal | PatternKind::Pcre => {
+                let m = self.find_at(hay, from)?;
+                Some(vec![Some((m.start, m.end))])
+            }
+        }
+    }
+
+    /// True when the pattern runs on the backtracking engine.
+    pub fn is_pcre(&self) -> bool {
+        self.kind == PatternKind::Pcre
+    }
+
     pub fn find_all(&self, hay: &[u8], limit: usize) -> Vec<Match> {
         let mut out = Vec::new();
         let mut at = 0;

@@ -6,7 +6,7 @@ use crate::encodings::Encoding;
 use crate::glob::Glob;
 use crate::pattern::Pattern;
 use crate::report;
-use crate::search::{search, Scope, SearchOptions, SortKey};
+use crate::search::{search, Scope, SearchOptions, Segment, SortKey};
 use std::io::Read;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -48,6 +48,8 @@ OPTIONS:
         --include-zero     with -c, also print files that matched nothing
         --count-matches    print the number of individual matches per file
     -o, --only-matching    print only the matching part of each line
+    -r, --replace TEXT     print each line with its matches replaced by TEXT;
+                           $0 is the whole match, $1..$9 its groups, $$ a literal $
     -q, --quiet            print nothing; exit 0 on the first match
         --passthru         print every line, matching or not (matched lines stay marked)
     -m, --max-count N      stop after N matching lines per file
@@ -282,6 +284,8 @@ const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--regexp",
     "-f",
     "--file",
+    "-r",
+    "--replace",
     "-T",
     "--type-not",
     "--iglob",
@@ -394,6 +398,125 @@ fn take_unrestricted(raw: &mut Vec<String>) -> u8 {
         i += 1;
     }
     n
+}
+
+/// Split a `-r` template into literals and group references. `$0`, `$1`..`$99` and `${1}`
+/// name a group, `$$` is a dollar sign, and `\1` is accepted for grep's spelling of the same
+/// thing. A reference the pattern cannot satisfy is refused here rather than printed as
+/// nothing.
+fn parse_replacement(text: &str, groups: usize, pcre: bool) -> Result<Vec<Segment>, Fail> {
+    let mut out: Vec<Segment> = Vec::new();
+    let mut lit: Vec<u8> = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let check_group = |n: usize| -> Result<(), Fail> {
+        if pcre {
+            return Err(Fail(
+                2,
+                "-r cannot use capture groups with -P/--pcre2: the backtracking engine does \
+                 not record them"
+                    .to_string(),
+            ));
+        }
+        if n > groups {
+            return Err(Fail(
+                2,
+                format!("-r refers to group ${n} but the pattern has {groups}"),
+            ));
+        }
+        Ok(())
+    };
+    while i < bytes.len() {
+        match bytes[i] {
+            b'$' => match bytes.get(i + 1) {
+                Some(b'$') => {
+                    lit.push(b'$');
+                    i += 2;
+                }
+                Some(b'{') => {
+                    let end = bytes[i + 2..]
+                        .iter()
+                        .position(|b| *b == b'}')
+                        .map(|p| i + 2 + p)
+                        .ok_or_else(|| Fail(2, "-r: unclosed ${".to_string()))?;
+                    let digits = std::str::from_utf8(&bytes[i + 2..end]).unwrap_or("");
+                    let n: usize = digits
+                        .parse()
+                        .map_err(|_| Fail(2, format!("-r: bad group ${{{digits}}}")))?;
+                    check_group(n)?;
+                    if !lit.is_empty() {
+                        out.push(Segment::Literal(std::mem::take(&mut lit)));
+                    }
+                    out.push(Segment::Group(n));
+                    i = end + 1;
+                }
+                Some(c) if c.is_ascii_digit() => {
+                    // The name runs to the end of the alphanumeric run, as ripgrep reads it:
+                    // `$0B` names a group called "0B", so it is refused here rather than
+                    // quietly becoming group 0 followed by a letter.
+                    let mut n = usize::from(c - b'0');
+                    i += 2;
+                    while let Some(d) = bytes.get(i).filter(|d| d.is_ascii_digit()) {
+                        n = n * 10 + usize::from(d - b'0');
+                        i += 1;
+                    }
+                    if bytes
+                        .get(i)
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                    {
+                        let start = i - 1;
+                        while bytes
+                            .get(i)
+                            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                        {
+                            i += 1;
+                        }
+                        let name = String::from_utf8_lossy(&bytes[start..i]).into_owned();
+                        return Err(Fail(
+                            2,
+                            format!("-r: ${{{name}}} is not a group of this pattern (named and mixed group references are unsupported; use ${{{n}}})"),
+                        ));
+                    }
+                    check_group(n)?;
+                    if !lit.is_empty() {
+                        out.push(Segment::Literal(std::mem::take(&mut lit)));
+                    }
+                    out.push(Segment::Group(n));
+                }
+                _ => {
+                    lit.push(b'$');
+                    i += 1;
+                }
+            },
+            b'\\' => match bytes.get(i + 1) {
+                Some(b'\\') => {
+                    lit.push(b'\\');
+                    i += 2;
+                }
+                Some(d) if (b'1'..=b'9').contains(d) => {
+                    let n = usize::from(d - b'0');
+                    check_group(n)?;
+                    if !lit.is_empty() {
+                        out.push(Segment::Literal(std::mem::take(&mut lit)));
+                    }
+                    out.push(Segment::Group(n));
+                    i += 2;
+                }
+                _ => {
+                    lit.push(b'\\');
+                    i += 1;
+                }
+            },
+            b => {
+                lit.push(b);
+                i += 1;
+            }
+        }
+    }
+    if !lit.is_empty() {
+        out.push(Segment::Literal(lit));
+    }
+    Ok(out)
 }
 
 /// `--sort KEY` / `--sortr KEY`: the order results print in.
@@ -619,6 +742,10 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.include_zero = a.flag("--include-zero");
     o.quiet_errors = a.flag("--no-messages");
     o.passthru = a.flag("--passthru");
+    if let Some(template) = a.value("-r").or(a.value("--replace")) {
+        let groups = o.pattern.group_count();
+        o.replace = Some(parse_replacement(template, groups, o.pattern.is_pcre())?);
+    }
     // `--sort-files` is ripgrep's older spelling of `--sort path`.
     let (sort, sort_reverse) = match (a.value("--sort"), a.value("--sortr")) {
         (_, Some(v)) => (parse_sort(v)?, true),

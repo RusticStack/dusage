@@ -98,6 +98,9 @@ pub struct SearchOptions {
     pub quiet_errors: bool,
     /// Print every line, matching or not (`--passthru`).
     pub passthru: bool,
+    /// Replace each match with this template before printing (`-r`), already parsed into
+    /// literal text and group references.
+    pub replace: Option<Vec<Segment>>,
     /// The order results print in, and whether it is reversed (`--sort`, `--sortr`).
     pub sort: SortKey,
     pub sort_reverse: bool,
@@ -107,6 +110,14 @@ pub struct SearchOptions {
     pub no_ignore_dot: bool,
     /// Do not stack the rule files of a root's parent directories.
     pub no_ignore_parent: bool,
+}
+
+/// One piece of a `-r` replacement: text to print, or a group of the match it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Segment {
+    Literal(Vec<u8>),
+    /// A capture group, 0 being the whole match.
+    Group(usize),
 }
 
 /// How a report orders its results.
@@ -161,6 +172,7 @@ impl SearchOptions {
             include_zero: false,
             quiet_errors: false,
             passthru: false,
+            replace: None,
             sort: SortKey::Path,
             sort_reverse: false,
             no_ignore_vcs: false,
@@ -1011,6 +1023,8 @@ impl<'a> Scanner<'a> {
             || self.o.after > 0
             || self.o.only_matching
             || self.o.passthru
+            // The replacement rewrites the line, which this path does not do.
+            || self.o.replace.is_some()
             || self.o.max_count.is_some()
             || self.stopped
         {
@@ -1313,15 +1327,43 @@ fn handle_line(
         }
         history.clear();
     }
-    let spans: Vec<(usize, usize)> = if o.invert {
+    let found: Vec<Match> = if o.invert {
         Vec::new()
     } else {
-        o.pattern
-            .find_all(text, MAX_PER_LINE)
-            .into_iter()
-            .map(|m: Match| (m.start, m.end))
-            .collect()
+        o.pattern.find_all(text, MAX_PER_LINE)
     };
+    // `-r` rewrites the line before it prints, so what is printed and what is highlighted are
+    // both the replacement, not the match.
+    if let Some(rep) = &o.replace {
+        if o.only_matching {
+            for m in &found {
+                let mut out = Vec::new();
+                expand(&mut out, rep, &o.pattern, text, m.start);
+                let len = out.len();
+                hits.push(LineHit {
+                    number: no,
+                    offset: offset + m.start as u64,
+                    text: out,
+                    matched: true,
+                    spans: vec![(0, len)],
+                });
+                *last_emitted = no;
+            }
+        } else {
+            let (text, spans) = rewrite(text, &found, rep, &o.pattern);
+            hits.push(LineHit {
+                number: no,
+                offset,
+                text,
+                matched: true,
+                spans,
+            });
+            *last_emitted = no;
+        }
+        *remaining_after = o.after;
+        return *matches >= limit;
+    }
+    let spans: Vec<(usize, usize)> = found.iter().map(|m| (m.start, m.end)).collect();
     if o.only_matching && !spans.is_empty() {
         for (s, e) in spans {
             hits.push(LineHit {
@@ -1345,6 +1387,46 @@ fn handle_line(
     }
     *remaining_after = o.after;
     *matches >= limit
+}
+
+/// Append the replacement for the match at `start` of `text`, group references resolved
+/// through the capture engine.
+fn expand(out: &mut Vec<u8>, rep: &[Segment], pattern: &Pattern, text: &[u8], start: usize) {
+    let groups = pattern
+        .captures_at(text, start)
+        .unwrap_or_else(|| vec![Some((start, start))]);
+    for seg in rep {
+        match seg {
+            Segment::Literal(bytes) => out.extend_from_slice(bytes),
+            Segment::Group(i) => {
+                if let Some(Some((s, e))) = groups.get(*i) {
+                    out.extend_from_slice(&text[*s..*e]);
+                }
+            }
+        }
+    }
+}
+
+/// The whole line with every match replaced, and the byte ranges of the replacements inside
+/// it, which is what colouring and `--column` report.
+fn rewrite(
+    text: &[u8],
+    matches: &[Match],
+    rep: &[Segment],
+    pattern: &Pattern,
+) -> (Vec<u8>, Vec<(usize, usize)>) {
+    let mut out = Vec::with_capacity(text.len());
+    let mut spans = Vec::with_capacity(matches.len());
+    let mut last = 0;
+    for m in matches {
+        out.extend_from_slice(&text[last..m.start]);
+        let from = out.len();
+        expand(&mut out, rep, pattern, text, m.start);
+        spans.push((from, out.len()));
+        last = m.end;
+    }
+    out.extend_from_slice(&text[last..]);
+    (out, spans)
 }
 
 fn strip_cr(line: &[u8]) -> &[u8] {

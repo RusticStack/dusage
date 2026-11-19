@@ -69,6 +69,7 @@ combine. The option lists are `SEARCH_VALUE_FLAGS` / `SEARCH_BOOL_FLAGS`
 | `--encoding NAME` | `rg -E`, `--encoding` | `auto` (default), `utf-8`, `utf-16le`, `utf-16be`, `latin1`. Search always runs on UTF-8 bytes, so a forced encoding or a detected UTF-16 file is transcoded first (`src/search.rs:449-458`, `src/encodings.rs:1-13`). Auto-detection answers only UTF-8, UTF-16LE or UTF-16BE — Latin-1 is never guessed, it must be asked for (`src/encodings.rs:72-112`). An unknown name is exit 2. |
 | `-Z`, `--null` | `rg --null` / `grep -Z` | A NUL instead of `:` after the file name, for `xargs -0` (`src/report.rs:336-342`, `src/report.rs:371-379`). |
 | `--no-ignore-vcs`, `--no-ignore-dot`, `--no-ignore-parent`, `--no-ignore-files` | `rg --no-ignore-vcs` and friends | Each removes one source of ignore rules: `.gitignore` and `.git/info/exclude`, `.ignore`, the rule files stacked from a root's ancestors, or all of them at once. `--no-ignore-global` is accepted and does nothing, because there is no global ignore file to read. |
+| `-r`, `--replace TEXT` | `rg -r` / `grep -r` | Prints each line with its matches replaced. `$0` is the whole match, `$1`..`$99` (or `${1}`) a capture group, `$$` a dollar; grep's `\1` spelling works too. The replacement is what gets highlighted and what `-o` prints. A reference the pattern cannot satisfy is refused with exit 2, as grep refuses an invalid back reference, where ripgrep prints nothing. Group references need the default engine: `-P` does not record groups, so a reference there is refused too. |
 | `--passthru` | `rg --passthru` | Prints every line, with matches marked as hits and the rest as context, so a file with no match still prints in full while the exit status stays 1. |
 | `--sort KEY`, `--sortr KEY`, `--sort-files` | `rg --sort`, `rg --sortr`, `rg --sort-files` | `path` (the default, and what `--sort-files` means), `none` for the order the walk produced, or `modified` for oldest-first. Any other key is refused with exit 2 rather than silently ignored. `modified` costs one `stat` per result. |
 | `--hidden` | `rg --hidden` / `rg -.` | Only governs names starting with `.` (`src/search.rs:200-203`); it does not disable ignore rules. |
@@ -122,25 +123,20 @@ partial stand-in in the parser.
 
 | rg flag | What it does in ripgrep | What its absence means here |
 |---|---|---|
+| `--type-add`, `--type-clear` | Extends or replaces the built-in type table at run time ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--type-add=TYPESPEC`). | The type table is compiled in (`src/cmd/search.rs`). An unlisted language is reachable only through `-g '*.ext'`, which has the further side effect of switching ignore rules off. `-t`, `-T` and `--type-list` are all there. |
 | `-P`, `--pcre2` | Switches to the PCRE2 engine "when you want to use features such as look-around or backreferences" ([rg(1)](https://man.archlinux.org/man/rg.1.en), `-P, --pcre2`). | No lookaround and no backreferences, in any spelling. See §2.2. A pattern that needs them cannot be expressed; ripgrep gets them only if built with PCRE2. |
 | `-U`, `--multiline` | Lifts the rule that a match cannot contain a line terminator, at a cost in speed and memory ([rg(1)](https://man.archlinux.org/man/rg.1.en), `-U, --multiline`). | Matching is strictly per line: the scanner splits on `\n` and calls `handle_line` per line (`src/search.rs:515-542`). A pattern for a record that spans lines returns nothing. |
 | `-z`, `--search-zip` | Detects gzip, bzip2, xz, LZ4, LZMA, Brotli and Zstd files and decompresses them before searching ([rg(1)](https://man.archlinux.org/man/rg.1.en), `-z, --search-zip`). | Compressed files are searched as raw bytes: no match, or a `Binary file … matches` line if the literal happens to appear in the compressed stream. |
 | `--pre COMMAND`, `--pre-glob` | Searches the standard output of `COMMAND PATH` instead of the file ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--pre`). | No preprocessor. PDFs, office documents and anything else needing extraction cannot be searched. |
 | `--multiline-dotall` | Makes `.` match line terminators when `-U` is on ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--multiline-dotall`). | Meaningless without multiline mode, so also absent. The inline `(?s)` flag is accepted and widens `.` to `\n`, but since the haystack is one line it changes nothing in practice (`src/regex.rs:16`). |
-| `-r`, `--replace` | Rewrites every match in the *output* using capture groups, never touching files ([rg(1)](https://man.archlinux.org/man/rg.1.en), `-r REPLACEMENT`). | No output rewriting, and no `$1` capture substitution. `-o` prints the matched text only. |
-| `--passthru` | Prints matching and non-matching lines, highlighting only matches ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--passthru`). | No way to emit a full file with highlights. |
 | `-l` vs `--files-without-match` | rg spells the negative form `--files-without-match` and reserves `-L` for `--follow` ([rg(1)](https://man.archlinux.org/man/rg.1.en)). | We spell it `-L`. That is a direct letter collision: a script written for rg that passes `-L` to follow symlinks gets a list of files with no matches instead. |
-| `--type-add`, `--type-clear`, `--type-not` | Extends or replaces the built-in type table at run time ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--type-add=TYPESPEC`). | The type table is compiled in (`src/cmd/search.rs:122-151`). An unlisted language is reachable only through `-g '*.ext'`, which has the further side effect of switching ignore rules off. |
-| `--iglob` | A case-insensitive `-g`, which "always overrides any other ignore logic" ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--iglob`). | No case-insensitive glob. Our positive globs do override ignore rules (§1.1, `-g`), but they match case-sensitively. |
-| `--sort SORTBY`, `--sortr` | `path`, `modified`, `accessed`, `created`; forces single-threaded traversal ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--sort=SORTBY`). | Output is always sorted by relative path (`src/search.rs:324`), so the default already equals `--sort path`; sorting by mtime or size is not available. |
 | `--no-require-git` | Respects `.gitignore` even outside a git repository ([rg(1)](https://man.archlinux.org/man/rg.1.en), `--no-require-git`). | We always respect it — nothing in `src/ignore.rs` tests for a repository — which is exactly `--no-require-git` behaviour, on by default. `.git/info/exclude` is the one rule file that *is* gated on a `.git` directory (§3). |
 
-Also missing, and worth knowing: `--type-list`, `--null-data`, `--crlf`,
-`--binary`, `--follow`/`-L`,
-`--max-columns-preview`, `--heading`, `--no-heading`, `--trim`,
-`--line-buffered`, `--block-buffered`, `-f/--file`, `--engine`, `--no-unicode`,
-`-u/--unrestricted` (the `-uu`/`-uuu` ladder has no equivalent; use
-`--no-ignore --hidden`), and `-S/--smart-case` / `-s/--case-sensitive`.
+Also missing, and worth knowing: `--null-data`, `--crlf`, `--binary`,
+`--follow`/`-L`, `-U/--multiline`, `-z/--search-zip`, `--pre`,
+`--max-columns-preview`, `--no-heading`, `--trim`, `--line-buffered`,
+`--block-buffered`, `--engine`, `--no-unicode` and `--sort` keys other than
+`path`, `none` and `modified`.
 
 Two things that *are* supported and easy to miss. `-e` may repeat, and every
 pattern is an alternative; with `-F` each one is escaped before they are joined,

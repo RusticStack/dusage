@@ -394,6 +394,11 @@ content_case tab_escape eq rg plain . 'needle\there' -n -n -rnE
 content_case no_trailing_newline eq 3 plain . 'newline needle' -n -n -rnE
 content_case two_file_roots eq 3 plain ascii.txt needle -n -n -nE
 content_case invalid_regex eq 3 plain . '[a-' "" "" -rE
+# `-r` is ripgrep's flag: in grep `-r` means recursive, so these compare with rg only.
+content_case replace_literal eq rg plain . 'needle' '-r X' '-r X' ''
+content_case replace_group eq rg plain . 'need(le)' '-r X$1' '-r X$1' ''
+content_case replace_whole_match eq rg plain . 'needle' '-r A${0}B' '-r A${0}B' ''
+content_case replace_only_matching eq rg plain . 'need(le)' '-o -r G$1' '-o -r G$1' ''
 content_case quit_matched eq 3 plain . needle -q -q -rqE
 content_case quit_absent eq 3 plain . zzzz-absent -q -q -rqE
 content_case ctx_after eq 3 plain sub needle '-A 1' -A1 '-rE -A 1'
