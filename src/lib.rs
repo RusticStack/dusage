@@ -4,10 +4,16 @@
 compile_error!("dusage supports Windows (NTFS) and Linux only.");
 
 pub mod archive;
+pub mod archive_brotli;
+pub mod archive_bz2;
+pub mod archive_lz4;
+pub mod archive_xz;
+pub mod archive_zstd;
 pub mod bytes;
 pub mod cli;
 pub mod cmd;
 pub mod encodings;
+pub mod findexpr;
 pub mod glob;
 pub mod guard;
 pub mod ignore;
