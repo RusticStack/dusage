@@ -1,0 +1,3 @@
+beta stream: the second of two concatenated xz streams, with a longer tail
+needle beta
+and one more line so the two differ in length

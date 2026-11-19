@@ -1,0 +1,2 @@
+alpha stream: the first of two concatenated xz streams
+needle alpha
