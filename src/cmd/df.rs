@@ -339,6 +339,10 @@ fn render(rows: &[Row], o: &Options) -> String {
     }
     if o.inodes {
         heads.extend(["Inodes", "IUsed", "IFree", "IUse%", "Mounted on"]);
+    } else if matches!(o.unit, Unit::Blocks) {
+        // df's own headings for the block columns, so a script that greps the header finds
+        // the unit it is reading.
+        heads.extend(["1K-blocks", "Used", "Available", "Use%", "Mounted on"]);
     } else {
         heads.extend(["Size", "Used", "Avail", "Use%", "Mounted on"]);
     }
