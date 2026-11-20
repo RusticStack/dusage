@@ -805,6 +805,12 @@ fn stamp(t: SystemTime, style: &TimeStyle) -> String {
 /// `4.0K`, `13K`, `7.0K` for 7095 bytes, `512` for less than a unit (and `4.1k` for
 /// `--si`). A carry that would reach the base promotes the unit, so 1048575 bytes is
 /// `1.0M` rather than `1024K`.
+///
+/// The round-up is deliberate and it is GNU du's rule, spelled `K` for `-h` and `k` for
+/// `--si` the way GNU does. BSD du, which is what macOS ships, truncates instead and prints
+/// `k` for both, so a tree of 16.5 KiB is `17K` here and `16k` there: comparing the two
+/// renderings digit for digit tests their rounding conventions rather than the arithmetic.
+/// Only the last printed digit can differ, and only on a boundary.
 fn human(bytes: u64, base: u64) -> String {
     const BIN: [&str; 7] = ["", "K", "M", "G", "T", "P", "E"];
     const SI: [&str; 7] = ["", "k", "M", "G", "T", "P", "E"];

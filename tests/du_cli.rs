@@ -620,6 +620,51 @@ fn tree_alloc(dir: &Path) -> u64 {
     total
 }
 
+/// A rendered human size as (bytes, the place of its last printed digit).
+fn human_value(s: &str) -> (f64, f64) {
+    let t = s.trim();
+    // Both spellings of the kilo suffix: dusage prints `K` under `-h` and `k` under `--si`,
+    // the way GNU du does, while BSD du prints `k` for both. The scale below is only ever
+    // compared with itself, so the two sides have to read the same suffix the same way.
+    let (num, unit) = match t.chars().last() {
+        Some('k' | 'K') => (&t[..t.len() - 1], 1024.0),
+        Some('M') => (&t[..t.len() - 1], 1024.0 * 1024.0),
+        Some('G') => (&t[..t.len() - 1], 1024.0 * 1024.0 * 1024.0),
+        _ => (t, 1.0),
+    };
+    let decimals = num.split_once('.').map_or(0, |(_, frac)| frac.len());
+    let step = unit / 10f64.powi(decimals as i32);
+    (num.parse::<f64>().unwrap_or(f64::NAN) * unit, step)
+}
+
+/// Compare two `-h`/`--si` listings by value rather than by rendered digit.
+///
+/// The three renderers round differently: dusage rounds a printed human size up, GNU `du`
+/// rounds to nearest and BSD `du` rounds down, so a tree of 16.5 KiB prints as `17k` here
+/// and `16k` there. One whole step of the last printed digit is the largest disagreement
+/// those conventions can produce, so that is the tolerance — a `4.1k` row next to an `8.2k`
+/// one still fails. The arithmetic itself is compared exactly by the numeric tests; what
+/// this adds is that both agree on the unit and the scale.
+#[cfg(unix)]
+fn assert_human_rows_match(got: Vec<(String, String)>, want: Vec<(String, String)>) {
+    let got = by_path(got);
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "row counts differ: {got:?} vs {want:?}"
+    );
+    for ((g, gp), (w, wp)) in got.iter().zip(want.iter()) {
+        assert_eq!(gp, wp, "the same paths, sorted");
+        let (gv, gstep) = human_value(g);
+        let (wv, wstep) = human_value(w);
+        let step = gstep.max(wstep) * 1.001;
+        assert!(
+            (gv - wv).abs() <= step,
+            "{gp}: dusage {g} vs du {w} ({gv} against {wv} bytes, tolerance {step})"
+        );
+    }
+}
+
 /// The system `du`'s own rows for the same arguments, when the system has one: the oracle
 /// the default has to match, byte for byte after sorting. `None` where there is no `du`.
 ///
@@ -851,10 +896,10 @@ fn human_and_si_follow_the_allocated_base() {
         "{si:?}"
     );
     if let Some(want) = system_du(&["-a", "-h", root.to_str().unwrap()]) {
-        assert_eq!(by_path(h), want);
+        assert_human_rows_match(h, want);
     }
     if let Some(want) = system_du(&["-a", "--si", root.to_str().unwrap()]) {
-        assert_eq!(by_path(si), want);
+        assert_human_rows_match(si, want);
     }
 }
 
