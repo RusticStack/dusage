@@ -476,6 +476,9 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, ids: &Ids) -> Job
     if !o.no_ignore {
         rules.push_dir(&job.dir, &job.rel);
     }
+    // One shared copy of this directory's rules, handed to every child as a pointer: cloning
+    // the rule stack once per child instead costs a copy of every glob and ignore pattern.
+    let rules = Arc::new(rules);
     let mut ents = Vec::new();
     if let Err(e) = enumerate::list(&job.dir, &mut ents, &mut out.stats.errors) {
         if e.kind() != io::ErrorKind::NotFound {
@@ -574,7 +577,7 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, ids: &Ids) -> Job
                     dir: child,
                     rel: child_rel,
                     depth: job.depth + 1,
-                    rules: Arc::new(rules.clone()),
+                    rules: rules.clone(),
                     dev: job.dev,
                     chain,
                 });
