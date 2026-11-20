@@ -660,11 +660,18 @@ pub fn render_path(
             if c.is_dir { "/" } else { "" }
         )
     } else if null {
-        write!(out, "{}\0", c.rel)
+        out.write_all(c.rel.as_bytes())?;
+        out.write_all(b"\0")
     } else if color {
-        writeln!(out, "{}{}{}", color::PATH, c.rel, color::RESET)
+        out.write_all(color::PATH.as_bytes())?;
+        out.write_all(c.rel.as_bytes())?;
+        out.write_all(color::RESET.as_bytes())?;
+        out.write_all(b"\n")
     } else {
-        writeln!(out, "{}", c.rel)
+        // A listing is one path per line: the formatter would add its padding and adapter
+        // machinery to every row of a walk, which is the one thing a listing is made of.
+        out.write_all(c.rel.as_bytes())?;
+        out.write_all(b"\n")
     }
 }
 
