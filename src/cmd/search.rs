@@ -1083,8 +1083,12 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 .into(),
         );
     }
+    // `-q` asks one question and a found answer outranks a later error, so a bad starting
+    // point is not refused up front in that mode: the search records it, and the exit code
+    // follows whether anything matched. Every other mode refuses it before reading anything.
+    let quiet_mode = a.flag("-q") || a.flag("--quiet");
     for r in &roots {
-        if !r.exists() {
+        if !r.exists() && !quiet_mode {
             return Err(format!("{}: no such file or directory", r.display()).into());
         }
     }
@@ -1583,8 +1587,10 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     }
     // A path that could not be read makes the whole run an error, whatever else matched:
     // exit 2 is grep's answer for "something went wrong", and sets it apart from "nothing
-    // matched", which is 1.
-    if errs > 0 {
+    // matched", which is 1. `-q` is the exception, and grep's own: the question was whether
+    // a line is selected, and a "yes" outranks an error, so an unreadable second path does
+    // not turn a found answer into a failure.
+    if errs > 0 && !(o.quiet && report.any_match) {
         Err(Fail(2, String::new()))
     } else if report.any_match {
         Ok(())
