@@ -17,6 +17,8 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read};
+use std::borrow::Cow;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -376,6 +378,16 @@ fn join_rel(rel: &str, name: &str) -> String {
     out
 }
 
+/// One child's real path. `Path::join` copies the parent into a fresh buffer and then grows
+/// it, which is two allocations and two copies of the parent's bytes for every entry a walk
+/// lists; this asks for the whole length up front.
+fn child_path(dir: &Path, name: &OsStr) -> PathBuf {
+    let mut out = PathBuf::with_capacity(dir.as_os_str().len() + name.len() + 2);
+    out.push(dir);
+    out.push(name);
+    out
+}
+
 /// One directory to read. The rules are this directory's ancestors; the directory's own
 /// ignore files are pushed when the job runs, so a snapshot can be shared across threads.
 #[derive(Clone)]
@@ -474,7 +486,12 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, ids: &Ids) -> Job
     out.stats.dirs_walked += 1;
     let rel = job.rel.as_str();
     for e in &ents {
-        let name = e.name.to_string_lossy();
+        // A name is usually valid UTF-8, and `to_str` says so with one validating scan;
+        // `to_string_lossy` would build its lossy iterator over every name either way.
+        let name = match e.name.to_str() {
+            Some(s) => Cow::Borrowed(s),
+            None => e.name.to_string_lossy(),
+        };
         let child_rel = join_rel(rel, &name);
         let is_dir = e.is_dir() && !e.is_reparse();
         // A reparse point or symlink is followed only when asked: `--follow` reads the
@@ -508,14 +525,26 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, ids: &Ids) -> Job
             continue;
         }
         if is_dir {
-            let child = job.dir.join(&e.name);
-            if o.one_filesystem && enumerate::dev_of(&child).is_ok_and(|dev| dev != job.dev) {
+            let descend = o.max_depth.is_none_or(|m| job.depth + 1 < m);
+            let mut child = (want_dirs || descend || o.one_filesystem)
+                .then(|| child_path(&job.dir, &e.name));
+            if o.one_filesystem
+                && child
+                    .as_deref()
+                    .is_some_and(|c| enumerate::dev_of(c).is_ok_and(|dev| dev != job.dev))
+            {
                 continue;
             }
             if want_dirs {
                 out.cands.push(Found {
                     cand: Candidate {
-                        path: child.clone(),
+                        // A directory that is also descended into needs two owners; one that
+                        // is only listed takes the single copy the walk already has.
+                        path: match &child {
+                            Some(c) if descend => c.clone(),
+                            Some(_) => child.take().unwrap_or_default(),
+                            None => child_path(&job.dir, &e.name),
+                        },
                         rel: child_rel.clone(),
                         size: 0,
                         modified: None,
@@ -525,7 +554,8 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, ids: &Ids) -> Job
                     kind: Kind::Dir,
                 });
             }
-            if o.max_depth.is_none_or(|m| job.depth + 1 < m) {
+            if descend {
+                let child = child.unwrap_or_else(|| child_path(&job.dir, &e.name));
                 let mut chain = job.chain.clone();
                 if o.follow {
                     // A link can point back up the tree: walk each real directory once.
@@ -583,7 +613,7 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, ids: &Ids) -> Job
             }
             out.cands.push(Found {
                 cand: Candidate {
-                    path: job.dir.join(&e.name),
+                    path: child_path(&job.dir, &e.name),
                     rel: child_rel,
                     size,
                     modified,
