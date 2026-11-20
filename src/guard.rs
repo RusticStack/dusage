@@ -13,6 +13,8 @@
 use std::fs;
 #[cfg(windows)]
 use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::path::{Component, Path, PathBuf};
 
 /// A normalised path: lowercase root key plus resolved lowercase components.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +276,93 @@ pub const PROTECTED_SUMMARY: &str =
     "the filesystem root, /etc, /usr, /bin, /sbin, /lib*, /boot, /proc, /sys, /dev, /run, \
      /var, /opt, /srv, /root, /home, $HOME and their ancestors";
 
+#[cfg(target_os = "macos")]
+pub use macos::is_protected_root;
+
+/// What `is_protected_root` refuses, for the message a tool prints on refusal.
+///
+/// `/private` is refused as a whole subtree, which also covers `/private/tmp` and
+/// `/private/var/tmp`: over-refusing the natural scratch space is the right bias for a
+/// delete path, and no flag opens the guard.
+#[cfg(target_os = "macos")]
+pub const PROTECTED_SUMMARY: &str =
+    "the filesystem root, /System, /Library, /usr, /bin, /sbin, /etc, /private, \
+     /Applications, /cores, /dev, /Users, $HOME, /opt and every mounted volume root";
+
+/// Protection for destructive tools on macOS.
+///
+/// The shape is the Linux one: lexical normalisation, then canonicalisation when the
+/// path exists so a symlink spelling of a protected directory is caught, then a
+/// comparison against two sets. Anything that cannot be normalised is treated as
+/// protected.
+///
+/// On macOS that second layer is doing real work rather than closing an edge case: the
+/// root directory is a read-only volume, and `/etc`, `/tmp`, `/bin`, `/sbin` and `/var`
+/// are symlinks into `/private`, so the path a user types usually differs from the tree
+/// it names.
+///
+/// Mount points are not special-cased on the way down: a prune never descends into one,
+/// so only a root the user typed explicitly can be a mount. The volume roots themselves
+/// are refused as data directories.
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::lexical;
+
+    /// Immutable system trees: nothing below these is ever scratch space, so the whole
+    /// subtree is refused (`/usr/local/bin`, `/private/var/db`).
+    fn system_trees() -> Vec<PathBuf> {
+        [
+            "/System",
+            "/Library",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/etc",
+            "/private",
+            "/Applications",
+            "/cores",
+            "/dev",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect()
+    }
+
+    /// Directories that hold user or service data: the directory itself and anything
+    /// above it are refused, but their children (`$HOME/scratch`, `/opt/app/cache`) stay
+    /// prunable.
+    fn data_dirs() -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = ["/Users", "/opt"].iter().map(PathBuf::from).collect();
+        if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            if let Some(p) = lexical(Path::new(&h)) {
+                v.push(p);
+            }
+        }
+        v
+    }
+
+    pub fn is_protected_root(p: &Path) -> bool {
+        if p.to_string_lossy().trim().is_empty() {
+            return true;
+        }
+        let Some(abs) = lexical(p) else {
+            return true;
+        };
+        if abs == Path::new("/") {
+            return true;
+        }
+        let real = fs::canonicalize(p)
+            .ok()
+            .and_then(|c| lexical(&c))
+            .unwrap_or(abs);
+        system_trees().iter().any(|s| real.starts_with(s))
+            || data_dirs().iter().any(|s| s.starts_with(&real))
+    }
+}
+
 /// Protection for destructive tools on Linux.
 ///
 /// A path is protected when, after lexical normalisation (and canonicalisation when it
@@ -284,27 +373,33 @@ pub const PROTECTED_SUMMARY: &str =
 ///
 /// Mount points are not special-cased here: the tool refuses to descend into one while
 /// deleting, so only a root the user typed explicitly can be a mount.
+/// Absolute, no `.`/`..`, no trailing separator, resolved without touching the disk.
+///
+/// Shared by the Linux and macOS guards: both treat a path they cannot normalise as
+/// protected, and both then compare it against a set of absolute roots.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn lexical(p: &Path) -> Option<PathBuf> {
+    let abs = std::path::absolute(p).ok()?;
+    let mut out = PathBuf::from("/");
+    for c in abs.components() {
+        match c {
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(s) => out.push(s),
+            Component::Prefix(_) => return None,
+        }
+    }
+    Some(out)
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fs;
-    use std::path::{Component, Path, PathBuf};
+    use std::path::{Path, PathBuf};
 
-    /// Absolute, no `.`/`..`, no trailing separator, resolved without touching the disk.
-    fn lexical(p: &Path) -> Option<PathBuf> {
-        let abs = std::path::absolute(p).ok()?;
-        let mut out = PathBuf::from("/");
-        for c in abs.components() {
-            match c {
-                Component::RootDir | Component::CurDir => {}
-                Component::ParentDir => {
-                    out.pop();
-                }
-                Component::Normal(s) => out.push(s),
-                Component::Prefix(_) => return None,
-            }
-        }
-        Some(out)
-    }
+    use super::lexical;
 
     /// Immutable system trees: nothing below these is ever scratch space, so the whole
     /// subtree is refused (`/usr/bin`, `/etc/nginx`), like `C:\Windows` on Windows.

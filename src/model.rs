@@ -169,8 +169,8 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     /// Classify an I/O error. Raw OS codes are read per platform (Win32 error codes
-    /// on Windows, errno on Linux); the `ErrorKind` fallback keeps the mapping sane
-    /// for errors built from `io::Error::other`.
+    /// on Windows, errno on Linux and macOS); the `ErrorKind` fallback keeps the mapping
+    /// sane for errors built from `io::Error::other`.
     pub fn of(e: &io::Error) -> Self {
         if let Some(raw) = e.raw_os_error() {
             if let Some(k) = Self::from_raw(raw) {
@@ -203,6 +203,21 @@ impl ErrorKind {
             26 => Some(Self::SharingViolation),
             2 | 20 => Some(Self::NotFound),
             39 => Some(Self::DirNotEmpty),
+            _ => None,
+        }
+    }
+
+    /// macOS sets no per-file errno we need beyond what `std` already maps, so the
+    /// classification goes through `ErrorKind` and never through a BSD number written
+    /// out here. `ETXTBSY` is the one error the mapping adds: it is the "busy" a running
+    /// binary answers with, the macOS analogue of a sharing violation.
+    #[cfg(target_os = "macos")]
+    fn from_raw(raw: i32) -> Option<Self> {
+        match io::Error::from_raw_os_error(raw).kind() {
+            io::ErrorKind::PermissionDenied => Some(Self::AccessDenied),
+            io::ErrorKind::ExecutableFileBusy => Some(Self::SharingViolation),
+            io::ErrorKind::NotFound => Some(Self::NotFound),
+            io::ErrorKind::DirectoryNotEmpty => Some(Self::DirNotEmpty),
             _ => None,
         }
     }
@@ -334,6 +349,15 @@ mod tests {
     const WIN_DIR_NOT_EMPTY: i32 = 145;
     #[cfg(windows)]
     const WIN_PATH_NOT_FOUND: i32 = 3;
+
+    #[cfg(target_os = "macos")]
+    const WIN_ACCESS_DENIED: i32 = 13;
+    #[cfg(target_os = "macos")]
+    const WIN_SHARING_VIOLATION: i32 = 26;
+    #[cfg(target_os = "macos")]
+    const WIN_DIR_NOT_EMPTY: i32 = 66;
+    #[cfg(target_os = "macos")]
+    const WIN_PATH_NOT_FOUND: i32 = 2;
 
     #[cfg(target_os = "linux")]
     const WIN_ACCESS_DENIED: i32 = 13;

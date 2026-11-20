@@ -50,14 +50,14 @@ fn make_old(p: &Path) {
         o.access_mode(0x100).custom_flags(0x0200_0000);
         o.open(p).unwrap().set_modified(t).unwrap();
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         // Opening a directory read-only is enough to set its times when we own it.
         fs::File::open(p).unwrap().set_modified(t).unwrap();
     }
 }
 
-/// A directory link: a junction on Windows, a symlink on Linux.
+/// A directory link: a junction on Windows, a symlink on Linux and macOS.
 fn link_dir(link: &Path, target: &Path) {
     #[cfg(windows)]
     {
@@ -69,7 +69,7 @@ fn link_dir(link: &Path, target: &Path) {
             .unwrap();
         assert!(o.status.success(), "mklink failed");
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link).unwrap();
     }
@@ -207,11 +207,11 @@ fn bad_args_exit_2() {
 fn protected_roots_refused() {
     #[cfg(windows)]
     let mut roots = vec!["C:\\".to_string()];
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut roots = vec!["/".to_string()];
     #[cfg(windows)]
     roots.extend(std::env::var("USERPROFILE"));
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     roots.extend(std::env::var("HOME").ok());
     for r in &roots {
         // The prefix matches nothing, so even a guard bug could not delete real data.
@@ -302,7 +302,7 @@ fn reparse_root_refused() {
     cleanup(&base);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn symlink_to_protected_dir_refused() {
     let base = fixture("lnkprot");

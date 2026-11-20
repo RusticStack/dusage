@@ -873,9 +873,10 @@ fn excludes_of(a: &Args) -> Result<Vec<Glob>, Fail> {
 }
 
 /// Allocated bytes of one path, from metadata that is already in hand: `st_blocks * 512` on
-/// Linux. Windows' `std` metadata carries the EndOfFile size and not AllocationSize (only the
-/// batched directory query has that), so a start point's own blocks are `None` there.
-#[cfg(target_os = "linux")]
+/// Linux and macOS. Windows' `std` metadata carries the EndOfFile size and not AllocationSize
+/// (only the batched directory query has that), so a start point's own blocks are `None`
+/// there.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn path_alloc(md: &fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     Some(md.blocks() * 512)
