@@ -1410,6 +1410,18 @@ impl ExprWalk<'_> {
         let mindepth = settings.mindepth.unwrap_or(0) as usize;
         let depth_first = settings.depth_first;
         let dir_hit = rules.builtin_under(rel);
+        // The two strings every entry needs, extended in place rather than allocated: the
+        // walk was spending two `malloc`s and their frees per entry on the relative name and
+        // the absolute path it joins to the directory it just read.
+        let dir_text = path_text(dir);
+        let mut abs = String::with_capacity(dir_text.len() + 64);
+        abs.push_str(&dir_text);
+        let abs_sep = !dir_text.ends_with(std::path::MAIN_SEPARATOR);
+        let abs_base = abs.len();
+        let mut rel_buf = String::with_capacity(rel.len() + 64);
+        rel_buf.push_str(rel);
+        let rel_sep = !rel.is_empty();
+        let rel_base = rel_buf.len();
         for e in &ents {
             if self.stop {
                 break;
@@ -1418,13 +1430,23 @@ impl ExprWalk<'_> {
                 continue;
             }
             let name = name_text(&e.name);
-            let child_rel = join_rel(rel, &name);
-            let child = dir.join(&e.name);
+            rel_buf.truncate(rel_base);
+            if rel_sep {
+                rel_buf.push('/');
+            }
+            rel_buf.push_str(&name);
+            abs.truncate(abs_base);
+            if abs_sep {
+                abs.push(std::path::MAIN_SEPARATOR);
+            }
+            abs.push_str(&name);
+            let child_rel = rel_buf.as_str();
+            let child = Path::new(&abs);
             // A symlink is an entry of its own, as it is for find; it is only ever walked
             // with `-follow`, and then as the directory it points at.
             let mut is_dir = e.is_dir() && !e.is_reparse();
             if e.is_reparse() && self.follow() {
-                match enumerate::stat(&child) {
+                match enumerate::stat(child) {
                     Ok(st) => is_dir = st.kind == Kind::Dir,
                     Err(err) => {
                         self.out.stats.errors.record(&err);
@@ -1432,11 +1454,11 @@ impl ExprWalk<'_> {
                     }
                 }
             }
-            if !allow(&rules, self.o, &child_rel, &name, is_dir, dir_hit) {
+            if !allow(&rules, self.o, child_rel, &name, is_dir, dir_hit) {
                 self.out.stats.entries_ignored += 1;
                 continue;
             }
-            let mut facts = match Facts::of_entry(&child, e, self.needs) {
+            let mut facts = match Facts::of_entry(child, e, self.needs) {
                 Ok(f) => f,
                 Err(err) => {
                     self.out.stats.errors.record(&err);
@@ -1444,7 +1466,7 @@ impl ExprWalk<'_> {
                 }
             };
             if self.follow() && facts.st.kind == Kind::Symlink {
-                facts = facts.followed(&child);
+                facts = facts.followed(child);
             }
             // `-maxdepth` bounds what is walked as well as what is reported: the entry at
             // the limit is still evaluated, but its directory is never read.
@@ -1456,13 +1478,13 @@ impl ExprWalk<'_> {
             }
             // `-depth` reports a directory after its contents, so the descent comes first.
             if descend && depth_first {
-                self.descend(&child, &child_rel, depth, &rules, root_dev, chain)?;
+                self.descend(child, child_rel, depth, &rules, root_dev, chain)?;
             }
             if depth >= mindepth {
-                descend &= self.visit(&facts, &child_rel, depth)?;
+                descend &= self.visit(&facts, child_rel, depth)?;
             }
             if descend && !depth_first {
-                self.descend(&child, &child_rel, depth, &rules, root_dev, chain)?;
+                self.descend(child, child_rel, depth, &rules, root_dev, chain)?;
             }
         }
         Ok(())
