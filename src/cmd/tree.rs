@@ -242,7 +242,7 @@ impl<'a> Tree<'a> {
             } else {
                 format!("{rel}/{text}")
             };
-            if !allow(&self.rules, self.o, &child_rel, &text, e.is_dir, dir_hit) {
+            if !allow(&self.rules, self.o, &child_rel, &text, e.is_dir(), dir_hit) {
                 continue;
             }
             if e.is_reparse() {
@@ -274,7 +274,7 @@ impl<'a> Tree<'a> {
                 continue;
             }
             let path = dir.join(&e.name);
-            let is_dir = e.is_dir;
+            let is_dir = e.is_dir();
             let (own_disk, own_apparent) = own_sizes(&e, self.plain);
             let name = self.intern(&text);
             if is_dir {
@@ -479,7 +479,7 @@ fn allow(
 fn own_sizes(e: &Entry, plain: bool) -> (u64, u64) {
     let disk = if allocs_known(plain) { e.alloc } else { e.size };
     // A directory contributes no apparent bytes of its own: GNU's rule for `-b`.
-    let apparent = if e.is_dir { 0 } else { e.size };
+    let apparent = if e.is_dir() { 0 } else { e.size };
     (disk, apparent)
 }
 
