@@ -369,10 +369,12 @@ plus `bash bench/summary.sh` — warm and cold passes, peak RSS per row, `scan` 
 `-z` cases, `find` against `find -name`, `du` against GNU `du`, and the thread sweep that
 justifies the 4..16 default. `bash scripts/perf-guard.sh` is the 25% regression check.
 
-As of the commit those tables were last generated at (`main`@`547f955`, 2 vCPUs, warm cache):
-every literal search case is within a few percent of ripgrep or ahead of it, a general regex
-is about 1.4× ripgrep, `-o` about 2.4× its reference, `-z` ahead, `find`'s glob form about
-1.6× `find -name`, and both `du` rows ahead of GNU `du` with byte-identical totals. Delete
+As of the commit those tables were last generated at (`main`@`323bf88`, 2 vCPUs, warm cache):
+every content case is ahead of its reference — a general regex at 0.90× ripgrep, `-o` at
+0.84× `grep -rIo`, `-z` at 0.25×, the frequent literal at 0.76× `grep -rI` — with the one
+exception of `-U` under Unicode semantics at 1.15×. `find`'s glob form is 0.71×
+`find -name`, its expression form 0.99×, and both `du` rows are ahead of GNU `du` with
+byte-identical totals. Delete
 timings are not in that suite: the only recorded figure is the 0.4.0 container measurement,
 50,301 entries in **0.36 s** against 0.60 s for `rm -rf` on the same tree.
 

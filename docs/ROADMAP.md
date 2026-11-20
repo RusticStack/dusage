@@ -321,47 +321,47 @@ output. Read the case ids there — `search-rare`, `search-common`, `search-ci`,
 `search-multiline`, `search-gzip`, `search-files-with-matches`, `find-name`,
 `find-path`, `find-type`, `find-expr`, `du-s`, `du`, `threads-scan-*`,
 `threads-search-*` — rather than a table copied here, because a copy goes stale
-at the next merge. At the commit the tables were last generated at (7bcb7a9,
+at the next merge. At the commit the tables were last generated at (323bf88,
 2 vCPUs, warm cache) every content row is ahead: the output-heavy ones at
-`search-count` 0.73x, `search-files-with-matches` 0.68x,
-`search-only-matching` 0.75x, `search-multiline` 0.86x and `search-common`
-0.89x, the plain ones at `search-rare` 0.85x, `search-regex` 0.91x,
-`search-regex-nomatch` 0.91x and `search-ci` 0.91x (they were 1.02–1.10x on the
-previous pass, and callgrind counts the literal scan 25-28% cheaper and the regex
-candidate scan 29% cheaper rather than that being drift alone). Also
-`search-multiline-unicode` 1.09x, `search-gzip` 0.24x, `find-name` 0.79x,
-`find-path` 1.01x, `find-type` 1.13x, `find-expr` 1.12x, and both `du` rows ahead
-of GNU `du` at 0.55–0.56x with identical totals.
+`search-count` 0.69x, `search-files-with-matches` 0.69x,
+`search-only-matching` 0.84x, `search-multiline` 0.88x and `search-common`
+0.76x, the plain ones at `search-rare` 0.94x, `search-regex` 0.90x,
+`search-regex-nomatch` 0.94x and `search-ci` 0.91x (they were 1.02–1.10x two
+rounds ago, and callgrind counts the literal scan 25-28% cheaper and the regex
+candidate scan 29% cheaper rather than that being drift alone). `find` meets its
+reference on every row but one — `find-name` 0.71x, `find-path` 0.98x,
+`find-expr` 0.99x, `find-type` 1.03x — and both `du` rows are ahead of GNU `du`
+at 0.58–0.60x with identical totals. The content row still behind is
+`search-multiline-unicode` at 1.15x.
 
 **Known limits, each an open item.**
 
-- **Half of content search is now kernel time.** Over `/usr/local/go` a run
-  spends roughly 60 ms in user space against 180 ms in the kernel, so the
-  instruction-level work of the last two rounds has run out of room: the plain
-  rows sit at 0.85–0.91x of their reference and further gains there have to
-  remove per-file syscalls (an open, a read per 64 KiB block, a close, plus the
-  walk's `statx` per entry) rather than instructions. The find walks are
-  `getdents`-bound for the same reason.
-- **Peak RSS is bounded, and still above the references.** 10-17 MiB on the
-  content rows against both `grep`'s 5 and `ripgrep`'s 9, 15 MiB on `find-name`
-  against find's 5, and 21 MiB on `du` against 4. It no longer scales with the
-  tree, because results stream with a 4 MiB printer window and a
+- **Peak RSS is bounded, and still above the references.** 8-17 MiB on the
+  content rows against both `grep`'s 5 and `ripgrep`'s 9–10, 15 MiB on
+  `find-name` against find's 5, and 19–20 MiB on `du` against 4. It no longer
+  scales with the tree, because results stream with a 4 MiB printer window and a
   `threads × 1024`-file path window. The floor above the references is the
   pipeline itself — a read buffer and a queue per worker — so closing it means
   giving up the threads that make the other rows ahead.
-- **`find`'s small-tree rows are behind** (`find-path` 1.01x, `find-type` 1.13x,
-  `find-expr` 1.12x), where the cost is keeping the sorted output order that GNU
-  find never has to produce, on a job of some 40 ms where startup is a visible
-  share. The big-tree row (`find-name` 0.79x) is ahead.
+- **Half of content search is kernel time.** Over `/usr/local/go` a run spends
+  roughly 60 ms in user space against 180 ms in the kernel, so the
+  instruction-level work of the last rounds has run out of room: the plain rows
+  sit at 0.90–0.94x of their reference and further gains there have to remove
+  per-file syscalls (an open, a read per 64 KiB block, a close, plus the walk's
+  `statx` per entry) rather than instructions. The find walks are `getdents`-bound
+  for the same reason.
+- **`find`'s small-tree rows are level, not comfortably ahead** (`find-path`
+  0.98x, `find-expr` 0.99x, `find-type` 1.03x), where the cost is keeping the
+  sorted output order that GNU find never has to produce, on a job of some 40 ms
+  where startup is a visible share. The big-tree row (`find-name` 0.71x) is
+  comfortably ahead.
 - **The expression walk is sequential**, because `-prune` and `-depth` decide the
   next step from the entry just seen: `search::walk_expr` cannot use the worker
   pool. Parallelising it needs a per-directory evaluator that can defer `-prune`
   decisions, not a thread-pool change. `find-expr` in `bench/cases.sh` is its
-  row, at 1.12x.
-- **Three deviations from find's output survive** and are documented in
-  `docs/SEARCH.md` §1.4: per-directory sorted order instead of readdir order,
-  `-ls`'s date column, and an expression holding both `-exec` and `-execdir`
-  running both the `-exec` way.
+  row; the round that took it to 0.99x cut its instructions 38% and moved its
+  clock not at all, which is the measurement that says its remaining cost is
+  syscalls.
 - **`--no-unicode` has no equivalent.** The engine picks the byte path per line
   and the character path for everything else; there is no switch that forces
   byte semantics on a non-ASCII line, and `--glob-case-insensitive`,

@@ -239,8 +239,9 @@ Three deviations from GNU find survive, and one cost.
 - **The expression walk is sequential; the glob form is not.** `walk_expr`
   cannot use the worker pool, because `-prune` and `-depth` decide the next step
   from the entry just seen, so an expression pays find's own shape: one
-  `DirReader` at a time. `find-expr` in `docs/BENCHMARKS.md` is its row — 1.12x
-  against `find -name` on the 15k-file tree. The glob form is parallel and streams its listing in sorted order
+  `DirReader` at a time. `find-expr` in `docs/BENCHMARKS.md` is its row — 0.99x
+  against `find -name` on the 15k-file tree, reached by cutting its instructions
+  38% and not by its clock, which is syscall bound. The glob form is parallel and streams its listing in sorted order
   from a heap over open directory cursors, with a bounded read-ahead pool;
   `find-name`, `find-path` and `find-type` are its rows, and its peak memory no
   longer depends on how many paths match. Re-measure before quoting a ratio.
@@ -710,34 +711,38 @@ by `bench/run.sh`, so a ratio there is only as current as the commit named in it
 header. Nothing in this document restates one as if it were stable. What is worth
 carrying here is the direction of each gap and the case that measures it:
 
-- **The content rows are ahead**, and by more than they were: `search-count`
-  0.73x, `search-files-with-matches` 0.68x, `search-only-matching` 0.75x,
-  `search-multiline` 0.86x and `search-common` 0.89x against `grep` and `rg -U`,
+- **The content rows are ahead**: `search-count` 0.69x,
+  `search-files-with-matches` 0.69x, `search-only-matching` 0.84x,
+  `search-multiline` 0.88x and `search-common` 0.76x against `grep` and `rg -U`,
   because results stream as the walk reaches them and a hit no longer owns a copy
   of its line.
-- **The plain content rows are ahead on the current pass** — `search-rare` 0.85x,
-  `search-regex` 0.91x, `search-regex-nomatch` 0.91x, `search-ci` 0.91x — where
+- **The plain content rows are ahead too** — `search-rare` 0.94x,
+  `search-regex` 0.90x, `search-regex-nomatch` 0.94x, `search-ci` 0.91x — where
   the previous pass had them at 1.02–1.10x. Two measurable changes did it: the
   literal scan got 25-28% cheaper in instructions and the regex candidate scan
   (`Regex::candidate_find`, which walks the line a required run sits on rather
   than the whole haystack) 29%, both counted by callgrind rather than inferred
-  from a timing that drifts. What remains is one automaton entry per candidate
-  line, and half the wall clock is the kernel: about 60 ms user against 180 ms
-  system over `/usr/local/go`, so the next gain there has to remove syscalls.
-- **`-U` with Unicode semantics is 1.09x** (`search-multiline-unicode`), down
-  from 2.51x, because a pattern with an ASCII mandatory literal settles its
-  matches from the line holding each occurrence instead of decoding whole files.
-- **`find` is ahead on the big tree** (`find-name` 0.79x) and still behind on the
-  small ones (`find-path` 1.01x, `find-type` 1.13x, `find-expr` 1.12x), where the
-  cost is keeping the sorted order at all — which GNU find does not pay — on a job
-  of some 40 ms. The expression row is the sequential walk of §1.4.
-- **`du` is ahead of GNU du** on the same tree (`du-s` 0.56x, `du` 0.55x), and the
+  from a timing that drifts. Half the wall clock is now the kernel: about 60 ms
+  user against 180 ms system over `/usr/local/go`, so the next gain there has to
+  remove syscalls.
+- **`-U`'s ASCII path is what makes `search-multiline` 0.88x**; the Unicode side
+  of the same flag (`search-multiline-unicode`) is the one content row still
+  behind, at 1.15x, because it decodes the lines that hold non-ASCII bytes. It was
+  2.51x two rounds ago.
+- **`find` meets its reference on every row**: `find-name` 0.71x,
+  `find-path` 0.98x, `find-expr` 0.99x, with `find-type` 1.03x a hair behind. The
+  big row is the parallel glob walk; the small ones are the same walk on a 40 ms
+  job, where keeping the sorted order GNU find never produces is most of the gap.
+  The expression row is the sequential walk of §1.4, which reached the reference
+  by instruction work (−38%, 67.4M to 41.7M) and shows no wall-clock change for
+  it, since that walk is `getdents` and `statx` bound.
+- **`du` is ahead of GNU du** on the same tree (`du-s` 0.60x, `du` 0.58x), and the
   totals are byte-identical, which is what §6's du paragraph rests on.
 - **Peak RSS is bounded and flat in the tree size, and still above the
-  references** on the content rows (10-17 MiB against `grep`'s 5 and `ripgrep`'s
-  9), on `find` (15 against 5) and on `du` (21 against 4, where GNU du gets its
-  footprint by walking serially). That is the pipeline's floor, not the result
-  count; see §5.
+  references** on the content rows (8-17 MiB against `grep`'s 5 and `ripgrep`'s
+  9–10), on `find` (15 against 5) and on `du` (19–20 against 4, where GNU du gets
+  its footprint by walking serially). That is the pipeline's floor, not the
+  result count; see §5.
 
 To re-measure any of the above on your own machine:
 
@@ -779,21 +784,22 @@ with time keys, `--type-add`/`--type-clear`/`--type-list`, `--vimgrep`,
 `--trim`, the separator flags and `--follow` under its long name. The gaps that
 remain are listed in §1.3 and are narrow but real: `--no-unicode`,
 `--glob-case-insensitive`, the five-name `--encoding` set, terminal hyperlinks
-and diagnostics, and the `-L`/`-E`/`-I` letter collisions — plus speed: a
-general regex costs about 1.4x ripgrep's time in the last recorded run (warm
-`search-regex`, commit 547f955), so a regex-heavy interactive search still feels
-slower. Keep rg for UTF-32 or
-legacy-encoding trees and for patterns that need ripgrep's exact Unicode
-matching.
+and diagnostics, and the `-L`/`-E`/`-I` letter collisions — plus speed, though not much of it
+now: a general regex measured 0.90x ripgrep's time in the last recorded run
+(warm `search-regex`, commit 323bf88), and the one content row still behind is
+`-U` with Unicode semantics at 1.15x. Keep rg for UTF-32 or legacy-encoding
+trees, for patterns that need ripgrep's exact Unicode matching, and for the
+flags in §1.3.
 
 **`find -name`, and now `find`'s expressions.** A drop-in for most invocations:
 `dusage find . -name "*.rs" -o -type d`, `-printf`, `-prune`, `-size`, `-mtime`,
 `-perm`, `-newer`, `-maxdepth` and parentheses all run, and the comparisons above
 agree with findutils 4.9.0 on what they select. What differs is order (sorted per
 directory instead of readdir order), `-ls`'s date column, the sequential walk
-(about 1.7x find's clock over `/usr` at commit 547f955, §1.4), and the refusals: `-delete` in every
-spelling, `-exec`/`-execdir` without `--allow-exec`, symbolic `-perm`, `-ok`, and
-a `-regextype` that changes the dialect. The glob form is faster than the
+(0.99x `find -name`'s clock on the 15k-file tree at commit 323bf88, §1.4), and
+the refusals: `-delete` in every spelling, `-exec`/`-execdir` without
+`--allow-exec`, symbolic `-perm`, `-ok`, and a `-regextype` that changes the
+dialect. The glob form is faster than the
 expression walk and its globs cover `**`, anchored paths and `{a,b}` — reach for
 it when the query fits. Ours prints paths relative to the root, so
 `dusage find '*.rs' .` prints `src/main.rs` where `find . -name '*.rs'` prints
