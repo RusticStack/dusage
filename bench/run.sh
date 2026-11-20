@@ -78,22 +78,6 @@ mkdir -p "$WORK" || exit 2
 
 CPUS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)
 
-# --- reference tools that may be absent -----------------------------------
-
-# The tree and df cases name their own references; a box without them drops the pair
-# rather than timing a command that never ran. bench/cases.sh reads these two flags.
-TREE_OK=0
-command -v tree >/dev/null 2>&1 && tree --version >/dev/null 2>&1 && TREE_OK=1
-if [ "$TREE_OK" = 0 ]; then
-    echo "bench: tree is not installed, skipping the tree case" >&2
-fi
-
-DF_OK=0
-command -v df >/dev/null 2>&1 && df --version >/dev/null 2>&1 && DF_OK=1
-if [ "$DF_OK" = 0 ]; then
-    echo "bench: df is not installed, skipping the df case" >&2
-fi
-
 # --- the gzip tree the -z case needs ---------------------------------------
 
 ZIP_OK=0

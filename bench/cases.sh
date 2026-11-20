@@ -148,29 +148,6 @@ bench_row du du both primary "dusage du" "$BIN du '$S'" "$S"
 
 bench_row du du both reference "du" "du -k --apparent-size '$S'" "$S"
 
-# --- tree ------------------------------------------------------------------
-
-# `tree -s` is the fair reference: it stats every entry to print a size, which is the work
-# our two columns do. Plain `tree` prints no sizes, so it is a cheaper row kept beside it to
-# show what the sizes cost. Both dump to /dev/null; only the clock is measured.
-if [ "${TREE_OK:-0}" = 1 ]; then
-    bench_row tree tree both primary "dusage tree" "$BIN tree --json '$S' > /dev/null" "$S"
-
-    bench_row tree tree both reference "tree -s" "tree -s --noreport '$S' > /dev/null" "$S"
-
-    bench_row tree tree both reference "tree" "tree --noreport '$S' > /dev/null" "$S"
-fi
-
-# --- df --------------------------------------------------------------------
-
-# Both are a syscall per filesystem; the row exists so a regression in the mount-table parse
-# or in the per-row statvfs shows up as a number rather than as a guess.
-if [ "${DF_OK:-0}" = 1 ]; then
-    bench_row df df warm primary "dusage df" "$BIN df > /dev/null" -
-
-    bench_row df df warm reference "df" "df > /dev/null" -
-fi
-
 # --- thread sweep ----------------------------------------------------------
 
 bench_row threads-scan-1 threads-scan warm primary "dusage scan 1 thread" "$BIN scan '$S' --top 1 --threads 1" -
