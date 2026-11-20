@@ -321,61 +321,60 @@ output. Read the case ids there — `search-rare`, `search-common`, `search-ci`,
 `search-multiline`, `search-gzip`, `search-files-with-matches`, `find-name`,
 `find-path`, `find-type`, `du-s`, `du`, `threads-scan-*`, `threads-search-*` —
 rather than a table copied here, because a copy goes stale at the next merge.
-At the commit the tables were last generated at (547f955, 2 vCPUs, warm cache):
-every literal search case is within a few percent of `rg` or ahead of it, `-l` is
-level, `search-regex` is 1.42x `rg`, `search-only-matching` is 2.36x its
-reference, `search-multiline` 1.45x, `search-gzip` 0.54x (ahead),
-`find-name` 1.62x `find -name`, and both `du` rows are ahead of GNU `du` with
-identical totals. `docs/SEARCH.md` §1.4 carries the one measurement the suite has
-no case for: the find expression walk, 0.37–0.40 s at 6.8 MB against find's
-0.21–0.25 s at the same commit.
+At the commit the tables were last generated at (80c99af, 2 vCPUs, warm cache):
+the output-heavy content rows are all ahead — `search-common` 0.87x,
+`search-count` 0.73x, `search-files-with-matches` 0.74x,
+`search-only-matching` 0.88x, `search-multiline` 0.85x — the plain content rows
+sit within this box's noise (`search-rare` 1.07x, `search-regex` 1.10x,
+`search-regex-nomatch` 1.06x, `search-ci` 1.02x), `search-multiline-unicode` is
+1.12x, `search-gzip` 0.30x, `find-name` 0.83x, `find-path` 1.11x, `find-type`
+1.09x, and both `du` rows are ahead of GNU `du` at 0.52x with identical totals.
+`docs/SEARCH.md` §1.4 carries the one measurement the suite has no case for: the
+find expression walk.
 
 **Known limits, each an open item.**
 
-- **A general regex is still behind ripgrep** — 1.42x its time in the warm
-  `search-regex` row at commit 547f955, down from 3x two commits earlier, with
-  the exact figure living in `docs/BENCHMARKS.md` because it moves with each
-  prefilter change. The line-at-a-time path is not the reason any more; what is left is entering the automaton once per line, and a
-  bounded reverse walk was measured three times and lost. The fix is a reverse
-  automaton that answers "where does this match start" in one suffix pass over
-  the block — a new machine, not a tweak.
-- **`-o` is still behind**: the `search-only-matching` row measures it against
-  `grep -rIo` (and `rg -o` in the cold pass), and at commit 547f955 it was 2.36x
-  the reference's clock with the widest RSS gap in the search block. The two
-  costs are the per-line match loop and the rule that every hit is kept until the
-  whole report is printed.
-- **The expression walk is sequential and about 1.7x find's clock.**
-  `search::walk_expr` cannot use the worker pool, because `-prune` and `-depth`
-  decide the next step from the entry just seen: 0.37–0.40 s for
-  `find /usr -name '*.go'` against findutils' 0.21–0.25 s at commit 547f955, at
-  6.8 MB resident against 4.8 MB. It buys bounded memory for the clock;
-  parallelising it needs a per-directory evaluator that can defer `-prune`
+- **The plain content rows are at parity, not ahead.** `search-rare` 1.07x,
+  `search-regex` 1.10x, `search-regex-nomatch` 1.06x and `search-ci` 1.02x at
+  commit 80c99af, where this box's own reference rows drift 10-20% between
+  passes; `scripts/perf-guard.sh` is the paired measurement that settles them,
+  and on it dusage is level with `rg`. Two things closed the gap that used to be
+  1.42x: the candidate scan (`Regex::candidate_find`), which walks the line a
+  required run sits on rather than the whole haystack, and the removal of an
+  `fstat` and a zero-length read per file. What is left is one automaton entry
+  per candidate line and the literal verify's `memcmp` call.
+- **Peak RSS is bounded, and still above the references.** 9-17 MiB on the
+  content rows against grep's 5, and 18 MiB on `find-name` against find's 5. It
+  no longer scales with the tree, because results stream with a 4 MiB printer
+  window and a `threads × 1024`-file path window. The floor above the references
+  is the pipeline itself — a read buffer and a queue per worker — so closing it
+  means giving up the threads that make the other rows ahead.
+- **`find`'s small-tree rows are a little behind** (`find-path` 1.11x,
+  `find-type` 1.09x), where the cost is keeping the sorted output order that GNU
+  find never has to produce. The big-tree row (`find-name` 0.83x) is ahead.
+- **The expression walk is sequential**, because `-prune` and `-depth` decide the
+  next step from the entry just seen: `search::walk_expr` cannot use the worker
+  pool. Parallelising it needs a per-directory evaluator that can defer `-prune`
   decisions, not a thread-pool change. There is no case for it in
-  `bench/cases.sh` yet, so that figure is a one-off measurement.
+  `bench/cases.sh`, so it is a one-off measurement in `docs/SEARCH.md` §1.4.
 - **Three deviations from find's output survive** and are documented in
   `docs/SEARCH.md` §1.4: per-directory sorted order instead of readdir order,
   `-ls`'s date column, and an expression holding both `-exec` and `-execdir`
   running both the `-exec` way.
-- **The glob walk's memory.** 351 ms against find's 323 ms on `/usr` is parity,
-  but `find '*'` costs 68 MB against find(1)'s 4.8 MB, because the output *is*
-  the sorted candidate list. Sorting at the end from a stream is the change that
-  would close it; the expression form already streams and pays for it in clock.
 - **`--no-unicode` has no equivalent.** The engine picks the byte path per line
   and the character path for everything else; there is no switch that forces
   byte semantics on a non-ASCII line, and `--glob-case-insensitive`,
   `--hyperlink-format`, `--debug`/`--trace` and ripgrep's full `--encoding`
   label set are all absent. `docs/SEARCH.md` §1.3 lists them with the letter
   collisions (`-L`, `-E`, `-I`).
-- **No mmap.** Files are read in 64 KiB blocks into a buffer each worker reuses;
-  mapping was measured slower on `/usr` (6.4–7.5 s against 3.7–4.8 s) and the
-  two are within noise on a cached tree.
-- **Three defects in the flag plumbing, each documented in the appendix of
-  `docs/SEARCH.md` and each a code fix rather than a docs fix.** `find --help`
-  lists nine flags the parser rejects (`--include`, `--exclude`, `--exclude-dir`,
-  `--pre`, `--pre-glob`, `--binary-files`, `-I`, `-d`, `--iglob`); bundled short
-  flags do not bundle (`-in` applies `-i` only); and `-F` with a single `-e`/`-f`
-  pattern escapes the pattern and then matches it as a literal, so
-  `-F -e 'a.b'` finds nothing.
+- **No mmap.** Files are read in blocks into a buffer each worker reuses; mapping
+  was measured slower on `/usr` (6.4–7.5 s against 3.7–4.8 s), and the profile of
+  the parity rows names no page faults, so ripgrep's advantage there is not
+  mapping but asking the kernel fewer questions per file.
+- **`find --help` still lists five flags the parser rejects** (`--pre`,
+  `--pre-glob`, `--binary-files`, `-I`, `-d`), documented in the appendix of
+  `docs/SEARCH.md`. The other four it once carried (`--include`, `--exclude`,
+  `--exclude-dir`, `--iglob`) are now walk filters `find` honours.
 
 **Open questions worth measuring later.**
 

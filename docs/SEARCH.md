@@ -236,15 +236,15 @@ Three deviations from GNU find survive, and one cost.
   way: `findexpr::ExecRequest` carries the command and the terminator, not which
   predicate asked for it. `-execdir` alone behaves as find's does (measured: the
   same per-directory batches, different order).
-- **The walk is sequential.** Benchmarks do not have a case for the expression
-  form, so this is a one-off measurement rather than a table row: on this 2-vCPU
-  box at commit 547f955, `find /usr -name '*.go'` took 0.37–0.40 s at 6.8 MB
-  resident against findutils 4.9.0's 0.21–0.25 s at 4.8 MB, while the glob form
-  (`dusage find '*.go' /usr`) took 0.29–0.37 s but held 69 MB, because its output
-  is the sorted candidate list (`find-name` in `docs/BENCHMARKS.md` is that row).
-  The expression form streams and pays about 1.7x find's clock for it; the glob
-  form pays memory instead. Use the glob form when the glob can express the
-  query, and re-measure both before quoting a ratio.
+- **The expression walk is sequential; the glob form is not.** `walk_expr`
+  cannot use the worker pool, because `-prune` and `-depth` decide the next step
+  from the entry just seen, so an expression pays find's own shape: one
+  `DirReader` at a time. Benchmarks have no case for it, so that is a one-off
+  measurement rather than a table row. The glob form is parallel and streams its
+  listing in sorted order from a heap over open directory cursors, with a bounded
+  read-ahead pool; `find-name`, `find-path` and `find-type` in
+  `docs/BENCHMARKS.md` are its rows, and its peak memory no longer depends on how
+  many paths match. Re-measure before quoting a ratio.
 
 `-regextype` is accepted and validated against findutils' names but does not
 change the dialect (`-regex` always uses this crate's syntax), symbolic `-perm`
@@ -681,15 +681,19 @@ scans sequentially so it can stop early.
   carry buffer holds only the partial line that spans a read boundary. A line
   longer than 8 MiB (`CARRY_MAX`) is matched in pieces, so a `-w` boundary at
   such a split is not a real boundary.
-- **Every hit is copied and kept.** Peak memory therefore scales with total
-  output size, not with a fixed window: the RSS columns of the warm table in
-  `docs/BENCHMARKS.md` show the output-heavy search rows carrying the widest
-  dusage/reference gap, and `-c`, `-l`, `-L` and `-q` avoid it by discarding
-  line data.
-- **`find`'s glob form keeps every path.** Its output *is* the sorted candidate
-  list, which is why its RSS row is the widest in `docs/BENCHMARKS.md`. Sorting
-  at the end from a stream is the change that would close it; `search` no longer
-  has this shape, and the expression form streams instead.
+- **Nothing keeps the whole answer.** A content search prints each file's result
+  as the walk reaches it in sorted order, with the printer's pending output
+  capped at 4 MiB and the path window at `threads × 1024` files, and whole-line
+  hits share their file's buffer through an offset. Peak RSS is therefore
+  bounded and flat in the size of the tree, but bounded is not minimal: the
+  floor above grep's 5 MiB is the pipeline itself, one read buffer and one queue
+  per worker, which is what buys the parallel speed. `--sortr`, a time sort key,
+  `--json` and `-q` take the collected path, because a stream cannot reverse, a
+  time key must be read per result, and JSON closes with a count.
+- **`find`'s glob form streams too**, in the order `--sort path` produces, from
+  a heap over open directory cursors; its 18 MiB on `find-name` is the bounded
+  read-ahead pool rather than the result count. The expression form streams
+  directly in walk order.
 - **A repeated `-e` becomes one alternation.** The patterns are joined into a
   single regex, escaped first under `-F`, so five terms cost one walk instead of
   five — but a repeated `-e` also loses the literal fast path that a single
@@ -707,20 +711,27 @@ by `bench/run.sh`, so a ratio there is only as current as the commit named in it
 header. Nothing in this document restates one as if it were stable. What is worth
 carrying here is the direction of each gap and the case that measures it:
 
-- **Literals are at parity or ahead** in the warm pass (`search-rare`,
-  `search-common`, `search-ci`, `search-count`, `search-files-with-matches` in
-  the warm table).
-- **A general regex still loses**: at the commit the tables were last generated
-  at (547f955) the warm `search-regex` row is 1.42x ripgrep's time, which is
-  down from the 3x this gap was at two commits earlier. The paragraph in
-  `docs/BENCHMARKS.md` explains why, and the reverse automaton that would close
-  it is open work in `docs/ROADMAP.md`.
-- **`-o` and `-U` are the expensive output modes** (`search-only-matching`,
-  `search-multiline`), and their RSS columns are the widest in the search block.
-- **`find`'s glob form is about 1.6x find's wall clock** at the same commit
-  (`find-name`), and its RSS is the widest row in the table.
-- **`du` is ahead of GNU du** on the same tree (`du-s`, `du`), and the totals are
-  byte-identical, which is what §6's du paragraph rests on.
+- **The output-heavy rows are ahead**: `search-common` 0.87x, `search-count`
+  0.73x, `search-files-with-matches` 0.74x, `search-only-matching` 0.88x and
+  `search-multiline` 0.85x against `grep` and `rg -U`, because results stream as
+  the walk reaches them and a hit no longer owns a copy of its line.
+- **The plain content rows are at parity within this box's noise**:
+  `search-rare` 1.07x, `search-regex` 1.10x, `search-regex-nomatch` 1.06x,
+  `search-ci` 1.02x. What closed the 1.42x the regex row carried is the
+  candidate scan in `src/regex.rs`, which walks the line a required run sits on
+  instead of the whole haystack, plus the removal of an `fstat` and a
+  zero-length read per file.
+- **`-U` with Unicode semantics is 1.12x** (`search-multiline-unicode`), down
+  from 2.51x, because a pattern with an ASCII mandatory literal settles its
+  matches from the line holding each occurrence instead of decoding whole files.
+- **`find`'s glob form is ahead on the big tree** (`find-name` 0.83x) and a
+  little behind on the small ones (`find-path` 1.11x, `find-type` 1.09x), where
+  the cost is keeping the sorted order at all — which GNU find does not pay.
+- **`du` is ahead of GNU du** on the same tree (`du-s`, `du` at 0.52x), and the
+  totals are byte-identical, which is what §6's du paragraph rests on.
+- **Peak RSS is bounded and flat in the tree size, and still above the
+  references** on the content rows (9-17 MiB against grep's 5) and on `find`
+  (18 against 5). That is the pipeline's floor, not the result count; see §5.
 
 To re-measure any of the above on your own machine:
 

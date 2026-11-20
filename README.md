@@ -275,7 +275,8 @@ It supports `. * + ? {n,m}`, classes, groups, `|`, `^ $ \A \z \b \B`, `\d \w \s`
 On a line holding non-ASCII text it switches to a character view, so `\w+` matches `café`
 and `-i 'CAF[É]'` matches `café`. Lookaround and backreferences use a bounded backtracking
 engine instead (`-P` forces it, and the fallback is automatic), with a step budget that turns
-a pathological pattern into a non-match rather than a hang. Matching is line by line unless
+a pathological pattern into an error (exit 2, `pattern exceeded its step budget`) rather than a
+hang or a silent non-match. Matching is line by line unless
 `-U` asks for whole-file matching, where a pattern may span newlines. `-w` treats every byte
 of a non-ASCII character as a word byte, so `-w caf` does not match inside `café`.
 
@@ -296,8 +297,9 @@ modes, `-w`, `-v`, `-F`, `-P`, `-o`, `-r` with capture groups, `-c`, `--count-ma
 `-u/-uu/-uuu`, `--hidden`, the `--no-ignore-*` family and `--ignore-file`,
 `--max-depth`, `--max-filesize`, `--max-columns`, `--encoding`, `--sort`/`--sortr`,
 `--passthru`, `--follow`, `-U` with `--multiline-dotall`, `-z` over gzip, bzip2, lz4, xz,
-zstd and brotli, and `--pre` with `--pre-glob`. Write flags out one at a time: a bundle such
-as `-in` applies `-i` only.
+zstd and brotli, and `--pre` with `--pre-glob`. Short flags cluster, so `-in needle` is `-i -n`
+and `-inm5` is all three; a value flag still ends the bundle (`-m5in` takes `-m` with `5in`),
+and an unknown option inside a bundle is reported rather than dropped.
 
 What is still missing from ripgrep: `--no-unicode`, `--glob-case-insensitive`, its long list
 of `--encoding` labels, terminal hyperlinks and the `--debug`/`--trace` diagnostics. Three

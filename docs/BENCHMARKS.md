@@ -123,8 +123,8 @@ both peak-RSS columns and their ratio. It is POSIX `sh` plus `awk`.
 
 ## The commit these numbers describe
 
-The run behind this document was made from `main` at `547f955` (the merge of the
-search and find work plus the recalibration commits that precede it). Check that
+The run behind this document was made from `main` at `80c99af` (the merge of the
+streaming, candidate-scan and Unicode work that closes the search gaps). Check that
 commit against `git log --oneline -1 -- src/ bench/` before quoting a table: if
 the scanner or the walk has moved since, the numbers describe the old code and
 the suite should be re-run. The header the run wrote is its conditions record,
@@ -133,7 +133,7 @@ quoted as it stands:
 ```json
 {
   "schema": 1,
-  "generated": "2026-11-19T21:13:11Z",
+  "generated": "2026-11-20T04:09:35Z",
   "machine": {
     "uname": "Linux 6.1.158+ x86_64",
     "cpus": 2,
@@ -147,10 +147,10 @@ quoted as it stands:
   "rss_method": "gnu-time (/usr/bin/time -v, maxrss of the largest process in the command)",
   "cold_method": "fadvise (posix_fadvise DONTNEED per file: file data evicted exactly, dentries and inodes retained, so metadata-only cases stay effectively warm)",
   "trees": [
-    {"root": "/usr", "bytes": 8002168602, "files": 180525},
+    {"root": "/usr", "bytes": 7991131817, "files": 180497},
     {"root": "/usr/local/go", "bytes": 244137476, "files": 15657},
     {"root": "/workspace/dusage/target/bench/gzip-tree", "bytes": 3393342, "files": 1200}
-  ],
+  ]
 ```
 
 ## The measured tables
@@ -163,7 +163,7 @@ peak-RSS figures. Cases with no reference row are the thread sweeps and the
 dusage-only variants; their `ref` columns are empty by design.
 
 ```console
-Generated 2026-11-19T21:13:11Z on Linux 6.1.158+ x86_64, 2 CPUs. Warm rows are medians of 5 alternating
+Generated 2026-11-20T04:09:35Z on Linux 6.1.158+ x86_64, 2 CPUs. Warm rows are medians of 5 alternating
 runs; cold rows are medians of 3, each preceded by a cache drop. Times in
 milliseconds; RSS is peak resident set, in MiB, measured in a pass of its own.
 
@@ -173,36 +173,37 @@ RSS method: gnu-time (/usr/bin/time -v, maxrss of the largest process in the com
 
 | Case | dusage ms | reference | ref ms | dusage/ref | dusage RSS MiB | ref RSS MiB |
 | --- | --- | --- | --- | --- | --- | --- |
-| scan | 204.2 | `du -sb` | 350.8 | 0.58x | 7 | 4 |
-| scan-t1 | 380.0 | - |  | - | 5 | - |
-| search-rare | 64.5 | `rg` | 61.8 | 1.04x | 9 | 9 |
-| search-common | 118.8 | `rg` | 86.4 | 1.37x | 31 | 9 |
-| search-regex | 93.5 | `rg` | 66.0 | 1.42x | 9 | 9 |
-| search-regex-nomatch | 60.2 | `rg` | 63.5 | 0.95x | 10 | 9 |
-| search-ci | 65.0 | `rg` | 65.7 | 0.99x | 9 | 9 |
-| search-ci-fixed | 69.6 | - |  | - | 10 | - |
-| search-count | 89.2 | `rg -c` | 86.6 | 1.03x | 13 | 9 |
-| search-only-matching | 209.2 | `grep -rIo` | 88.6 | 2.36x | 31 | 5 |
-| search-multiline | 355.6 | `rg -U` | 244.5 | 1.45x | 72 | 59 |
-| search-files-with-matches | 81.2 | `grep -rIl` | 82.1 | 0.99x | 10 | 5 |
-| search-gzip | 174.7 | `rg -z` | 322.6 | 0.54x | 18 | 7 |
-| find-name | 326.8 | `find -name` | 201.5 | 1.62x | 68 | 5 |
-| find-path | 54.4 | `find -path` | 19.2 | 2.83x | 10 | 3 |
-| find-type | 35.0 | `find -name` | 18.3 | 1.91x | 8 | 3 |
-| du-s | 249.0 | `du -s` | 378.9 | 0.66x | 22 | 4 |
-| du | 270.9 | `du` | 395.0 | 0.69x | 21 | 4 |
-| threads-scan-1 | 387.7 | - |  | - | 5 | - |
-| threads-scan-2 | 197.2 | - |  | - | 7 | - |
-| threads-scan-4 | 200.3 | - |  | - | 8 | - |
-| threads-scan-8 | 225.8 | - |  | - | 9 | - |
-| threads-scan-16 | 210.4 | - |  | - | 11 | - |
-| threads-scan-default | 211.0 | - |  | - | 8 | - |
-| threads-search-1 | 178.1 | - |  | - | 28 | - |
-| threads-search-2 | 109.2 | - |  | - | 28 | - |
-| threads-search-4 | 135.7 | - |  | - | 31 | - |
-| threads-search-8 | 133.2 | - |  | - | 35 | - |
-| threads-search-16 | 130.1 | - |  | - | 44 | - |
-| threads-search-default | 121.5 | - |  | - | 31 | - |
+| scan | 279.2 | `du -sb` | 584.5 | 0.48x | 8 | 4 |
+| scan-t1 | 567.8 | - |  | - | 5 | - |
+| search-rare | 96.0 | `rg` | 90.0 | 1.07x | 10 | 9 |
+| search-common | 114.5 | `grep -rI` | 131.5 | 0.87x | 17 | 5 |
+| search-regex | 99.8 | `rg` | 90.5 | 1.10x | 11 | 9 |
+| search-regex-nomatch | 96.1 | `rg` | 90.9 | 1.06x | 10 | 9 |
+| search-ci | 96.5 | `rg` | 94.3 | 1.02x | 9 | 9 |
+| search-ci-fixed | 97.7 | - |  | - | 10 | - |
+| search-count | 97.1 | `grep -rIc` | 132.2 | 0.73x | 15 | 5 |
+| search-only-matching | 118.4 | `grep -rIo` | 134.7 | 0.88x | 17 | 5 |
+| search-multiline | 310.9 | `rg -U` | 366.0 | 0.85x | 46 | 59 |
+| search-multiline-unicode | 132.2 | `rg -U unicode` | 118.2 | 1.12x | 46 | 9 |
+| search-files-with-matches | 95.7 | `grep -rIl` | 130.0 | 0.74x | 12 | 5 |
+| search-gzip | 169.3 | `rg -z` | 562.8 | 0.30x | 19 | 7 |
+| find-name | 257.3 | `find -name` | 309.6 | 0.83x | 18 | 5 |
+| find-path | 40.5 | `find -path` | 36.5 | 1.11x | 7 | 3 |
+| find-type | 38.1 | `find -name` | 35.1 | 1.09x | 7 | 3 |
+| du-s | 313.6 | `du -s` | 601.7 | 0.52x | 21 | 4 |
+| du | 319.5 | `du` | 616.8 | 0.52x | 23 | 4 |
+| threads-scan-1 | 596.1 | - |  | - | 5 | - |
+| threads-scan-2 | 289.1 | - |  | - | 7 | - |
+| threads-scan-4 | 287.7 | - |  | - | 8 | - |
+| threads-scan-8 | 306.2 | - |  | - | 9 | - |
+| threads-scan-16 | 317.8 | - |  | - | 10 | - |
+| threads-scan-default | 289.4 | - |  | - | 8 | - |
+| threads-search-1 | 106.7 | - |  | - | 12 | - |
+| threads-search-2 | 103.6 | - |  | - | 12 | - |
+| threads-search-4 | 101.0 | - |  | - | 16 | - |
+| threads-search-8 | 105.7 | - |  | - | 20 | - |
+| threads-search-16 | 112.9 | - |  | - | 31 | - |
+| threads-search-default | 105.1 | - |  | - | 16 | - |
 
 Notes: warm pass, page cache untouched between runs
 
@@ -210,25 +211,25 @@ Notes: warm pass, page cache untouched between runs
 
 | Case | dusage ms | reference | ref ms | dusage/ref | dusage RSS MiB | ref RSS MiB |
 | --- | --- | --- | --- | --- | --- | --- |
-| scan | 198.7 | `du -sb` | 338.9 | 0.59x | 7 | 4 |
-| search-rare | 443.0 | `rg` | 587.7 | 0.75x | 9 | 9 |
-| search-common | 362.8 | `rg` | 557.4 | 0.65x | 31 | 9 |
-| search-regex | 338.6 | `rg` | 530.9 | 0.64x | 9 | 9 |
-| search-regex-nomatch | 315.6 | `rg` | 544.4 | 0.58x | 10 | 9 |
-| search-ci | 385.7 | `rg` | 807.7 | 0.48x | 9 | 9 |
-| search-ci-fixed | 456.9 | - |  | - | 10 | - |
-| search-count | 479.3 | `rg -c` | 684.8 | 0.70x | 13 | 9 |
-| search-only-matching | 449.7 | `rg -o` | 802.6 | 0.56x | 31 | 9 |
-| search-multiline | 743.3 | `rg -U` | 934.2 | 0.80x | 72 | 59 |
-| search-gzip | 188.3 | `rg -z` | 432.2 | 0.44x | 18 | 7 |
-| find-name | 271.8 | `find -name` | 190.8 | 1.42x | 68 | 5 |
-| find-path | 43.2 | `find -path` | 16.2 | 2.67x | 10 | 3 |
-| find-type | 23.3 | `find -name` | 13.5 | 1.73x | 8 | 3 |
-| du-s | 229.1 | `du -s` | 328.8 | 0.70x | 22 | 4 |
-| du | 222.1 | `du` | 360.0 | 0.62x | 21 | 4 |
+| scan | 292.9 | `du -sb` | 638.8 | 0.46x | 8 | 4 |
+| search-rare | 469.8 | `rg` | 736.1 | 0.64x | 10 | 9 |
+| search-common | 424.0 | `rg` | 738.1 | 0.57x | 17 | 10 |
+| search-regex | 424.7 | `rg` | 671.7 | 0.63x | 11 | 9 |
+| search-regex-nomatch | 424.2 | `rg` | 686.3 | 0.62x | 10 | 9 |
+| search-ci | 441.4 | `rg` | 643.5 | 0.69x | 9 | 9 |
+| search-ci-fixed | 422.3 | - |  | - | 10 | - |
+| search-count | 436.4 | `rg -c` | 718.6 | 0.61x | 15 | 9 |
+| search-only-matching | 453.4 | `rg -o` | 736.1 | 0.62x | 17 | 9 |
+| search-multiline | 673.8 | `rg -U` | 1033.5 | 0.65x | 46 | 59 |
+| search-multiline-unicode | 514.5 | `rg -U unicode` | 674.4 | 0.76x | 46 | 9 |
+| search-gzip | 184.0 | `rg -z` | 623.1 | 0.30x | 19 | 7 |
+| find-name | 275.2 | `find -name` | 357.7 | 0.77x | 18 | 5 |
+| find-path | 42.5 | `find -path` | 48.8 | 0.87x | 7 | 3 |
+| find-type | 37.9 | `find -name` | 50.6 | 0.75x | 7 | 3 |
+| du-s | 371.6 | `du -s` | 602.4 | 0.62x | 21 | 4 |
+| du | 326.3 | `du` | 646.4 | 0.50x | 23 | 4 |
 
 Cold cache method: fadvise (posix_fadvise DONTNEED per file: file data evicted exactly, dentries and inodes retained, so metadata-only cases stay effectively warm)
-
 ```
 
 ## The performance guard
@@ -245,9 +246,9 @@ Verbatim output of `bash scripts/perf-guard.sh` at the same commit:
 ```console
 case                      dusage_ms        ref     ref_ms baseline_ms  verdict
 ------------------------ ---------- ---------- ---------- ------------  --------
-search-rare                    45.4         rg       41.2       51.2  ok
-search-regex-nomatch           44.7         rg       40.0       46.4  ok
-search-count                   62.0      rg -c       60.1       66.6  ok
+search-rare                    95.1         rg       92.3       93.4  ok
+search-regex-nomatch           91.3         rg       91.1       97.9  ok
+search-count                  106.9  grep -rIc      133.6      103.0  ok
 perf-guard: pass (tolerance 25%, 5 runs per row)
 ```
 
@@ -269,32 +270,42 @@ The ratio column is dusage over the fastest reference for that case, so below
 `1.00x` means dusage is ahead. A few observations that belong to the mechanism
 rather than to any single number:
 
-- **Literals are at parity in the warm pass.** `search-rare`, `search-common`, `search-ci` and
-  `search-count` sit within a few percent of `rg`, and `-l` usually ahead of it.
-  That comes from three changes: the vectorised `memchr`/`memchr_ci` scan in
-  `src/simd.rs` (AVX2 or SSE2, detected once at startup, with a portable SWAR
-  fallback), the block scan that answers a whole 64 KiB block before the
-  line-at-a-time path runs, and a 64 KiB `BufWriter` around the renderer so a run
-  costs one `write` per buffer instead of one per line.
-- **A general regex is the case that still loses.** `search-regex` re-enters the
-  automaton once per candidate line; the prefilters — a required byte and the
-  longest literal run every match must contain — cut how often that happens, but
-  not how much each visit costs. Closing it needs a reverse automaton that
-  answers "where does this match start" in one suffix pass over the block, which
-  is a new machine rather than a tweak (`docs/ROADMAP.md` tracks it).
-- **`-o` and `-U` are the expensive output modes.** `-o` prints a line per match
-  and keeps every hit in memory until the report is printed; `-U` has to hold the
-  whole file. Both show up as a ratio above `1.00x` and as the widest RSS gaps in
-  their rows.
-- **`-z` is ahead** because the decoder runs in this process over already-read
-  bytes, with no second tool and no temporary files.
-- **`du` is ahead on allocated blocks** because the walk is parallel and counts
-  what `st_blocks` already says, where GNU `du` walks serially.
-- **`find` is behind on the glob path** (`find-name`, `find-path`). Its cost is
-  its design: the output is the sorted candidate list, which is also why its RSS
-  row is the widest in the table. The expression form has no case here yet, so
-  it is not in these tables; `docs/SEARCH.md` §1.4 quotes a measurement of it
-  taken on its own.
+- **The output-heavy content rows are all ahead.** `search-common` 0.87x,
+  `search-count` 0.73x, `search-files-with-matches` 0.74x,
+  `search-only-matching` 0.88x and `search-multiline` 0.85x against `grep` and
+  `rg -U`. Two changes did that: results now print as the walk reaches them in
+  sorted order instead of being collected (`search_stream`), and a matching line
+  shares its file's buffer through an offset rather than owning a `Vec`.
+- **The plain content rows are at parity, within this box's noise.**
+  `search-rare` 1.07x, `search-regex` 1.10x, `search-regex-nomatch` 1.06x,
+  `search-ci` 1.02x. The largest of those gaps was 1.42x before the candidate
+  scan (`Regex::candidate_find`, which walks the line a required run sits on
+  instead of the whole haystack) and the per-file syscall removal (no `fstat`
+  per file, no read that returns zero). Reference rows on this box drift 10-20%
+  between passes, so treat a few percent here as unresolved rather than real —
+  `scripts/perf-guard.sh` is the paired check that does not drift.
+- **`-U` with Unicode semantics is 1.12x**, down from 2.51x: a pattern with an
+  ASCII mandatory literal settles its matches from the line holding each
+  occurrence instead of decoding whole files to `char`s.
+- **`-z` is far ahead** (0.30x) because the decoder runs in this process over
+  already-read bytes, with no second tool and no temporary files, and **`-c` is
+  ahead of `grep -rIc`** (0.73x) because a count never builds the hits it counts.
+- **`du` is ahead on allocated blocks** (0.52x) because the walk is parallel and
+  counts what `st_blocks` already says, where GNU `du` walks serially.
+- **`find`'s glob form is ahead on the big tree and slightly behind on the small
+  one**: `find-name` 0.83x, `find-path` 1.11x, `find-type` 1.09x. The first two
+  are dominated by matching globs by shape and streaming the sorted listing from
+  a heap over directory cursors; the small-tree rows are dominated by keeping
+  that order at all, which GNU find does not have to do. The expression form has
+  no case here yet; `docs/SEARCH.md` §1.4 quotes a measurement of it taken on its
+  own.
+- **Memory is bounded, not minimal.** Peak RSS on the content rows is 9-17 MiB
+  against grep's 5, and it no longer scales with how much the tree matches: the
+  printer's pending results are capped at 4 MiB and the path window at
+  `threads × 1024` files. The floor above grep is the pipeline itself — a read
+  buffer and a queue per worker — and beating grep's 5 MiB would mean giving up
+  the threads that make the rows ahead. `find`'s 18 MiB on `find-name` is the
+  read-ahead pool, flat whether 15k or 267k paths match.
 - **The thread sweeps** (`threads-scan-*`, `threads-search-*`) are the evidence
   for the 4..16 default: `--threads 1` is the slow row, gain flattens by the
   core count, and oversubscription costs more than it returns. On a box with a
