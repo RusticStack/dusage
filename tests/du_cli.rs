@@ -912,3 +912,69 @@ fn separate_dirs_excludes_children_in_the_default_base() {
     );
     assert!(value(&sep, "root") < value(&all, "root"), "{sep:?}");
 }
+
+/// The system `du` is the oracle on a Mac too, and it is BSD du there: `-sk` prints one
+/// line per argument in 1 KiB blocks, the unit `dusage du -k` prints. A host without
+/// `du(1)` skips with a reason rather than asserting nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_default_totals_match_the_system_du_on_usr() {
+    let Some(want_rows) = gnu_du(&["-sk", "/usr"]) else {
+        eprintln!("skipped: no du(1) on this host");
+        return;
+    };
+    let want = value(&want_rows, "/usr");
+    let got = value(&rows(&du(&["-k", "-s", "/usr"])), "/usr");
+    assert_eq!(got, want, "dusage {got} KiB vs du {want} KiB over /usr");
+}
+
+/// A mount point inside a walked tree is the device boundary `--one-filesystem` and the
+/// prune both rely on. `/System/Volumes` really does span more than one device on macOS,
+/// so `-x` on both tools exercises `other_filesystem` against a real boundary: if either
+/// crossed it, the totals would include the Data volume and differ by orders of magnitude.
+///
+/// What this does not cover: a delete-side mount inside a tree it can delete needs root
+/// to create, so `same_filesystem`'s use by the prune walk is covered by its unit tests
+/// and not here.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_the_device_boundary_is_honoured_on_a_real_mount() {
+    use std::os::unix::fs::MetadataExt;
+    let root = Path::new("/System/Volumes");
+    if !root.is_dir() {
+        eprintln!("skipped: /System/Volumes does not exist on this host");
+        return;
+    }
+    let here = std::fs::metadata(std::env::temp_dir()).map(|m| m.dev());
+    let Ok(dev) = here.map(|d| (d, std::fs::metadata(root).map(|m| m.dev()))) else {
+        eprintln!("skipped: cannot read device ids");
+        return;
+    };
+    let (temp_dev, volumes_dev) = (dev.0, dev.1.ok());
+    let mut second = volumes_dev.is_some_and(|d| d != temp_dev);
+    if !second {
+        for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+            if std::fs::metadata(e.path()).is_ok_and(|m| m.dev() != temp_dev) {
+                second = true;
+                break;
+            }
+        }
+    }
+    if !second {
+        eprintln!("skipped: no second device to compare against");
+        return;
+    }
+    let Some(want_rows) = gnu_du(&["-sk", "-x", "/System/Volumes"]) else {
+        eprintln!("skipped: no du(1) on this host");
+        return;
+    };
+    let want = value(&want_rows, "/System/Volumes");
+    let got = value(
+        &rows(&du(&["-k", "-s", "-x", "/System/Volumes"])),
+        "/System/Volumes",
+    );
+    assert_eq!(
+        got, want,
+        "-x over /System/Volumes: dusage {got} KiB vs du {want} KiB"
+    );
+}

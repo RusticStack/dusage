@@ -2894,3 +2894,28 @@ fn find_lname_matches_the_link_target() {
     let plain = stdout(&find_at(&dir, &["-lname", "*.MD"]));
     assert!(plain.is_empty(), "case matters without the i: {plain}");
 }
+
+/// A first smoke pass of both halves on the new platform: `search` finds content in the
+/// fixture and still honours the builtin `node_modules` ignore, and `find` walks the same
+/// tree for names. Everything else in this file is platform-neutral and runs unchanged on
+/// macOS; this one exists so a break in the macOS walk is caught by the suite on the Mac
+/// itself rather than by a cross-check that cannot run it.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_search_and_find_smoke() {
+    let f = Fixture::new("macos_smoke");
+    let o = run(&["search", "-l", "needle"], &f.root);
+    let out = stdout(&o);
+    assert!(out.contains("main.rs"), "{out}");
+    assert!(out.contains("it.rs"), "{out}");
+    assert!(
+        !out.contains("index.js"),
+        "node_modules is a builtin ignore: {out}"
+    );
+
+    let o = run(&["find", "-name", "*.rs", "-type", "f"], &f.root);
+    let out = stdout(&o);
+    assert!(out.contains("main.rs"), "{out}");
+    assert!(out.contains("util.rs"), "{out}");
+    assert!(!out.contains("index.js"), "{out}");
+}
