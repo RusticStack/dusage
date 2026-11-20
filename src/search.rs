@@ -2972,12 +2972,17 @@ impl<'a> Scanner<'a> {
     /// The lines of one block that hold a match, each reported once with the spans of the
     /// matches on it. Returns the line number the block ends on.
     ///
-    /// Line numbers cost a count of the bytes between one reported line and the next, which is
-    /// a second pass over the file however little output it produces. A mode that keeps no
-    /// lines at all (`-c`, `-l`) has nowhere to print one, so it skips the count; anything
-    /// that does keep lines counts them, whether or not it prints them.
+    /// A line number costs a count of the bytes between one reported line and the next, since
+    /// the block scan jumps over the lines it does not report. Only a mode that reads the
+    /// number pays it (`-n`, `--vimgrep`, `--column`, `--json`, colour), and the count of the
+    /// block it hands the next block is the sum of those counts plus the tail after the last
+    /// reported line, rather than a second pass over the whole block.
     fn block_lines(&mut self, body: &[u8], base: u64) -> u64 {
-        let numbers = self.want_lines;
+        let numbers = self.numbered();
+        // Newlines in `body[..counted_to]`. `base` is the number of the line before the
+        // block's first one, so the line that begins at `counted_to` is `base + counted + 1`.
+        let mut counted = 0u64;
+        let mut counted_to = 0usize;
         let mut line_no = base;
         let mut line_start = 0;
         let mut pos = 0;
@@ -3016,7 +3021,9 @@ impl<'a> Scanner<'a> {
                 None => body.len(),
             };
             if numbers {
-                line_no += bytes::count_byte(&body[line_start..ls], b'\n') as u64 + 1;
+                counted += bytes::count_byte(&body[counted_to..ls], b'\n') as u64;
+                counted_to = ls;
+                line_no = base + counted + 1;
             }
             self.matches += 1;
             let line = strip_cr(&body[ls..le]);
@@ -3055,7 +3062,7 @@ impl<'a> Scanner<'a> {
         if !numbers {
             return base;
         }
-        base + bytes::count_byte(body, b'\n') as u64 + 1
+        base + counted + bytes::count_byte(&body[counted_to..], b'\n') as u64 + 1
     }
 
     /// Every match of one block as its own record, for `-o`. The search continues from the
@@ -3063,14 +3070,18 @@ impl<'a> Scanner<'a> {
     /// line-at-a-time `-o` pays for once a file matches often. Returns the line number the
     /// block ends on.
     ///
-    /// Line numbers cost a count of the bytes between one record and the next, which is a
-    /// whole second pass over the file however much output it produces. Only `-n`, `--vimgrep`
-    /// and the modes that print positions (`paint`: colour, `--json`, `--column`) read them,
-    /// so the rest skip the count and their records carry the line number they arrived with.
+    /// Line numbers cost a count of the bytes between one record and the next, since the scan
+    /// jumps over the lines between them. Only `-n`, `--vimgrep` and the modes that print
+    /// positions (`paint`: colour, `--json`, `--column`) read them, so the rest skip the count
+    /// and their records carry the line number they arrived with; the block it hands the next
+    /// one is the sum of those counts plus the tail, not a second pass over the whole block.
     fn block_matches(&mut self, body: &[u8], from: usize, base: u64) -> u64 {
-        let numbers = self.o.line_numbers || self.o.vimgrep || self.o.paint;
+        let numbers = self.numbered();
         // Absolute offset of `body`'s first byte within the file.
         let at = self.pos + from as u64;
+        // Newlines in `body[..counted_to]`; `base` is the number of the line before the block's
+        // first, so the line that begins at `counted_to` is `base + counted + 1`.
+        let mut counted = 0u64;
         let mut line_no = base;
         // The line the last record came from: its first byte, the newline that ends it (or
         // the block end), where its text ends after a `\r\n`'s `\r` is stripped, and how
@@ -3100,10 +3111,11 @@ impl<'a> Scanner<'a> {
                     None => body.len(),
                 };
                 if numbers {
-                    line_no += bytes::count_byte(&body[counted_to..line_start], b'\n') as u64 + 1;
+                    counted += bytes::count_byte(&body[counted_to..line_start], b'\n') as u64;
+                    counted_to = line_start;
+                    line_no = base + counted + 1;
                 }
                 content_end = line_start + strip_cr(&body[line_start..line_end]).len();
-                counted_to = (line_end + 1).min(body.len());
                 on_line = 0;
                 fresh = false;
             }
@@ -3153,7 +3165,15 @@ impl<'a> Scanner<'a> {
         if !numbers {
             return base;
         }
-        base + bytes::count_byte(body, b'\n') as u64 + 1
+        base + counted + bytes::count_byte(&body[counted_to..], b'\n') as u64 + 1
+    }
+
+    /// True when something will read the line number of a reported line: `-n` and `--vimgrep`
+    /// print it, `--json` writes it into a field, and `paint` covers the modes that build one
+    /// row per match (`--column`, `--vimgrep`, colour). A plain list of lines prints no
+    /// number, so the block scan does not count the lines it skipped to print them.
+    fn numbered(&self) -> bool {
+        self.o.line_numbers || self.o.vimgrep || self.o.paint
     }
 
     /// Hand the carry over as a line once it grows past [`CARRY_MAX`], so a file that is not
@@ -4076,6 +4096,88 @@ mod tests {
     }
 
     #[test]
+    fn a_read_boundary_inside_a_line_keeps_numbers_and_columns() {
+        // Every line here is longer than one read, so each match is found by a block whose
+        // boundary falls in the middle of a line and the line itself arrives in two pieces.
+        // The number and the column must still name the line and the byte the text has them
+        // at, the same answer the line-at-a-time path gives.
+        let f = Fixture::new("wide-lines");
+        let mut text = String::new();
+        text.push_str(&"a".repeat(70_000));
+        text.push('\n');
+        text.push_str("needle one\n");
+        text.push_str(&"b".repeat(70_000));
+        text.push('\n');
+        text.push_str("x needle y needle\n");
+        text.push_str("needle\n");
+        f.file("wide.txt", &text);
+        let mut o = opts(&f, "needle");
+        o.line_numbers = true;
+        o.column = true;
+        o.paint = true;
+        let r = search(&o).unwrap();
+        let got: Vec<(u64, Vec<(usize, usize)>)> = r.files[0]
+            .hits
+            .iter()
+            .map(|h| (h.number, h.spans.clone()))
+            .collect();
+        // Columns are one past the span, so the second needle on line 4 is column 12.
+        assert_eq!(
+            got,
+            [
+                (2, vec![(0, 6)]),
+                (4, vec![(2, 8), (11, 17)]),
+                (5, vec![(0, 6)]),
+            ]
+        );
+        // The same lines, one record per match, numbered the same way.
+        let mut o = opts(&f, "needle");
+        o.only_matching = true;
+        o.line_numbers = true;
+        let r = search(&o).unwrap();
+        let numbers: Vec<u64> = r.files[0].hits.iter().map(|h| h.number).collect();
+        assert_eq!(numbers, [2, 4, 4, 5]);
+    }
+
+    #[test]
+    fn a_crlf_split_across_reads_shifts_no_number() {
+        // A read ends between the `\r` and the `\n` of one line, and another `\r\n` sits
+        // across the boundary of the next: neither may shift a number, and the `\r` must not
+        // reach the printed line.
+        let f = Fixture::new("crlf-split");
+        let mut text = String::new();
+        text.push_str(&"a".repeat(65_535));
+        text.push_str("\r\n");
+        text.push_str("needle two\r\n");
+        text.push_str(&"c".repeat(65_000));
+        text.push_str("\r\n");
+        text.push_str("needle four\r\n");
+        f.file("crlf.txt", &text);
+        let mut o = opts(&f, "needle");
+        o.line_numbers = true;
+        let r = search(&o).unwrap();
+        let got: Vec<(u64, String)> = r.files[0]
+            .hits
+            .iter()
+            .map(|h| {
+                (
+                    h.number,
+                    String::from_utf8_lossy(h.text(&r.files[0].pool)).into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (2, "needle two".to_string()),
+                (4, "needle four".to_string()),
+            ]
+        );
+        // And the count of text after the split is the file's own line count.
+        assert_eq!(r.stats.matches, 2);
+    }
+
+    #[test]
     fn long_line_is_split_correctly_across_reads() {
         let f = Fixture::new("long");
         let mut text = String::new();
@@ -4087,7 +4189,11 @@ mod tests {
         }
         text.push('\n');
         f.file("big.txt", &text);
-        let r = search(&opts(&f, "needle")).unwrap();
+        // The number is what this test is about, so it asks for it the way `-n` does: a mode
+        // that prints no number does not count the lines it skipped to print them.
+        let mut o = opts(&f, "needle");
+        o.line_numbers = true;
+        let r = search(&o).unwrap();
         assert_eq!(r.stats.matches, 1);
         assert_eq!(r.files[0].hits[0].number, 1);
     }
