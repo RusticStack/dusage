@@ -454,6 +454,101 @@ thread_local! {
     static NAME_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Every name of one directory, back to back: the entries listed with it index into this
+/// one allocation instead of owning a name each. The bytes are the kernel's, copied once,
+/// so a name that is not valid UTF-8 reaches the caller exactly as it was reported.
+type Names = Rc<Vec<u8>>;
+
+/// One entry's name: a byte range in its directory's [`Names`].
+///
+/// This is what a walker borrows a name from, so it derefs to `OsStr` and compares and
+/// orders the way `OsStr` does. The range is set when the entry is read and the arena it
+/// points into when the directory ends, which is why a name is only readable once
+/// [`list`] has returned.
+#[derive(Clone)]
+pub struct Name {
+    names: Option<Names>,
+    at: usize,
+    len: usize,
+}
+
+impl Name {
+    fn slice(&self) -> &[u8] {
+        let names = self
+            .names
+            .as_ref()
+            .expect("a name is readable once its directory has been read");
+        &names[self.at..self.at + self.len]
+    }
+
+    fn os(&self) -> &OsStr {
+        OsStr::from_bytes(self.slice())
+    }
+
+    /// A name in an arena of its own, for a caller that has the bytes and no directory read
+    /// behind them.
+    #[cfg(test)]
+    fn owned(bytes: &[u8]) -> Name {
+        Name {
+            names: Some(Rc::new(bytes.to_vec())),
+            at: 0,
+            len: bytes.len(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.os(), f)
+    }
+}
+
+impl std::ops::Deref for Name {
+    type Target = OsStr;
+
+    fn deref(&self) -> &OsStr {
+        self.os()
+    }
+}
+
+impl AsRef<OsStr> for Name {
+    fn as_ref(&self) -> &OsStr {
+        self.os()
+    }
+}
+
+impl AsRef<Path> for Name {
+    fn as_ref(&self) -> &Path {
+        Path::new(self.os())
+    }
+}
+
+impl PartialEq for Name {
+    fn eq(&self, other: &Name) -> bool {
+        self.slice() == other.slice()
+    }
+}
+
+impl Eq for Name {}
+
+impl Ord for Name {
+    fn cmp(&self, other: &Name) -> std::cmp::Ordering {
+        self.slice().cmp(other.slice())
+    }
+}
+
+impl PartialOrd for Name {
+    fn partial_cmp(&self, other: &Name) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq<&str> for Name {
+    fn eq(&self, other: &&str) -> bool {
+        self.slice() == other.as_bytes()
+    }
+}
+
 /// One name from a directory, as cheaply as the kernel gives it up: a name, a type that
 /// came with the `dirent`, the directory it was read from, and an empty slot for its
 /// `lstat` data.
@@ -463,7 +558,7 @@ thread_local! {
 /// resolves the name against the open directory (`statx(dirfd, name,
 /// AT_SYMLINK_NOFOLLOW)`), never the full path, which is what find's `fstatat` does.
 pub struct Lite {
-    pub name: OsString,
+    pub name: Name,
     kind: Kind,
     /// The directory this name came from, alive as long as any entry listed with it.
     dir: Rc<OwnedFd>,
@@ -506,6 +601,9 @@ impl Lite {
 struct LiteSink<'a> {
     out: &'a mut Vec<Lite>,
     errs: &'a mut ErrorCounts,
+    /// The names pushed so far, back to back, which become the arena when the directory
+    /// ends. Grown once rather than once per entry.
+    names: Vec<u8>,
 }
 
 impl Sink for LiteSink<'_> {
@@ -522,8 +620,14 @@ impl Sink for LiteSink<'_> {
             },
             Some(kind) => kind,
         };
+        let at = self.names.len();
+        self.names.extend_from_slice(rec.name);
         self.out.push(Lite {
-            name: OsString::from_vec(rec.name.to_vec()),
+            name: Name {
+                names: None,
+                at,
+                len: rec.name.len(),
+            },
             kind,
             dir: Rc::clone(dir),
             stat: Cell::new(None),
@@ -532,6 +636,7 @@ impl Sink for LiteSink<'_> {
 
     fn clear(&mut self) {
         self.out.clear();
+        self.names.clear();
     }
 }
 
@@ -540,9 +645,22 @@ impl Sink for LiteSink<'_> {
 /// `out` is cleared and its allocation reused, so a walk keeps one entry vector instead of
 /// allocating one per directory. An entry that cannot be typed is recorded in `errs` and
 /// dropped, like an entry that vanishes between `getdents` and `lstat` always was.
+///
+/// The directory's names are copied into one buffer and shared by every entry listed, which
+/// is one allocation per directory instead of one per name.
 pub fn list(dir: &Path, out: &mut Vec<Lite>, errs: &mut ErrorCounts) -> io::Result<()> {
     out.clear();
-    read_dir_raw(dir, &mut LiteSink { out, errs })
+    let mut sink = LiteSink {
+        out,
+        errs,
+        names: Vec::new(),
+    };
+    read_dir_raw(dir, &mut sink)?;
+    let names: Names = Rc::new(sink.names);
+    for e in sink.out.iter_mut() {
+        e.name.names = Some(Rc::clone(&names));
+    }
+    Ok(())
 }
 
 /// True for entries that are counted as links and never descended into.
@@ -767,6 +885,30 @@ mod tests {
         DirReader::new().read(&f.0, &mut w, &mut errs).unwrap();
         let id = |n: &str| w.iter().find(|e| e.name == n).unwrap().file_id;
         assert_eq!(id("a.bin"), id("b.bin"));
+    }
+
+    #[test]
+    fn a_name_that_is_not_valid_utf8_keeps_its_bytes() {
+        let f = Fixture::new("nonutf8");
+        let dir = OsStr::from_bytes(b"bad\xff\xfedir");
+        fs::create_dir(f.0.join(dir)).unwrap();
+        fs::write(f.0.join(dir).join(OsStr::from_bytes(b"in\xff.go")), b"1").unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(errs.total(), 0);
+        let e = v.iter().find(|e| e.name.as_bytes() == b"bad\xff\xfedir");
+        let e = e.expect("the name reaches the caller exactly as the kernel gave it");
+        assert!(e.is_dir());
+        assert_eq!(e.stat().unwrap().kind, Kind::Dir);
+        // The lossy view the walker builds its relative path from is the only lossy step.
+        assert_eq!(e.name.to_string_lossy(), "bad\u{fffd}\u{fffd}dir");
+        // And the child of that directory is listed the same way.
+        let mut w = Vec::new();
+        list(&f.0.join(dir), &mut w, &mut errs).unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].name.as_bytes(), b"in\xff.go");
+        assert_eq!(w[0].stat().unwrap().size, 1);
     }
 
     #[test]
@@ -1472,7 +1614,7 @@ mod tests {
         // buffer grows past it and `statx` answers ENAMETOOLONG for the whole name rather than
         // receiving a truncated path.
         let lite = |name: &[u8]| Lite {
-            name: OsString::from_vec(name.to_vec()),
+            name: Name::owned(name),
             kind: Kind::File,
             dir: Rc::clone(&v[0].dir),
             stat: Cell::new(None),
