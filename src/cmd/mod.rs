@@ -6,7 +6,6 @@
 //! `<root> [min_big] [threads] [top_n]` form, which is equivalent to `scan`. `fastdel` is
 //! the `prune` subcommand under its own name.
 
-pub mod df;
 pub mod du;
 pub mod prune;
 pub mod scan;
@@ -73,7 +72,6 @@ USAGE:
     dusage find <glob> [paths...] [OPTIONS]                file names and paths
     dusage prune <root> --age AGE [OPTIONS]                delete old entries (fastdel)
     dusage du [PATH...] [OPTIONS]                          du-compatible per-directory totals
-    dusage df [PATH...] [OPTIONS]                          mounted filesystems and their usage
     dusage tree [PATH...] [OPTIONS]                        the tree, with on-disk and apparent sizes
 
 Each subcommand has its own help: `dusage search --help`, `dusage find --help`,
@@ -116,10 +114,6 @@ pub fn dispatch(mut raw: Vec<String>) -> Result<(), Fail> {
         "tree" => {
             raw.remove(0);
             tree::run(raw)
-        }
-        "df" => {
-            raw.remove(0);
-            df::run(raw)
         }
         "-h" | "--help" | "help" => {
             // The full help: the subcommand map, then the options of the default command.

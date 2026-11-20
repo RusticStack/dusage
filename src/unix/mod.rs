@@ -5,7 +5,6 @@
 //! only the change feed behind `--watch` needs raw `inotify` calls.
 
 pub mod delete;
-pub mod df;
 pub mod enumerate;
 pub mod sys;
 pub mod watch;
