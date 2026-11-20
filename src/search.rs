@@ -352,6 +352,17 @@ pub struct Candidate {
     pub is_link: bool,
 }
 
+/// A walk entry that survived the filters, with the type its directory record gave it.
+///
+/// The type is free — it came with the `getdents` record — and it is what lets a scan stop
+/// asking the kernel what it already knows: a `Kind::File` here means the `fstat` after the
+/// open could only repeat it.
+struct Found {
+    cand: Candidate,
+    /// A followed link is reported as what it resolved to, which the walk had to read anyway.
+    kind: Kind,
+}
+
 fn join_rel(rel: &str, name: &str) -> String {
     if rel.is_empty() {
         return name.to_string();
@@ -382,7 +393,7 @@ struct WalkJob {
 /// What one job produced: the candidates it listed, its share of the statistics, and the
 /// subdirectories another thread should read.
 struct JobOut {
-    cands: Vec<Candidate>,
+    cands: Vec<Found>,
     stats: Stats,
     children: Vec<WalkJob>,
 }
@@ -499,13 +510,16 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
                 continue;
             }
             if want_dirs {
-                out.cands.push(Candidate {
-                    path: child.clone(),
-                    rel: child_rel.clone(),
-                    size: 0,
-                    modified: None,
-                    is_dir: true,
-                    is_link: false,
+                out.cands.push(Found {
+                    cand: Candidate {
+                        path: child.clone(),
+                        rel: child_rel.clone(),
+                        size: 0,
+                        modified: None,
+                        is_dir: true,
+                        is_link: false,
+                    },
+                    kind: Kind::Dir,
                 });
             }
             if o.max_depth.is_none_or(|m| job.depth + 1 < m) {
@@ -532,6 +546,13 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
                 });
             }
         } else {
+            // The type the entry had before the open: the record's own, or the target's when
+            // `--follow` already resolved the link.
+            let kind = match &target {
+                Some(md) if md.is_file() => Kind::File,
+                Some(_) => Kind::Other,
+                None => e.kind(),
+            };
             // The inode is read only when a mode prints or filters on it, or when `--follow`
             // already had to read the target to know what it is.
             let (mut size, mut modified) = (0u64, None);
@@ -556,13 +577,16 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool) -> JobOut {
                     }
                 }
             }
-            out.cands.push(Candidate {
-                path: job.dir.join(&e.name),
-                rel: child_rel,
-                size,
-                modified,
-                is_dir: false,
-                is_link: false,
+            out.cands.push(Found {
+                cand: Candidate {
+                    path: job.dir.join(&e.name),
+                    rel: child_rel,
+                    size,
+                    modified,
+                    is_dir: false,
+                    is_link: false,
+                },
+                kind,
             });
         }
     }
@@ -583,8 +607,8 @@ fn root_device(o: &SearchOptions) -> u64 {
 
 /// The jobs a walk starts from: the roots that are directories, plus the files named directly
 /// on the command line, which are taken as given.
-fn root_jobs(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Vec<WalkJob>, Stats) {
-    let mut all: Vec<Candidate> = Vec::new();
+fn root_jobs(o: &SearchOptions, root_dev: u64) -> (Vec<Found>, Vec<WalkJob>, Stats) {
+    let mut all: Vec<Found> = Vec::new();
     let mut stats = Stats::default();
     let mut jobs: Vec<WalkJob> = Vec::new();
     for root in &o.roots {
@@ -595,13 +619,16 @@ fn root_jobs(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Vec<WalkJob>,
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                all.push(Candidate {
-                    path: root.clone(),
-                    rel,
-                    size: md.len(),
-                    modified: md.modified().ok(),
-                    is_dir: false,
-                    is_link: false,
+                all.push(Found {
+                    cand: Candidate {
+                        path: root.clone(),
+                        rel,
+                        size: md.len(),
+                        modified: md.modified().ok(),
+                        is_dir: false,
+                        is_link: false,
+                    },
+                    kind: Kind::File,
                 });
                 continue;
             }
@@ -640,7 +667,9 @@ fn root_jobs(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Vec<WalkJob>,
 /// every worker thread at once, so the walk costs a fraction of its sequential time on a
 /// tree with many directories.
 fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
-    let (mut all, jobs, mut stats) = root_jobs(o, root_dev);
+    // A listing prints paths, not contents, so the type the walk recorded is dropped here.
+    let (all, jobs, mut stats) = root_jobs(o, root_dev);
+    let mut all: Vec<Candidate> = all.into_iter().map(|f| f.cand).collect();
     if !jobs.is_empty() {
         let want_dirs = o.scope == Scope::Paths;
         let threads = o.threads.max(1);
@@ -651,7 +680,7 @@ fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
                 spawn(child);
             }
             let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-            guard.0.extend(out.cands);
+            guard.0.extend(out.cands.into_iter().map(|f| f.cand));
             guard.1.dirs_walked += out.stats.dirs_walked;
             guard.1.entries_ignored += out.stats.entries_ignored;
             guard.1.errors.add(&out.stats.errors);
@@ -864,7 +893,7 @@ fn ahead_worker(ahead: &Ahead, o: &SearchOptions) {
 /// One directory the streaming walk has open: its allowed entries in print order, and the
 /// subdirectories to open when their own entry is reached.
 struct Cursor {
-    items: VecDeque<Candidate>,
+    items: VecDeque<Found>,
     kids: VecDeque<WalkJob>,
     /// Breaks a tie between two cursors whose heads are identical, which only two roots
     /// holding the same relative path can produce.
@@ -872,7 +901,7 @@ struct Cursor {
 }
 
 impl Cursor {
-    fn head(&self) -> Option<&Candidate> {
+    fn head(&self) -> Option<&Found> {
         self.items.front()
     }
 
@@ -890,7 +919,9 @@ impl Cursor {
 impl Ord for Cursor {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.head(), other.head()) {
-            (Some(a), Some(b)) => cmp_paths(a, b).then_with(|| self.seq.cmp(&other.seq)),
+            (Some(a), Some(b)) => {
+                cmp_paths(&a.cand, &b.cand).then_with(|| self.seq.cmp(&other.seq))
+            }
             (Some(_), None) => Ordering::Less,
             (None, Some(_)) => Ordering::Greater,
             (None, None) => self.seq.cmp(&other.seq),
@@ -951,18 +982,18 @@ where
             }
         }
         while let Some(Reverse(mut cur)) = heap.pop() {
-            let Some(cand) = cur.items.pop_front() else {
+            let Some(found) = cur.items.pop_front() else {
                 continue;
             };
-            let kid = if cand.is_dir {
-                cur.take_kid(&cand.rel)
+            let kid = if found.cand.is_dir {
+                cur.take_kid(&found.cand.rel)
             } else {
                 None
             };
             if cur.head().is_some() {
                 heap.push(Reverse(cur));
             }
-            if !visit(&cand) {
+            if !visit(&found.cand) {
                 break;
             }
             if let Some(job) = kid {
@@ -985,8 +1016,10 @@ fn open_cursor(out: JobOut, stats: &mut Stats, seq: u64) -> Cursor {
     stats.dirs_walked += out.stats.dirs_walked;
     stats.entries_ignored += out.stats.entries_ignored;
     stats.errors.add(&out.stats.errors);
-    let mut items: VecDeque<Candidate> = out.cands.into();
-    items.make_contiguous().sort_by(cmp_paths);
+    let mut items: VecDeque<Found> = out.cands.into();
+    items
+        .make_contiguous()
+        .sort_by(|a, b| cmp_paths(&a.cand, &b.cand));
     let mut kids: VecDeque<WalkJob> = out.children.into();
     kids.make_contiguous().sort_by(|a, b| a.rel.cmp(&b.rel));
     Cursor { items, kids, seq }
@@ -1477,28 +1510,29 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
     let shared: Mutex<(Vec<FileHits>, Stats)> = Mutex::new((Vec::new(), Stats::default()));
     // `-q` answers the first match it sees and asks the rest of the walk to stop early.
     let found_one = std::sync::atomic::AtomicBool::new(false);
-    let scan_one = |path: &Path, shared: &Mutex<(Vec<FileHits>, Stats)>, early: bool| {
-        let mut local = Stats::default();
-        let got = match scan_file(path, o, &mut local) {
-            Ok(got) => got,
-            Err(e) => {
-                if e.kind() != io::ErrorKind::NotFound {
-                    local.errors.record(&e);
+    let scan_one =
+        |path: &Path, kind: Kind, shared: &Mutex<(Vec<FileHits>, Stats)>, early: bool| {
+            let mut local = Stats::default();
+            let got = match scan_file(path, kind, o, &mut local) {
+                Ok(got) => got,
+                Err(e) => {
+                    if e.kind() != io::ErrorKind::NotFound {
+                        local.errors.record(&e);
+                    }
+                    None
                 }
-                None
+            };
+            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(hit) = got {
+                if early && hit.matches > 0 {
+                    found_one.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                guard.0.push(hit);
             }
+            merge_stats(&mut guard.1, &local);
         };
-        let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(hit) = got {
-            if early && hit.matches > 0 {
-                found_one.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            guard.0.push(hit);
-        }
-        merge_stats(&mut guard.1, &local);
-    };
-    for c in &direct {
-        scan_one(&c.path, &shared, o.quiet);
+    for f in &direct {
+        scan_one(&f.cand.path, f.kind, &shared, o.quiet);
     }
     if !jobs.is_empty() {
         let early = o.quiet;
@@ -1511,12 +1545,12 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
                 spawn(child);
             }
             let mut local = out.stats;
-            for c in &out.cands {
+            for f in &out.cands {
                 if found_one.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }
                 let mut one = Stats::default();
-                let got = match scan_file(&c.path, o, &mut one) {
+                let got = match scan_file(&f.cand.path, f.kind, o, &mut one) {
                     Ok(got) => got,
                     Err(e) => {
                         if e.kind() != io::ErrorKind::NotFound {
@@ -1625,19 +1659,19 @@ impl Flat {
     fn new(cursor: Cursor) -> Flat {
         let key = cursor
             .head()
-            .map(|c| c.path.to_string_lossy().into_owned())
+            .map(|f| f.cand.path.to_string_lossy().into_owned())
             .unwrap_or_default();
         Flat { cursor, key }
     }
 
     /// The entry this cursor offers next, leaving it on the key of the one after.
-    fn next(&mut self) -> Option<Candidate> {
-        let cand = self.cursor.items.pop_front();
+    fn next(&mut self) -> Option<Found> {
+        let found = self.cursor.items.pop_front();
         if let Some(head) = self.cursor.head() {
             self.key.clear();
-            self.key.push_str(&head.path.to_string_lossy());
+            self.key.push_str(&head.cand.path.to_string_lossy());
         }
-        cand
+        found
     }
 }
 
@@ -1678,7 +1712,7 @@ struct Scans {
 
 /// Why a batch was not accepted by the queue.
 enum Push {
-    Full(Vec<PathBuf>),
+    Full(Vec<Found>),
     Stopped,
 }
 
@@ -1686,7 +1720,7 @@ enum Push {
 type Scanned = Vec<(Option<FileHits>, Stats)>;
 
 struct ScanState {
-    jobs: VecDeque<(u64, Vec<PathBuf>)>,
+    jobs: VecDeque<(u64, Vec<Found>)>,
     /// Results the printer has not taken, by the batch number the walk gave them.
     done: std::collections::BTreeMap<u64, Scanned>,
     /// Batches handed out, and the next one the printer will take.
@@ -1737,7 +1771,7 @@ impl Scans {
     /// `Stopped` means the print failed — a broken pipe — so the walk should stop too.
     ///
     /// [`claim`]: Scans::claim
-    fn push(&self, files: Vec<PathBuf>, window: usize) -> Result<(), Push> {
+    fn push(&self, files: Vec<Found>, window: usize) -> Result<(), Push> {
         let mut g = self.lock();
         if g.aborted || g.closed {
             return Err(Push::Stopped);
@@ -1771,7 +1805,7 @@ impl Scans {
     /// Take a batch over when one is waiting: the walk thread spends the wait for room on the
     /// work it is waiting for, so the walk costs the scan no parallelism on a machine with no
     /// core to spare.
-    fn claim(&self) -> Option<(u64, Vec<PathBuf>)> {
+    fn claim(&self) -> Option<(u64, Vec<Found>)> {
         let mut g = self.lock();
         if g.buffered >= BUFFER_MAX {
             return None;
@@ -1784,7 +1818,7 @@ impl Scans {
     /// The next batch to scan, or `None` when the search is over. A worker waits here both for
     /// work and for the printer to make room: the results waiting to be printed are what bounds
     /// the stream's memory, so a worker stops taking batches while they hold the buffer.
-    fn next_job(&self) -> Option<(u64, Vec<PathBuf>)> {
+    fn next_job(&self) -> Option<(u64, Vec<Found>)> {
         let mut g = self.lock();
         let mut spins = 0;
         loop {
@@ -1915,11 +1949,11 @@ fn scan_worker(scans: &Scans, o: &SearchOptions) {
 }
 
 /// Scan the files of one batch, in the order the walk handed them over.
-fn scan_batch_of(files: &[PathBuf], o: &SearchOptions) -> Scanned {
+fn scan_batch_of(files: &[Found], o: &SearchOptions) -> Scanned {
     let mut done: Scanned = Vec::with_capacity(files.len());
-    for path in files {
+    for found in files {
         let mut stats = Stats::default();
-        let got = match scan_file(path, o, &mut stats) {
+        let got = match scan_file(&found.cand.path, found.kind, o, &mut stats) {
             Ok(got) => got,
             Err(e) => {
                 if e.kind() != io::ErrorKind::NotFound {
@@ -1995,7 +2029,7 @@ fn walk_stream(scans: &Scans, o: &SearchOptions, window: usize) -> Stats {
     let root_dev = root_device(o);
     let (direct, jobs, mut stats) = root_jobs(o, root_dev);
     let mut heap: BinaryHeap<Reverse<Flat>> = BinaryHeap::new();
-    let mut pending: Vec<PathBuf> = Vec::with_capacity(BATCH);
+    let mut pending: Vec<Found> = Vec::with_capacity(BATCH);
     let mut seq = 0u64;
     // A file named on the command line is a result of its own, as in a path listing.
     for cand in direct {
@@ -2018,18 +2052,18 @@ fn walk_stream(scans: &Scans, o: &SearchOptions, window: usize) -> Stats {
         }
     }
     while let Some(Reverse(mut top)) = heap.pop() {
-        let Some(cand) = top.next() else {
+        let Some(found) = top.next() else {
             continue;
         };
-        let kid = if cand.is_dir {
-            top.cursor.take_kid(&cand.rel)
+        let kid = if found.cand.is_dir {
+            top.cursor.take_kid(&found.cand.rel)
         } else {
             None
         };
         if top.cursor.head().is_some() {
             heap.push(Reverse(top));
         }
-        if cand.is_dir {
+        if found.cand.is_dir {
             // Nothing prints for a directory: opening it is what puts the entries below it in
             // their place in the order.
             let Some(job) = kid else { continue };
@@ -2040,7 +2074,7 @@ fn walk_stream(scans: &Scans, o: &SearchOptions, window: usize) -> Stats {
             }
             continue;
         }
-        pending.push(cand.path);
+        pending.push(found);
         if pending.len() >= BATCH {
             let mut files = std::mem::replace(&mut pending, Vec::with_capacity(BATCH));
             loop {
@@ -2197,11 +2231,16 @@ fn recycle_buffer(buf: Vec<u8>) {
 }
 
 /// Scan one file. `None` means "nothing to report" (no match, or filtered out).
-fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Option<FileHits>> {
+fn scan_file(
+    path: &Path,
+    kind: Kind,
+    o: &SearchOptions,
+    stats: &mut Stats,
+) -> io::Result<Option<FileHits>> {
     // One scan buffer per thread: a fresh `vec![0u8; BLOCK]` per file zeroes 64 KiB that the
     // read is about to overwrite, which on a 162k-file tree is ten gigabytes of memset.
     let mut buf = scan_buffer();
-    let res = scan_file_with(path, o, stats, &mut buf);
+    let res = scan_file_with(path, kind, o, stats, &mut buf);
     recycle_buffer(buf);
     res
 }
@@ -2213,7 +2252,12 @@ fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Op
 /// this does too. `O_NONBLOCK` is what makes the open return, so the entry is recognised and
 /// passed over instead of waited on. `find` never reads a file's contents and `du` answers
 /// from the directory record, so their handling of special files is unaffected.
-fn open_scan(path: &Path) -> io::Result<Option<File>> {
+///
+/// `kind` is what the walk's directory record said about the entry. When it already says
+/// regular file the `fstat` below could only repeat it, and it is a syscall per file: the
+/// walk types by `getdents`, so the only entries that reach it unknown are those a
+/// filesystem declined to type, which is exactly when asking again is worth the call.
+fn open_scan(path: &Path, kind: Kind) -> io::Result<Option<File>> {
     let mut opts = File::options();
     opts.read(true);
     #[cfg(target_os = "linux")]
@@ -2222,6 +2266,9 @@ fn open_scan(path: &Path) -> io::Result<Option<File>> {
         opts.custom_flags(crate::unix::sys::O_NONBLOCK);
     }
     let f = opts.open(path)?;
+    if kind == Kind::File {
+        return Ok(Some(f));
+    }
     // The open did not block, so this answers about the entry itself.
     if f.metadata()?.is_file() {
         Ok(Some(f))
@@ -2232,6 +2279,7 @@ fn open_scan(path: &Path) -> io::Result<Option<File>> {
 
 fn scan_file_with(
     path: &Path,
+    kind: Kind,
     o: &SearchOptions,
     stats: &mut Stats,
     buf: &mut Vec<u8>,
@@ -2241,10 +2289,10 @@ fn scan_file_with(
         return Ok(None);
     }
     if o.multiline {
-        return scan_multiline(path, o, stats);
+        return scan_multiline(path, kind, o, stats);
     }
     if o.null_data {
-        return scan_records(path, o, stats);
+        return scan_records(path, kind, o, stats);
     }
     // `--pre` hands the file to a command and searches what it prints, which is how a PDF or
     // an office document becomes text without this tool knowing anything about the format.
@@ -2253,7 +2301,7 @@ fn scan_file_with(
             return scan_prepared(path, cmd, o, stats);
         }
     }
-    let Some(mut f) = open_scan(path)? else {
+    let Some(mut f) = open_scan(path, kind)? else {
         return Ok(None);
     };
     stats.files_scanned += 1;
@@ -2306,13 +2354,12 @@ fn scan_file_with(
         stats.files_binary += 1;
         let mut found = o.pattern.find_at(&buf[..n], 0).is_some();
         stats.bytes_scanned += n as u64;
-        while !found {
+        let mut more = n == buf.len();
+        while !found && more {
             let n = read_chunk(&mut f, buf, true)?;
-            if n == 0 {
-                break;
-            }
             stats.bytes_scanned += n as u64;
             found = o.pattern.find_at(&buf[..n.min(BIG_BLOCK)], 0).is_some();
+            more = n == buf.len();
         }
         return Ok(binary_hit(path, o, stats, found));
     }
@@ -2322,13 +2369,16 @@ fn scan_file_with(
     }
     stats.bytes_scanned += n as u64;
     sc.feed(&buf[..n]);
-    while !sc.done() {
+    // A block that came back short is the end of a regular file: the next read would only
+    // learn the same thing from a syscall that returns zero, so the one that returns zero is
+    // not made. `open_scan` has established the file is regular, which is what lets a short
+    // read mean "no more" rather than "not yet".
+    let mut more = n == buf.len();
+    while more && !sc.done() {
         let n = read_chunk(&mut f, buf, true)?;
-        if n == 0 {
-            break;
-        }
         stats.bytes_scanned += n as u64;
         sc.feed(&buf[..n]);
+        more = n == buf.len();
     }
     finished(path, o, stats, sc, binary)
 }
@@ -2407,10 +2457,11 @@ fn expand_stream(path: &Path, data: &[u8]) -> io::Result<Option<Vec<u8>>> {
 /// memory for that, which is the price of the mode; every other mode streams.
 fn scan_multiline(
     path: &Path,
+    kind: Kind,
     o: &SearchOptions,
     stats: &mut Stats,
 ) -> io::Result<Option<FileHits>> {
-    let Some(mut f) = open_scan(path)? else {
+    let Some(mut f) = open_scan(path, kind)? else {
         return Ok(None);
     };
     stats.files_scanned += 1;
@@ -2530,8 +2581,13 @@ fn scan_prepared(
 /// Search a file whose records end in NUL instead of a newline (`--null-data`). Records are
 /// cut in memory rather than streamed: a file of records is small, and the line scanner is
 /// built around a newline.
-fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Option<FileHits>> {
-    let Some(mut f) = open_scan(path)? else {
+fn scan_records(
+    path: &Path,
+    kind: Kind,
+    o: &SearchOptions,
+    stats: &mut Stats,
+) -> io::Result<Option<FileHits>> {
+    let Some(mut f) = open_scan(path, kind)? else {
         return Ok(None);
     };
     stats.files_scanned += 1;
@@ -3579,14 +3635,18 @@ mod tests {
     fn open_scan_skips_a_device_node_and_takes_a_regular_file() {
         // `/dev/null` is a character device: opening it is not the problem, reading a FIFO
         // for ever is, so the guard rejects anything that is not a regular file.
-        assert!(super::open_scan(std::path::Path::new("/dev/null"))
-            .unwrap()
-            .is_none());
+        // An entry the walk could not type is the one that still asks the kernel, so that is
+        // what a device node reaching here is: `Kind::File` is the walk having said so.
+        assert!(
+            super::open_scan(std::path::Path::new("/dev/null"), Kind::Other)
+                .unwrap()
+                .is_none()
+        );
         let dir = std::env::temp_dir().join(format!("dusage_open_scan_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.txt");
         std::fs::write(&file, b"x").unwrap();
-        assert!(super::open_scan(&file).unwrap().is_some());
+        assert!(super::open_scan(&file, Kind::Other).unwrap().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
