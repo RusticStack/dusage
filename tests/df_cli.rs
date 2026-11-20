@@ -139,8 +139,16 @@ fn the_type_column_is_filled_in() {
 fn every_mounted_filesystem_is_listed_unless_asked_otherwise() {
     let all = stdout(&dusage(&[]));
     assert!(all.lines().count() > 1, "at least one row");
-    assert!(all.lines().next().unwrap().starts_with("Filesystem"));
-    assert!(all.contains("Size") && all.contains("Mounted on"));
+    let head = all.lines().next().unwrap();
+    assert!(head.starts_with("Filesystem"), "{head}");
+    assert!(
+        head.contains("Use%") && head.contains("Mounted on"),
+        "{head}"
+    );
+    // df's block mode names its unit, so a script reading the column knows what it has.
+    assert!(head.contains("1K-blocks"), "{head}");
+    let human = stdout(&dusage(&["-h"]));
+    assert!(human.lines().next().unwrap().contains("Size"));
     // -a may only add rows, never remove one.
     let more = stdout(&dusage(&["-a"]));
     assert!(more.lines().count() >= all.lines().count());
