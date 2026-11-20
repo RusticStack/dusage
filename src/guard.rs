@@ -511,14 +511,17 @@ mod macos_tests {
     /// neither spelling can piggyback on it: each is matched in its own right.
     #[test]
     fn both_spellings_of_a_symlinked_system_dir_are_protected() {
+        // Only paths that are protected in their own right: `/tmp/x` is a child of a data
+        // root, so it is prunable in either spelling and belongs in the test below instead.
         for s in [
             "/etc/passwd",
             "/private/etc/passwd",
-            "/bin/sh",
-            "/sbin/ifconfig",
             "/private/etc",
-            "/tmp/x",
-            "/private/tmp/x",
+            "/bin/sh",
+            "/usr/bin/sh",
+            "/sbin/ifconfig",
+            "/tmp",
+            "/private/tmp",
             "/var",
             "/private/var",
         ] {
@@ -620,6 +623,11 @@ mod macos_tests {
         for s in ["/private/tmp", "/private/var", "/var", "/tmp", "/private"] {
             assert!(prot(s), "{s:?} itself");
         }
+        // A child of a data root stays prunable, macOS's own databases included: it is the
+        // rule that also lets Linux prune /var/lib, and the reason `/private` is not a
+        // refused subtree of its own.
+        assert!(!prot("/private/var/db"), "a child of /private/var");
+        assert!(!prot("/private/tmp/x"), "a child of /private/tmp");
         for s in [
             "/private/tmp/x",
             "/private/var/folders/x/y",
