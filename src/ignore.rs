@@ -13,7 +13,8 @@
 //!
 //! Hidden entries (a leading `.`) are the walker's business, not this module's.
 
-use crate::glob::Glob;
+use crate::glob::{Glob, PathView};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -102,46 +103,55 @@ impl GlobFilter {
 
     /// True when a positive pattern (include or type filter) matches `rel`.
     pub fn names(&self, rel: &str) -> bool {
+        let view = PathView::new(rel);
         self.include
             .iter()
             .chain(self.filter.iter())
-            .any(|g| g.matches(rel, false))
+            .any(|g| g.matches_view(&view, false))
     }
 
     /// Strict match: does `rel` satisfy the filters as written?
     pub fn matches(&self, rel: &str, is_dir: bool) -> bool {
+        self.matches_view(&PathView::new(rel), is_dir)
+    }
+
+    fn matches_view(&self, view: &PathView<'_>, is_dir: bool) -> bool {
         for g in &self.exclude {
-            if g.matches(rel, is_dir) {
+            if g.matches_view(view, is_dir) {
                 return false;
             }
         }
-        if !self.filter.is_empty() && !self.filter.iter().any(|g| g.matches(rel, is_dir)) {
+        if !self.filter.is_empty() && !self.filter.iter().any(|g| g.matches_view(view, is_dir)) {
             return false;
         }
         if self.include.is_empty() {
             return true;
         }
-        self.include.iter().any(|g| g.matches(rel, is_dir))
+        self.include.iter().any(|g| g.matches_view(view, is_dir))
     }
 
     /// Pruning decision while walking: exclusions stop the descent, and includes never
     /// stop a directory (its children may still match).
     pub fn walk_allows(&self, rel: &str, is_dir: bool) -> bool {
+        self.walk_allows_view(&PathView::new(rel), is_dir)
+    }
+
+    fn walk_allows_view(&self, view: &PathView<'_>, is_dir: bool) -> bool {
         for g in &self.exclude {
-            if g.matches(rel, is_dir) {
+            if g.matches_view(view, is_dir) {
                 return false;
             }
         }
         if is_dir {
             return true;
         }
-        if !self.filter.is_empty() && !self.filter.iter().any(|g| g.matches(rel, is_dir)) {
+        if !self.filter.is_empty() && !self.filter.iter().any(|g| g.matches_view(view, is_dir)) {
             return false;
         }
         if self.include.is_empty() {
             return true;
         }
-        self.include.iter().any(|g| g.matches(rel, is_dir))
+        self.include.iter().any(|g| g.matches_view(view, is_dir))
     }
 }
 
@@ -251,25 +261,27 @@ impl IgnoreRules {
 
     /// True when `rel` (relative to the walk root) is excluded by any layer.
     pub fn is_ignored(&self, rel: &str, is_dir: bool) -> bool {
-        if self.builtin && builtin_hit(rel) {
+        self.is_ignored_view(&PathView::new(rel), is_dir)
+    }
+
+    /// [`IgnoreRules::is_ignored`] on a path already split, so one entry tested against
+    /// several layers splits nothing per layer and nothing per rule.
+    pub fn is_ignored_view(&self, view: &PathView<'_>, is_dir: bool) -> bool {
+        if self.builtin && builtin_hit(view) {
             return true;
         }
         for layer in self.layers.iter().rev() {
             // A layer applies to the paths below its own directory.
-            let sub = if layer.base.is_empty() {
-                rel
-            } else {
-                match rel.strip_prefix(layer.base.as_str()) {
-                    Some(rest) if rest.starts_with('/') => &rest[1..],
-                    _ => continue,
-                }
+            let sub = match view.below(&layer.base) {
+                Some(sub) => sub,
+                None => continue,
             };
-            if sub.is_empty() {
+            if sub.path().is_empty() {
                 continue;
             }
             let mut decision = None;
             for rule in &layer.rules {
-                if rule.matches(sub, is_dir) {
+                if rule.matches_view(&sub, is_dir) {
                     decision = Some(!rule.negated);
                 }
             }
@@ -465,9 +477,45 @@ fn parse_rule(line: &str) -> Option<Glob> {
     Glob::new(t).ok()
 }
 
-fn builtin_hit(rel: &str) -> bool {
-    // Any component, so a cache directory deep in the tree is skipped too.
-    rel.split('/').any(|part| BUILTIN.contains(&part))
+thread_local! {
+    /// The last directory asked about and whether its own path holds a skipped name. A walk
+    /// tests every entry of one directory in a row, so this answer is a repeat, and it turns
+    /// the biggest cost in this module from a path scan into a comparison.
+    static BUILTIN_DIR: RefCell<Option<(String, bool)>> = const { RefCell::new(None) };
+}
+
+/// True when any component of the entry's path is a skipped name, so a cache directory deep
+/// in the tree is skipped as well as one at the root of a scan.
+fn builtin_hit(view: &PathView<'_>) -> bool {
+    if builtin_name(view.name()) {
+        return true;
+    }
+    let parent = view.parent();
+    BUILTIN_DIR.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some((dir, hit)) = cell.as_ref() {
+            if dir == parent {
+                return *hit;
+            }
+        }
+        let hit = parent.split('/').any(builtin_name);
+        match cell.as_mut() {
+            Some((dir, answer)) => {
+                dir.clear();
+                dir.push_str(parent);
+                *answer = hit;
+            }
+            None => *cell = Some((parent.to_string(), hit)),
+        }
+        hit
+    })
+}
+
+/// Is `part` one of the skipped names? Dispatched on the first byte, so a component that
+/// starts like most names in a tree rejects the whole list with one comparison; `BUILTIN`
+/// is compared only inside the buckets it names.
+fn builtin_name(part: &str) -> bool {
+    BUILTIN.contains(&part)
 }
 
 /// Path of the walk root's own directory heading, for `.gitignore` files above the root:
@@ -673,6 +721,28 @@ mod tests {
         );
         assert!(!r.is_ignored("a.txt", false));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_leading_dot_slash_keeps_the_name_rules_working() {
+        let base = tmp("dotslash");
+        fs::write(base.join(".gitignore"), "*.log\nsub/x\n").unwrap();
+        let mut r = IgnoreRules::new(true);
+        r.push_dir(&base, "");
+        assert!(
+            r.is_ignored("./a.log", false),
+            "a name rule reads the last component, so `./` does not hide it"
+        );
+        assert!(
+            !r.is_ignored("./sub/x", false),
+            "an anchored rule is relative to the root, not to `./`"
+        );
+        assert!(r.is_ignored("sub/x", false));
+        assert!(
+            r.is_ignored("./node_modules/x.js", true),
+            "a built-in cache name is still a component"
+        );
+        assert!(!r.is_ignored("./src/main.rs", false));
     }
 
     fn write(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {

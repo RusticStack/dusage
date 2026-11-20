@@ -174,26 +174,36 @@ impl Glob {
         self.matches(rel, false)
     }
 
-    /// Match `rel` (relative to the walk root) as a directory or a file.
+    /// Match `rel` (relative to the walk root) as a directory or a file. This splits `rel`
+    /// for one pattern; a stack of patterns testing the same entry shares one [`PathView`]
+    /// through [`Glob::matches_view`] instead.
     pub fn matches(&self, rel: &str, is_dir: bool) -> bool {
+        self.matches_view(&PathView::new(rel), is_dir)
+    }
+
+    /// Match one entry's [`PathView`], whose strings are already split as [`Glob::matches`]
+    /// splits them, so the shape and anchor dispatch below is that method's exactly.
+    pub fn matches_view(&self, view: &PathView<'_>, is_dir: bool) -> bool {
         if self.dir_only && !is_dir {
             return false;
         }
-        if rel.is_empty() {
+        if view.blank() {
             return false;
         }
-        let rel = rel.trim_end_matches('/');
+        let subject = if self.is_path_pattern() {
+            view.path()
+        } else {
+            view.name()
+        };
+        // A path pattern's subject may spell its separators `\`; a name's cannot, because
+        // it starts after the last one. Normalising here is what makes `a\main.rs` match
+        // `a/*.rs`, and it is skipped for every subject that holds no backslash at all.
         let owned;
-        let rel = if rel.contains('\\') {
-            owned = rel.replace('\\', "/");
+        let subject = if self.is_path_pattern() && subject.contains('\\') {
+            owned = subject.replace('\\', "/");
             owned.as_str()
         } else {
-            rel
-        };
-        let subject = if self.is_path_pattern() {
-            rel
-        } else {
-            rel.rsplit('/').next().unwrap_or(rel)
+            subject
         };
         // A byte subject is matched byte for byte: `?` and a class consume one byte, which is
         // the same thing they consume from a one-byte character, and a pattern character
@@ -201,15 +211,18 @@ impl Glob {
         // character DP, where `?` and a class consume one scalar value.
         if subject.is_ascii() {
             let path = subject.as_bytes();
-            return self.alts.iter().zip(&self.shapes).zip(&self.anchors).any(
-                |((toks, shape), anchor)| match shape {
+            // One zip, and the anchor read only where a `**` or a class needs it: the three
+            // vectors are parallel, and walking them as one pair keeps the iterator state
+            // out of the per-entry cost.
+            for (at, (toks, shape)) in self.alts.iter().zip(&self.shapes).enumerate() {
+                let hit = match shape {
                     Shape::Literal => lit_eq(toks, path, self.ignore_case),
                     Shape::Any => true,
                     Shape::Suffix => lit_suffix(toks, path, self.ignore_case),
                     Shape::Prefix => lit_prefix(toks, path, self.ignore_case),
                     Shape::Between => lit_between(toks, path, self.ignore_case),
                     Shape::Full => {
-                        let found = match anchor {
+                        let found = match &self.anchors[at] {
                             Some(run) if !self.ignore_case => {
                                 crate::bytes::memmem(path, run).is_some()
                             }
@@ -217,8 +230,12 @@ impl Glob {
                         };
                         found && matches_bytes(toks, path, self.ignore_case)
                     }
-                },
-            );
+                };
+                if hit {
+                    return true;
+                }
+            }
+            return false;
         }
         let mut chars: Vec<char> = subject.chars().collect();
         if self.ignore_case {
@@ -227,6 +244,82 @@ impl Glob {
             }
         }
         self.alts.iter().any(|toks| matches_tokens(toks, &chars))
+    }
+}
+
+/// One relative path split into the two subjects a glob tests: the whole path, and its last
+/// component (what a gitignore pattern without a `/` is matched against).
+///
+/// Splitting is the cost, and a walk tests one entry against a stack of patterns — the `-g`
+/// filter, every ignore layer, every rule in it — so the split is made once, by
+/// [`PathView::new`], and the same view is matched by all of them. Building one allocates
+/// nothing: only a path that spells its separators `\` is normalised, once per pattern that
+/// reads the whole path, and a name always starts after the last separator.
+#[derive(Debug, Clone)]
+pub struct PathView<'a> {
+    /// The whole path, trailing `/` removed.
+    path: &'a str,
+    /// Byte offset within `path` where the last component starts.
+    name_at: usize,
+    /// The caller's string was empty. No pattern matches that, while a path of a lone `/`
+    /// trims away to nothing and is matched as the empty string it becomes.
+    blank: bool,
+}
+
+impl<'a> PathView<'a> {
+    pub fn new(rel: &'a str) -> PathView<'a> {
+        let path = rel.trim_end_matches('/');
+        // The last separator of either spelling, searched backwards: the distance to it is
+        // one component, not the whole path. A `\` counts as a separator because it is read
+        // as one, and what follows it is a name that then holds no separator to normalise.
+        let name_at = path
+            .as_bytes()
+            .iter()
+            .rposition(|&b| b == b'/' || b == b'\\')
+            .map_or(0, |at| at + 1);
+        PathView {
+            path,
+            name_at,
+            blank: rel.is_empty(),
+        }
+    }
+
+    /// The whole path, as a pattern containing a `/` sees it.
+    pub fn path(&self) -> &str {
+        self.path
+    }
+
+    /// The last component, as a pattern without a `/` sees it.
+    pub fn name(&self) -> &str {
+        &self.path[self.name_at..]
+    }
+
+    /// Everything above the last component, without the separator: the directory an entry
+    /// sits in, which every sibling of the directory repeats.
+    pub fn parent(&self) -> &str {
+        match self.name_at {
+            0 => "",
+            at => &self.path[..at - 1],
+        }
+    }
+
+    /// The same entry's path as it reads below the directory `base`, or `None` when `base`
+    /// is not a whole-component prefix of it. The cut lands on a component boundary, so the
+    /// result names the same last component.
+    pub fn below(&self, base: &str) -> Option<PathView<'_>> {
+        let rest = match base.is_empty() {
+            true => self.path,
+            false => self.path.strip_prefix(base)?.strip_prefix('/')?,
+        };
+        Some(PathView {
+            path: rest,
+            name_at: self.name_at - (self.path.len() - rest.len()),
+            blank: false,
+        })
+    }
+
+    fn blank(&self) -> bool {
+        self.blank
     }
 }
 
@@ -1258,6 +1351,85 @@ mod tests {
     fn matches_on_empty_rel() {
         assert!(!g("*").is_match(""));
         assert!(!g("**").is_match(""));
+    }
+
+    /// `matches` on a path split once, which is how one entry is tested against a stack of
+    /// patterns. Every test below goes through it, so the two spellings stay in step.
+    fn mv(p: &str, rel: &str, is_dir: bool) -> bool {
+        let glob = g(p);
+        let split = glob.matches_view(&PathView::new(rel), is_dir);
+        assert_eq!(
+            split,
+            glob.matches(rel, is_dir),
+            "{p:?} on {rel:?}, is_dir {is_dir}"
+        );
+        split
+    }
+
+    #[test]
+    fn double_star_answers_at_one_component_and_at_six() {
+        assert!(mv("**/x", "x", false), "**/ matches nothing at all");
+        assert!(mv("**/x", "a/b/c/d/e/x", false));
+        assert!(!mv("**/x", "a/b/c/d/e/f", false));
+        assert!(mv("**", "x", false), "a lone ** is anything");
+        assert!(mv("**", "a/b/c/d/e/f", false));
+        assert!(mv("a/**/f", "a/f", false));
+        assert!(mv("a/**/f", "a/b/c/d/e/f", false));
+        assert!(md("a/**", "a/b/c/d/e/f"));
+        assert!(mv("a/**", "a/b", true));
+        assert!(
+            !mv("a/**", "a", true),
+            "a/** is a/ then **, so it needs the slash"
+        );
+    }
+
+    #[test]
+    fn brace_alternatives_each_carry_their_star() {
+        assert!(mv("*.{rs,toml}", "main.rs", false));
+        assert!(mv("*.{rs,toml}", "Cargo.toml", false));
+        assert!(!mv("*.{rs,toml}", "main.md", false));
+        assert!(mv("{a*,b*}.txt", "abc.txt", false));
+        assert!(mv("{a*,b*}.txt", "bc.txt", false));
+        assert!(!mv("{a*,b*}.txt", "c.txt", false));
+        assert!(mv("{*,}/*.md", "notes/x.md", false), "a */ prefix");
+        assert!(mv("{*,}/*.md", "/x.md", false), "the empty alternative");
+        assert!(mv("**/{src,tests}/*.rs", "a/b/src/main.rs", false));
+        assert!(!mv("**/{src,tests}/*.rs", "a/b/lib/main.rs", false));
+    }
+
+    #[test]
+    fn a_trailing_slash_on_the_subject_is_the_path_without_it() {
+        assert!(mv("*.go", "a.go/", false), "the trailing slash is dropped");
+        assert!(mv("build/", "x/build/", true));
+        assert!(
+            !mv("build/", "x/build/", false),
+            "dir_only still needs a dir"
+        );
+        assert!(
+            !mv("build/*", "build/", true),
+            "the path is left with no child"
+        );
+        assert!(mv("**/x", "a/b/x/", false));
+        assert!(mv("a/**", "a/b/", true));
+    }
+
+    #[test]
+    fn an_entry_named_exactly_like_a_pattern() {
+        assert!(
+            mv("*.log", "*.log", false),
+            "the wildcard matches a literal *"
+        );
+        assert!(mv("*", "*", false));
+        assert!(
+            mv("a\\*b", "a*b", false),
+            "an escaped star is that character"
+        );
+        assert!(!mv("a\\*b", "axb", false));
+        assert!(mv("**/*", "**/*", false));
+        assert!(
+            !mv("[a-z].txt", "[a-z].txt", false),
+            "a class is one character"
+        );
     }
 
     #[test]
