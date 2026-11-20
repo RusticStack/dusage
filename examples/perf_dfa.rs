@@ -5,11 +5,17 @@
 //!
 //! Each pattern is run through [`Pattern`] exactly the way `src/search.rs` runs it — a
 //! block-safe pattern through the block scan (`block_accept_end`, then `block_match` on the
-//! line it lands on), everything else line by line through `find_at` — over a deterministic
-//! synthetic buffer of Go-like source. A run is one whole pass over that buffer, so ns/byte
-//! covers the automaton walk, the skips and the matched lines, and nothing that is not the
-//! search. The buffer is sized and shaped like real source: `corpus` prints its own
-//! statistics so a number can be compared with the CLI it is standing in for.
+//! line it lands on), everything else line by line through `find_at` — over two deterministic
+//! buffers. A run is one whole pass over a buffer, so ns/byte covers the automaton walk, the
+//! skips and the matched lines, and nothing that is not the search.
+//!
+//! The first buffer is Go-like source. The second is what a search spends its time on in a
+//! tree that is not all source: the tool binaries beside it, whose bytes have no line
+//! structure worth the name, an uppercase letter or two in ten, and a `.go` path every twenty
+//! kilobytes — so the automaton cannot jump over much and every position has to be walked.
+//! Both `corpus` and `binary_corpus` print their own statistics, and those are the proportions
+//! of the trees they stand in for, so a number here can be compared with the CLI it is
+//! standing in for.
 
 use dusage::bytes;
 use dusage::pattern::Pattern;
@@ -26,15 +32,31 @@ const RUNS: usize = 5;
 const REPEATS: usize = 3;
 
 fn main() {
-    let buf = corpus(CORPUS);
+    let text = corpus(CORPUS);
+    report("Go-like source", &text, walk, None);
+    // A binary is searched block by block with a plain `find_at`, since it has no lines to
+    // scan for, so every pattern in this table is on that one path.
+    let binary = binary_corpus(CORPUS);
+    report("binary content", &binary, walk_binary, Some("binary"));
+}
+
+/// One table over one buffer, driven the way the CLI drives it for that kind of file.
+fn report(
+    label: &str,
+    buf: &[u8],
+    walk: fn(&Pattern, &[&[u8]]) -> usize,
+    fixed_path: Option<&str>,
+) {
     let upper = buf.iter().filter(|b| b.is_ascii_uppercase()).count();
+    let newlines = buf.iter().filter(|&&b| b == b'\n').count();
     println!(
-        "buffer {} bytes ({:.1}% A-Z, {} .go, {} word), block {} bytes, {} warmup passes, \
-         {} runs per repeat, {} repeats; ns/byte* is the fastest run",
+        "{}: {} bytes ({:.1}% A-Z, one newline per {} bytes, {} .go), block {} bytes, \
+         {} warmup passes, {} runs per repeat, {} repeats; ns/byte* is the fastest run",
+        label,
         buf.len(),
         upper as f64 * 100.0 / buf.len() as f64,
+        buf.len() / newlines.max(1),
         buf.windows(3).filter(|w| w == b".go").count(),
-        buf.windows(4).filter(|w| w == b"word").count(),
         BLOCK,
         WARMUP,
         RUNS,
@@ -46,8 +68,8 @@ fn main() {
     );
     for src in SEARCHED {
         let pat = Pattern::new(src, false, false, false).expect("pattern");
-        let blocks = blocks(&buf);
-        let path = if pat.block_safe() { "block" } else { "line" };
+        let blocks = blocks(buf);
+        let path = fixed_path.unwrap_or(if pat.block_safe() { "block" } else { "line" });
         let re = Regex::new(src).expect("regex");
         let pre = match re.required_literal() {
             Some(run) => String::from_utf8_lossy(run).into_owned(),
@@ -79,17 +101,20 @@ fn main() {
             pre
         );
     }
+    println!();
 }
 
 /// The patterns reported: the one the CLI comparison uses, a common class expression, a word
 /// boundary (which runs the line path), and a rare and a common start byte to show what
-/// skipping is worth.
-const SEARCHED: [&str; 5] = [
+/// skipping is worth. `[Z]{6}[a-z]{9}` is the CLI's never-matching row, whose every byte has to
+/// be walked because it has no run to jump between.
+const SEARCHED: [&str; 6] = [
     r"[A-Z][a-zA-Z0-9_]*\.go",
     r"[a-z]+_[a-z]+",
     r"\bword\b",
     r"[QZ][a-z]+",
     r"[A-Z][a-z]+",
+    r"[Z]{6}[a-z]{9}",
 ];
 
 /// The buffer cut into the blocks a scanner feeds the engine. Each boundary is moved back to
@@ -146,6 +171,27 @@ fn walk(pat: &Pattern, blocks: &[&[u8]]) -> usize {
         }
     }
     lines
+}
+
+/// One pass over a binary the way `Scanner` runs one: a file reported by name is scanned block
+/// by block with a plain search, there being no line structure to keep. That search stops at the
+/// first match, which would make ns/byte depend on where in the buffer the match sat, so this
+/// keeps going past it and covers every byte — the same work, with a denominator that means the
+/// same thing for a pattern that matches and one that does not. A binary that does not match is
+/// the common case and the expensive one, since nothing ends its scan early.
+fn walk_binary(pat: &Pattern, blocks: &[&[u8]]) -> usize {
+    let mut hits = 0;
+    for body in blocks {
+        let mut at = 0;
+        while at < body.len() {
+            let Some(m) = pat.find_at(body, at) else {
+                break;
+            };
+            hits += 1;
+            at = m.end.max(m.start + 1);
+        }
+    }
+    hits
 }
 
 /// Go-like source, in the proportions real Go source has: about 9% of its bytes uppercase,
@@ -285,6 +331,69 @@ fn corpus(size: usize) -> Vec<u8> {
                 out.extend_from_slice(u3.as_bytes());
                 out.extend_from_slice(b"{}}\n");
             }
+        }
+    }
+    out.truncate(size);
+    // The buffer ends on a line boundary so the last block is a whole one.
+    while out.last() != Some(&b'\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Machine code, in the proportions a Go tool binary has: 23% of its bytes above 0x7f, one
+/// uppercase letter in ten, one lowercase letter in ten, one digit in fifty, one newline every
+/// 212 bytes, and a `.go` path every 22 KB. One in twenty-four of those paths sits in a
+/// capitalised file name, which is the thing `[A-Z][a-zA-Z0-9_]*\.go` matches.
+fn binary_corpus(size: usize) -> Vec<u8> {
+    const PUNCT: &[u8] = b" \t:;,.[]{}()<>-_=+*/&|!?\"'#$%@^~";
+    const WORDS: [&str; 12] = [
+        "runtime", "reflect", "internal", "sync", "atomic", "errors", "context", "unicode",
+        "strconv", "hash", "sort", "time",
+    ];
+    const UPPER: [&str; 8] = [
+        "Config", "Reader", "Server", "Client", "Handle", "Result", "Context", "Packet",
+    ];
+    let mut out = Vec::with_capacity(size + 256);
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    // One drawing per byte decides which kind of byte it is, so the shares below are the
+    // shares in the buffer.
+    let byte = |r: u64| -> u8 {
+        let kind = r % 100;
+        match kind {
+            0..=22 => ((r >> 8) as u8) | 0x80,
+            23..=33 => b'A' + ((r >> 16) as u8 % 26),
+            34..=44 => b'a' + ((r >> 24) as u8 % 26),
+            45..=46 => b'0' + ((r >> 32) as u8 % 10),
+            _ => PUNCT[(r >> 40) as usize % PUNCT.len()],
+        }
+    };
+    let mut paths = 0usize;
+    while out.len() < size {
+        let len = 20 + (next() >> 5) as usize % 384;
+        for _ in 0..len {
+            let b = byte(next());
+            out.push(b);
+        }
+        out.push(b'\n');
+        // A `.go` path turns up at the rate one does in the real binary.
+        if next() % 104 == 0 {
+            out.extend_from_slice(b"src/");
+            out.extend_from_slice(WORDS[(next() >> 11) as usize % WORDS.len()].as_bytes());
+            out.extend_from_slice(b"/");
+            let name = match paths % 24 {
+                0 => UPPER[(next() >> 17) as usize % UPPER.len()],
+                _ => WORDS[(next() >> 23) as usize % WORDS.len()],
+            };
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b".go");
+            paths += 1;
         }
     }
     out.truncate(size);

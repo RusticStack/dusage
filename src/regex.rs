@@ -568,6 +568,75 @@ impl Regex {
         Some(None)
     }
 
+    /// The leftmost-first match found by jumping between candidate runs, the span form of
+    /// [`Self::candidate_end`]. Every match holds one of the runs, so the first match can only
+    /// lie on the line that holds the first candidate at or after `from`: the automaton walks
+    /// that line and never the bytes between two candidates. `None` is the automaton giving up
+    /// (the state cap), which leaves the answer to the slow path; `Some(None)` is a proof that
+    /// no match exists.
+    fn candidate_find(&self, cand: &Candidates, hay: &[u8], from: usize) -> Option<Option<Match>> {
+        let mut at = from;
+        // A walk that found nothing in `[p, line_end)` also rules a match out for every
+        // candidate after `p` in that line, since a walk from one of them would cover a span
+        // already walked: `clear_to` is how far the last such proof reaches.
+        let mut clear_to = 0usize;
+        while let Some((p, i)) = cand.scan.find_any(hay, at) {
+            let (run, place) = &cand.runs[i];
+            match place {
+                // The run is the whole match, so the earliest one starts the earliest match.
+                Place::Whole => {
+                    return Some(Some(Match {
+                        start: p,
+                        end: p + run.len(),
+                    }))
+                }
+                // Every match begins with the run, so a match begins here or nowhere, and the
+                // line is as far as it can run: the walk over the line resolves the span, and
+                // the start state never re-enters before the match, so that span is the
+                // leftmost-first one.
+                Place::Start => {
+                    let le = line_end(hay, p);
+                    if p >= clear_to {
+                        match with_dfa(self, |c| c.find(&self.prog, &hay[p..le], 0, self.anchor()))
+                        {
+                            Some(Some(Some(m))) => {
+                                return Some(Some(Match {
+                                    start: p + m.start,
+                                    end: p + m.end,
+                                }))
+                            }
+                            Some(Some(None)) => clear_to = le,
+                            _ => return None,
+                        }
+                    }
+                    at = p + 1;
+                }
+                // Nothing is known about where the run sits, so the line holding it is the
+                // least the automaton can be asked to walk: a match cannot cross the newline
+                // that ends that line, so a line with no match in it holds none, and the walk
+                // over the line ends on the leftmost-first match for the VM to resolve. The
+                // walk runs on the line rather than on the whole haystack so that the span is
+                // resolved from where the automaton last ran out of threads, not from the
+                // start of the haystack.
+                Place::Any => {
+                    let ls = line_start(hay, p).max(from);
+                    let le = line_end(hay, p);
+                    match with_dfa(self, |c| c.find(&self.prog, &hay[ls..le], 0, self.anchor())) {
+                        Some(Some(Some(m))) => {
+                            return Some(Some(Match {
+                                start: ls + m.start,
+                                end: ls + m.end,
+                            }))
+                        }
+                        Some(Some(None)) => at = le + 1,
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        Some(None)
+    }
+
     /// True when the pattern uses no line-relative assertion, so a whole block can be
     /// matched at once: `^` and `$` would otherwise mean "start and end of the block".
     pub fn assertion_free(&self) -> bool {
@@ -631,6 +700,13 @@ impl Regex {
                 start: i,
                 end: i + lit.len(),
             });
+        }
+        // With runs to jump between, the answer comes from walking the lines they sit on
+        // rather than every byte between them.
+        if let Some(cand) = &self.cand {
+            if let Some(found) = self.candidate_find(cand, hay, start) {
+                return found;
+            }
         }
         // A haystack without a run of bytes the pattern cannot match without cannot match it
         // at all, and proving that is a scan rather than an automaton walk.
@@ -4159,6 +4235,102 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A generated corpus for the candidate scan: patterns from a small grammar, haystacks over a
+    /// small alphabet, every answer compared span for span with the Pike VM. The scan is the one
+    /// path that decides for itself how much of the haystack the automaton has to walk, so a
+    /// pattern it reads wrong costs a match rather than time — and the grammar is drawn to reach
+    /// it: a mandatory run it can jump between, an optional assertion branch, and a newline in
+    /// the alphabet for the line bound it works from.
+    #[test]
+    fn the_candidate_scan_agrees_with_the_vm_on_generated_patterns() {
+        // A tiny LCG, so the corpus is deterministic and needs no dependency.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut pick = move |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        // A run of at least two bytes is what the scan jumps between, so every pattern starts
+        // with one. `+` and `{2,3}` cannot match empty and `?` and `*` can, so the first atom is
+        // never the one that makes the pattern able to match nothing — which is what a candidate
+        // scan needs to be sound at all.
+        let runs: [&str; 6] = ["ab", "b.", "aa", "A.", "_a", "ab\\.ba"];
+        let mandatory: [&str; 3] = ["", "+", "{2,3}"];
+        let atoms: [&str; 9] = ["a", "b", "A", ".", "[ab]", "[a-z]", "[A-Z]", "[0-9]", "0"];
+        // A class that permits a newline, or an assertion, makes a candidate scan unsound, so
+        // both are drawn rarely: they are here for the patterns that must not reach the scan.
+        let others: [&str; 4] = ["[^b]", "\\s", "\\b", "^"];
+        let quantifiers: [&str; 5] = ["", "+", "{2,3}", "?", "*"];
+        let mut with_candidates = 0;
+        let mut checked = 0;
+        for _ in 0..500 {
+            let alternation = pick(4) == 0;
+            let mut pattern = String::new();
+            if alternation {
+                pattern.push_str("(?:");
+            }
+            for i in 0..1 + pick(3) {
+                if i > 0 && alternation && pick(3) == 0 {
+                    pattern.push('|');
+                }
+                let atom = match (i, pick(8)) {
+                    (0, _) => runs[pick(runs.len())].to_string(),
+                    (_, 0..=1) => runs[pick(runs.len())].to_string(),
+                    (_, 7) => others[pick(others.len())].to_string(),
+                    _ => atoms[pick(atoms.len())].to_string(),
+                };
+                pattern.push_str(&atom);
+                pattern.push_str(if i == 0 {
+                    mandatory[pick(mandatory.len())]
+                } else {
+                    quantifiers[pick(quantifiers.len())]
+                });
+            }
+            if alternation {
+                pattern.push(')');
+            }
+            let case_insensitive = pick(2) == 0;
+            let flags = Flags {
+                case_insensitive,
+                ..Flags::default()
+            };
+            let Ok(re) = Regex::new_with(&pattern, flags) else {
+                continue;
+            };
+            if re.cand.is_some() {
+                with_candidates += 1;
+            }
+            for _ in 0..6 {
+                let len = pick(40);
+                let alphabet = b"abA._\n";
+                let hay: Vec<u8> = (0..len).map(|_| alphabet[pick(alphabet.len())]).collect();
+                for at in 0..=hay.len() {
+                    assert_eq!(
+                        re.find_at(&hay, at),
+                        vm_find(&re, &hay, at),
+                        "{pattern:?} (i={case_insensitive}) on {:?} from {at}",
+                        String::from_utf8_lossy(&hay)
+                    );
+                    assert_eq!(
+                        re.is_match(&hay[at..]),
+                        vm_find(&re, &hay[at..], 0).is_some(),
+                        "{pattern:?} is_match on {:?} from {at}",
+                        String::from_utf8_lossy(&hay[at..])
+                    );
+                }
+                checked += 1;
+            }
+        }
+        // The corpus has to reach the path under test, not just agree with the VM by never
+        // taking it.
+        assert!(
+            with_candidates > 120,
+            "only {with_candidates} generated patterns had a candidate run"
+        );
+        assert!(checked > 2000, "only {checked} haystacks were compared");
     }
 
     #[test]
