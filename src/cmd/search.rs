@@ -1340,6 +1340,20 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                     return Err("-U cannot be combined with -A/-B/-C".to_string().into());
                 }
             }
+            // grep prints the file name whenever more than one file is in play, which a
+            // directory or a second root guarantees, and `--vimgrep` has a field for the path
+            // even on one file; `-h` and `-H` have already had their say above.
+            if o.with_filename.is_none()
+                && (o.vimgrep || o.roots.iter().any(|p| p.is_dir()) || o.roots.len() > 1)
+            {
+                o.with_filename = Some(true);
+            }
+            // Every mode that prints the result of a file as it is found, in the order the
+            // whole answer would have printed them. A reversed or time-keyed sort has to see
+            // every result before the first one, `--json` closes with a count, and `-q` prints
+            // nothing at all, so those keep the collected report.
+            let stream =
+                !json && o.sort == SortKey::Path && !o.sort_reverse && !o.quiet && !read_stdin;
             let report = if read_stdin {
                 let mut data = Vec::new();
                 std::io::stdin()
@@ -1350,6 +1364,14 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 }
                 crate::search::search_buffer(&o, "(standard input)", &data)
                     .map_err(|e| Fail(1, e.to_string()))?
+            } else if stream {
+                let mut out =
+                    std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock());
+                let mut printer =
+                    report::SearchStream::new(&o, color, o.with_filename.unwrap_or(false));
+                crate::search::search_stream(&o, &mut |f| printer.file(&mut out, f))
+                    .and_then(|r| out.flush().map(|()| r))
+                    .map_err(Fail::output)?
             } else {
                 search(&o).map_err(|e| Fail(1, e.to_string()))?
             };
@@ -1542,14 +1564,6 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         }
     };
 
-    // grep prints the file name whenever more than one file is in play, which a directory or
-    // a second root guarantees, and `--vimgrep` has a field for the path even on one file;
-    // `-h` and `-H` have already had their say above.
-    if o.with_filename.is_none()
-        && (o.vimgrep || o.roots.iter().any(|p| p.is_dir()) || o.roots.len() > 1)
-    {
-        o.with_filename = Some(true);
-    }
     let errs = report.stats.errors.total();
     if errs > 0 && !a.flag("-q") && !a.flag("--quiet") && !a.flag("--no-messages") {
         eprintln!("dusage: {errs} path(s) could not be read");
