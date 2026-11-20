@@ -209,6 +209,82 @@ fn hidden_files_need_the_flag() {
     assert!(stdout(&o).contains(".env"));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_fifo_under_a_walked_root_is_skipped_not_opened() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let f = Fixture::new("fifo");
+    let fifo = f.root.join("a-pipe");
+    // `mkfifo` is POSIX and in coreutils; without it there is nothing to test.
+    let made = Command::new("mkfifo")
+        .arg(&fifo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !made {
+        return;
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dusage"))
+        .args(["search", "needle"])
+        .arg(&f.root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Opening a FIFO for reading blocks until a writer appears, so a regression here would
+    // hang the whole search: wait a bounded time and kill it rather than wedging the suite.
+    let start = Instant::now();
+    let mut status = None;
+    while start.elapsed() < Duration::from_secs(10) {
+        if let Some(s) = child.try_wait().unwrap() {
+            status = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the search hung on a FIFO in the tree");
+    };
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the file beside the pipe still matches"
+    );
+    let mut out = String::new();
+    use std::io::Read;
+    child
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    assert!(out.contains("needle"), "{out}");
+}
+
+#[test]
+fn quiet_answers_the_question_and_an_error_does_not_outrank_a_match() {
+    let f = Fixture::new("quiet_exit");
+    let missing = f.root.join("absent.txt");
+    let missing = missing.to_str().unwrap();
+    let ok = f.root.join("src/main.rs");
+    let ok = ok.to_str().unwrap();
+    // A found line is the answer `-q` asked for, so a path that could not be read does not
+    // turn it into a failure — grep's rule, and the same for a path that is not there.
+    let found = run(&["search", "-q", "needle", ok, missing], &f.root);
+    assert_eq!(code(&found), 0, "{}", stderr(&found));
+    // Without a match the error is the answer.
+    let nothing = run(&["search", "-q", "definitely-absent", ok, missing], &f.root);
+    assert_eq!(code(&nothing), 2, "{}", stderr(&nothing));
+    // Every other mode still refuses a bad starting point, match or no match.
+    let loud = run(&["search", "needle", ok, missing], &f.root);
+    assert_eq!(code(&loud), 2, "{}", stderr(&loud));
+}
+
 #[test]
 fn quiet_is_silent_and_fast() {
     let f = Fixture::new("quiet");

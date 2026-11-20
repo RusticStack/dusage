@@ -2206,6 +2206,30 @@ fn scan_file(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Op
     res
 }
 
+/// Open a file for the scan, or skip it when it is not a regular file.
+///
+/// A FIFO or a device node blocks `open` until a writer appears, which would hang the whole
+/// search on a tree that happens to hold one; ripgrep skips such entries inside a walk, so
+/// this does too. `O_NONBLOCK` is what makes the open return, so the entry is recognised and
+/// passed over instead of waited on. `find` never reads a file's contents and `du` answers
+/// from the directory record, so their handling of special files is unaffected.
+fn open_scan(path: &Path) -> io::Result<Option<File>> {
+    let mut opts = File::options();
+    opts.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(crate::unix::sys::O_NONBLOCK);
+    }
+    let f = opts.open(path)?;
+    // The open did not block, so this answers about the entry itself.
+    if f.metadata()?.is_file() {
+        Ok(Some(f))
+    } else {
+        Ok(None)
+    }
+}
+
 fn scan_file_with(
     path: &Path,
     o: &SearchOptions,
@@ -2229,7 +2253,9 @@ fn scan_file_with(
             return scan_prepared(path, cmd, o, stats);
         }
     }
-    let mut f = File::open(path)?;
+    let Some(mut f) = open_scan(path)? else {
+        return Ok(None);
+    };
     stats.files_scanned += 1;
     let n = f.read(&mut *buf)?;
     if n == 0 {
@@ -2384,7 +2410,9 @@ fn scan_multiline(
     o: &SearchOptions,
     stats: &mut Stats,
 ) -> io::Result<Option<FileHits>> {
-    let mut f = File::open(path)?;
+    let Some(mut f) = open_scan(path)? else {
+        return Ok(None);
+    };
     stats.files_scanned += 1;
     let mut data = Vec::new();
     f.read_to_end(&mut data)?;
@@ -2503,7 +2531,9 @@ fn scan_prepared(
 /// cut in memory rather than streamed: a file of records is small, and the line scanner is
 /// built around a newline.
 fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result<Option<FileHits>> {
-    let mut f = File::open(path)?;
+    let Some(mut f) = open_scan(path)? else {
+        return Ok(None);
+    };
     stats.files_scanned += 1;
     let mut data = Vec::new();
     f.read_to_end(&mut data)?;
@@ -3524,6 +3554,22 @@ pub fn has_output(r: &SearchReport, o: &SearchOptions) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn open_scan_skips_a_device_node_and_takes_a_regular_file() {
+        // `/dev/null` is a character device: opening it is not the problem, reading a FIFO
+        // for ever is, so the guard rejects anything that is not a regular file.
+        assert!(super::open_scan(std::path::Path::new("/dev/null"))
+            .unwrap()
+            .is_none());
+        let dir = std::env::temp_dir().join(format!("dusage_open_scan_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(super::open_scan(&file).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering as O};
