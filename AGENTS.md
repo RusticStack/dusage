@@ -168,14 +168,15 @@ Open:
 - Measure the Linux backends properly: the thread sweep and the cold-cache numbers in
   README were taken on a 2-vCPU container, and a `getdents64`-level enumerator (raw
   syscall, no `read_dir` allocation) is unexplored.
-- Verify the macOS port on a real Mac. Everything there is cross-checked from Linux and
-  nothing has been run on macOS: the Darwin `struct stat`/`dirent`/`kevent` layouts and the
-  `$INODE64` symbol aliases are pinned by `const` assertions that prove the declaration is
-  self-consistent and nothing about libSystem, so the first `cargo build` and `cargo test`
-  on a Mac is what confirms them. arm64 is untested; FSEvents is deferred (CoreFoundation
-  against zero dependencies); the kqueue feed stops at 4096 watched directories and gives
-  up wholesale past that; `getmntinfo` is unbound, so only the mounts `/Volumes` lists are
-  refused as volume roots and `-fstype` answers nothing. Details in `docs/ROADMAP.md`.
+- Verify the rest of the macOS port on a real Mac. x86_64 has now built and run there
+  (the `macos-15-intel` leg), which confirms the `$INODE64` bindings and the `struct`
+  layouts; arm64 has not, and it binds the plain symbols instead because Apple exports them
+  at 64-bit width there. FSEvents is deferred (CoreFoundation against zero dependencies);
+  the kqueue feed stops at 4096 watched directories and gives up wholesale past that;
+  `getmntinfo` is unbound, so only the mounts `/Volumes` lists are refused as volume roots
+  and `-fstype` answers nothing. The guard matches both the lexical and the canonical
+  spelling of a path, because `/etc`, `/tmp`, `/bin`, `/sbin` and `/var` are symlinks into
+  `/private` there. Details in `docs/ROADMAP.md`.
 
 ## Style
 

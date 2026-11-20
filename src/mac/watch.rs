@@ -352,6 +352,8 @@ mod tests {
         p
     }
 
+    /// Names relative to the root the feed was opened with, which is the spelling the
+    /// caller gave: the feed reports paths under that root and never a resolved one.
     fn names(paths: &[PathBuf], root: &Path) -> Vec<String> {
         let mut v: Vec<String> = paths
             .iter()
@@ -371,7 +373,7 @@ mod tests {
     fn reports_created_and_removed_entries() {
         let root = tmp("create");
         std::fs::create_dir(root.join("sub")).unwrap();
-        let mut src = ChangeSource::open(&resolve_root(&root)).expect("kqueue available");
+        let mut src = ChangeSource::open(&root).expect("kqueue available");
         assert!(src.poll(Duration::from_millis(10)).unwrap().is_empty());
         std::fs::write(root.join("sub/new.bin"), b"x").unwrap();
         let got = names(&src.poll(Duration::from_millis(2000)).unwrap(), &root);
@@ -386,7 +388,7 @@ mod tests {
     fn a_change_in_the_root_reports_its_children() {
         let root = tmp("rootchurn");
         std::fs::write(root.join("a.txt"), b"x").unwrap();
-        let mut src = ChangeSource::open(&resolve_root(&root)).expect("kqueue available");
+        let mut src = ChangeSource::open(&root).expect("kqueue available");
         std::fs::write(root.join("b.txt"), b"x").unwrap();
         let got = names(&src.poll(Duration::from_millis(2000)).unwrap(), &root);
         // The parent is named because kqueue reports the directory, never the entry.
@@ -398,7 +400,7 @@ mod tests {
     #[test]
     fn a_new_directory_is_watched() {
         let root = tmp("newdir");
-        let mut src = ChangeSource::open(&resolve_root(&root)).expect("kqueue available");
+        let mut src = ChangeSource::open(&root).expect("kqueue available");
         let late = root.join("late");
         std::fs::create_dir(&late).unwrap();
         let got = names(&src.poll(Duration::from_millis(2000)).unwrap(), &root);
@@ -409,10 +411,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The contract the Linux feed has: paths come back under the root the caller passed,
+    /// in that spelling. On macOS the system temp dir is `/var/folders/...` and resolves to
+    /// `/private/var/folders/...`, so a feed that reported the resolved form would hand the
+    /// scanner paths from a corner of the filesystem it never named.
+    #[test]
+    fn poll_reports_paths_in_the_spelling_the_caller_gave() {
+        let root = tmp("spelling");
+        std::fs::create_dir(root.join("sub")).unwrap();
+        let mut src = ChangeSource::open(&root).expect("kqueue available");
+        std::fs::write(root.join("sub/a.bin"), b"x").unwrap();
+        let got = src.poll(Duration::from_millis(2000)).unwrap();
+        assert!(!got.is_empty(), "the write must be seen");
+        let resolved = resolve_root(&root);
+        for p in &got {
+            assert!(
+                p.starts_with(&root),
+                "{p:?} is not under the root given, {:?}",
+                root
+            );
+            if resolved != root {
+                assert!(!p.starts_with(&resolved), "{p:?} came back resolved");
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn poll_honours_its_timeout() {
         let root = tmp("timeout");
-        let mut src = ChangeSource::open(&resolve_root(&root)).unwrap();
+        let mut src = ChangeSource::open(&root).unwrap();
         let t = Instant::now();
         assert!(src.poll(Duration::from_millis(120)).unwrap().is_empty());
         assert!(
@@ -426,7 +454,7 @@ mod tests {
     #[test]
     fn a_tree_past_the_budget_refuses_the_whole_feed() {
         let root = tmp("budget");
-        let mut s = ChangeSource::open(&resolve_root(&root)).unwrap();
+        let mut s = ChangeSource::open(&root).unwrap();
         // Fill the budget by hand rather than on disk: the point is what `add` answers
         // once it is spent.
         for i in 0..MAX_WATCHED_DIRS {

@@ -280,14 +280,11 @@ pub const PROTECTED_SUMMARY: &str =
 pub use macos::is_protected_root;
 
 /// What `is_protected_root` refuses, for the message a tool prints on refusal.
-///
-/// `/private` is refused as a whole subtree, which also covers `/private/tmp` and
-/// `/private/var/tmp`: over-refusing the natural scratch space is the right bias for a
-/// delete path, and no flag opens the guard.
 #[cfg(target_os = "macos")]
 pub const PROTECTED_SUMMARY: &str =
-    "the filesystem root, /System, /Library, /usr, /bin, /sbin, /etc, /private, \
-     /Applications, /cores, /dev, /Users, $HOME, /opt and every mounted volume root";
+    "the filesystem root, /System, /Library, /usr, /bin, /sbin, /etc, /private/etc, \
+     /Applications, /cores, /dev, /Users, $HOME, /opt, /Volumes, /private/tmp, \
+     /private/var and every mounted volume root";
 
 /// Protection for destructive tools on macOS.
 ///
@@ -296,10 +293,12 @@ pub const PROTECTED_SUMMARY: &str =
 /// comparison against two sets. Anything that cannot be normalised is treated as
 /// protected.
 ///
-/// On macOS that second layer is doing real work rather than closing an edge case: the
-/// root directory is a read-only volume, and `/etc`, `/tmp`, `/bin`, `/sbin` and `/var`
-/// are symlinks into `/private`, so the path a user types usually differs from the tree
-/// it names.
+/// On macOS that second layer is load-bearing rather than an edge case: the root is a
+/// read-only volume, and `/etc`, `/tmp`, `/bin`, `/sbin` and `/var` are symlinks into
+/// `/private`, so the spelling a user types and the tree it names are different paths.
+/// A path is protected when **either** its lexical form or its canonical form is, which is
+/// why `/etc/passwd` and `/private/etc/passwd` both answer, and why `/tmp/x` answers on
+/// `/private/tmp/x` even though `/private` itself is not a refused subtree.
 ///
 /// Mount points are not special-cased on the way down: a prune never descends into one,
 /// so only a root the user typed explicitly can be a mount. The volume roots themselves
@@ -321,7 +320,7 @@ mod macos {
             "/bin",
             "/sbin",
             "/etc",
-            "/private",
+            "/private/etc",
             "/Applications",
             "/cores",
             "/dev",
@@ -335,13 +334,18 @@ mod macos {
     /// above it are refused, but their children (`$HOME/scratch`, `/opt/app/cache`) stay
     /// prunable.
     ///
+    /// `/private/var` and `/private/tmp` belong here rather than among the whole subtrees:
+    /// macOS's `$TMPDIR` lives under `/private/var/folders`, and a pruner that cannot work
+    /// in the system temp directory cannot do the job it exists for. This is the shape
+    /// Linux has, where `/var` is refused and `/var/tmp` is not.
+    ///
     /// Every mounted volume root belongs in this set too, and the volumes a person
     /// mounts are the ones `/Volumes` lists. `getmntinfo` would name the rest, but its
     /// `struct statfs` is not bound in this crate, so a volume mounted outside `/Volumes`
     /// is not refused as a volume root — only the device comparison in the prune stops it
     /// being walked into.
     fn data_dirs() -> Vec<PathBuf> {
-        let mut v: Vec<PathBuf> = ["/Users", "/opt", "/Volumes"]
+        let mut v: Vec<PathBuf> = ["/Users", "/opt", "/Volumes", "/private/tmp", "/private/var"]
             .iter()
             .map(PathBuf::from)
             .collect();
@@ -373,9 +377,13 @@ mod macos {
         let real = fs::canonicalize(p)
             .ok()
             .and_then(|c| lexical(&c))
-            .unwrap_or(abs);
-        system_trees().iter().any(|s| real.starts_with(s))
-            || data_dirs().iter().any(|s| s.starts_with(&real))
+            .unwrap_or_else(|| abs.clone());
+        let trees = system_trees();
+        let data = data_dirs();
+        // Both spellings, against both sets: see the module comment.
+        [&abs, &real].iter().any(|q| {
+            trees.iter().any(|s| q.starts_with(s)) || data.iter().any(|s| s.starts_with(*q))
+        })
     }
 }
 
@@ -486,8 +494,10 @@ mod macos_tests {
             "/bin",
             "/sbin",
             "/etc",
+            "/private/etc",
             "/private",
             "/private/var",
+            "/private/tmp",
             "/Applications",
             "/cores",
             "/dev",
@@ -496,19 +506,25 @@ mod macos_tests {
         }
     }
 
-    /// `/etc` and `/bin` are symlinks into `/private` on macOS, so a path that names them
-    /// only protects because the second layer canonicalises before comparing. Both
-    /// spellings, plus a `/private`-prefixed one, have to answer the same.
+    /// `/etc` and `/bin` are symlinks into `/private`, so the spelling a user types and the
+    /// tree it names are different paths. `/private` is not a refused subtree any more, so
+    /// neither spelling can piggyback on it: each is matched in its own right.
     #[test]
     fn both_spellings_of_a_symlinked_system_dir_are_protected() {
         for s in [
-            "/etc/hosts",
+            "/etc/passwd",
+            "/private/etc/passwd",
             "/bin/sh",
             "/sbin/ifconfig",
-            "/private/etc/hosts",
+            "/private/etc",
+            "/tmp/x",
+            "/private/tmp/x",
+            "/var",
+            "/private/var",
         ] {
-            assert!(is_protected_root(&lexical(Path::new(s)).unwrap()), "{s:?}");
-            assert!(prot(s), "{s:?} reached under a different spelling");
+            let lexical_form = lexical(Path::new(s)).unwrap();
+            assert!(is_protected_root(&lexical_form), "{s:?} lexically");
+            assert!(prot(s), "{s:?} as typed");
         }
         // A link the user made, pointing at a protected tree, is caught by canonicalising.
         let dir = std::env::temp_dir().join(format!("dusage_guard_mac_{}", std::process::id()));
@@ -559,6 +575,7 @@ mod macos_tests {
         assert!(!prot("/tmp/x"));
         assert!(!prot("/private/var/log/journal"));
         assert!(!prot("/opt/app"));
+        assert!(!prot("/opt/app/cache"));
         assert!(!prot("/usrx"));
         assert!(!prot("/etcx/y"));
         assert!(!prot("some-relative-dir"));
@@ -572,12 +589,45 @@ mod macos_tests {
         assert!(prot("   "));
     }
 
-    /// `/private` is refused as a whole subtree, which is a deliberate over-refusal: the
-    /// natural scratch space under it is not prunable, and no flag opens the guard.
+    /// The bug the first macOS CI run caught: refusing `/private` subtree-wide left every
+    /// temp directory unprunable, and a pruner that cannot work in `$TMPDIR` is broken
+    /// rather than cautious. The directory is refused; its children are not.
     #[test]
-    fn private_tmp_is_refused_although_it_is_scratch_space() {
-        assert!(prot("/private/tmp"));
-        assert!(prot("/private/tmp/x"));
+    fn a_fresh_temp_directory_is_prunable() {
+        let dir = std::env::temp_dir().join(format!(
+            "dusage_guard_prunable_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(
+            !is_protected_root(&dir),
+            "a temp directory must be prunable: {}",
+            dir.display()
+        );
+        assert!(
+            !is_protected_root(&dir.join("cache/x")),
+            "and so must its children"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_temp_and_var_roots_are_refused_but_their_children_are_not() {
+        for s in ["/private/tmp", "/private/var", "/var", "/tmp", "/private"] {
+            assert!(prot(s), "{s:?} itself");
+        }
+        for s in [
+            "/private/tmp/x",
+            "/private/var/folders/x/y",
+            "/tmp/x",
+            "/var/tmp",
+        ] {
+            assert!(!prot(s), "{s:?} is a child of a data root");
+        }
     }
 }
 

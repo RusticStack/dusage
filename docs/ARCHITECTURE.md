@@ -134,6 +134,16 @@ Their children stay prunable (`/var/tmp`, `/opt/app/cache`), the way `C:\Windows
 Windows. Mount points are deliberately not special-cased: a prune never descends into one, so
 only a path the user typed can be a mount.
 
+**macOS:** the same three layers, and both spellings. Whole subtrees: `/System`, `/Library`,
+`/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/Applications`, `/cores`, `/dev`. Refused with
+their ancestors but not their children: `/Users`, `$HOME`, `/opt`, `/Volumes`, `/private/tmp`,
+`/private/var`, and every volume root listed under `/Volumes`. `/` is always protected. The
+canonical form is not enough on its own and the lexical one is not either — `/etc` and `/tmp`
+and `/var` are symlinks into `/private`, so a path is protected when **either** spelling
+matches, which is why `/etc/passwd` and `/private/etc/passwd` both answer and why `/private/var`
+is refused while `/private/var/folders/x/y` is not. That last pair is deliberate: `$TMPDIR`
+lives under `/private/var/folders`, and a pruner that cannot work there cannot do its job.
+
 ### report (`src/report.rs`)
 
 ```rust

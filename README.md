@@ -153,7 +153,7 @@ you want for `dusage /`. Windows mount points are reparse points and are always 
 | `-fstype` | no names | `/proc/self/mountinfo` | no names yet (`getmntinfo` unbound) |
 | Links never followed | reparse points of any kind | symlinks | symlinks |
 | `--one-filesystem` | no-op (mount points are links) | skips other devices | skips other devices |
-| Protected `fastdel` roots | volume roots, `Windows`, `Program Files`, `ProgramData`, profile | `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` | `/`, `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private`, `/Applications`, `/cores`, `/dev`, `/Users`, `$HOME`, `/opt`, `/Volumes` and each volume root in it |
+| Protected `fastdel` roots | volume roots, `Windows`, `Program Files`, `ProgramData`, profile | `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` | `/`, the `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/Applications`, `/cores` and `/dev` subtrees, `/Users`, `$HOME`, `/opt`, `/Volumes`, `/private/tmp`, `/private/var` and each volume root |
 
 macOS is built and cross-checked for `x86_64-apple-darwin`. Apple-silicon `arm64` is a
 different target and is **unverified**: nothing in this repository has run it. The Darwin

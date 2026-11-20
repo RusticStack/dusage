@@ -422,9 +422,13 @@ and never following a symlink. `--watch` is kqueue. The guard refuses `/`, the s
   up as a whole.
 - **FSEvents is deferred.** It needs CoreFoundation, which zero dependencies rules out for
   this port. kqueue is what shipped.
-- **`/private` is refused as a whole subtree**, so `/private/tmp` and `/private/var/tmp` are
-  not prunable. Over-refusal is the correct bias for a delete path and no flag opens the
-  guard.
+- **The guard's two sets were split by evidence, not by taste.** Refusing `/private` as a
+  whole subtree, which the first version did, made every temp directory unprunable: macOS's
+  `$TMPDIR` is `/private/var/folders/...`, so a pruner could not touch the one place macOS
+  scratch actually collects. `/private/etc` is a refused subtree; `/private/tmp` and
+  `/private/var` are refused as data roots whose children stay prunable, the shape Linux
+  has with `/var` and `/var/tmp`. Matching runs on both the lexical and the canonical
+  spelling, so `/etc/passwd` and `/private/etc/passwd` both answer.
 - **A volume mounted outside `/Volumes` is not refused as a volume root.** `getmntinfo` and
   `struct statfs` are not bound, so the guard only sees the mounts `/Volumes` lists; the
   prune's device comparison is what stops a walk into any other one. `-fstype` answers
