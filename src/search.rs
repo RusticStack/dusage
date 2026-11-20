@@ -49,6 +49,16 @@ pub enum Scope {
     Paths,
 }
 
+/// Whether a walk fills each candidate's absolute path. A listing prints `rel` and takes the
+/// size and time from the directory record, so the path is dead weight per entry unless a
+/// filter that stats by path (`--newerat`, `--newerct`) is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AbsPath {
+    #[default]
+    Skip,
+    Fill,
+}
+
 /// Everything the searcher needs to know.
 pub struct SearchOptions {
     pub roots: Vec<PathBuf>,
@@ -346,6 +356,9 @@ impl SearchReport {
 /// One file or directory the walker produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
+    /// The entry's real path. [`search`] and the collecting walk always fill it; a streaming
+    /// `--sort path` listing fills it only when asked ([`AbsPath::Fill`]), because printing a
+    /// listing reads `rel` and a path costs an allocation and a copy per entry.
     pub path: PathBuf,
     pub rel: String,
     pub size: u64,
@@ -466,7 +479,7 @@ fn allow(rules: &IgnoreRules, o: &SearchOptions, rel: &str, name: &str, is_dir: 
 
 /// Read one directory: apply the hidden, ignore, glob, depth and filesystem filters, and
 /// return the entries that survive together with the subdirectories to visit next.
-fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, ids: &Ids) -> JobOut {
+fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, paths: AbsPath, ids: &Ids) -> JobOut {
     let mut out = JobOut {
         cands: Vec::new(),
         stats: Stats::default(),
@@ -616,7 +629,10 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, ids: &Ids) -> Job
             }
             out.cands.push(Found {
                 cand: Candidate {
-                    path: child_path(&job.dir, &e.name),
+                    path: match paths {
+                        AbsPath::Fill => child_path(&job.dir, &e.name),
+                        AbsPath::Skip => PathBuf::new(),
+                    },
                     rel: child_rel,
                     size,
                     modified,
@@ -714,7 +730,7 @@ fn walk(o: &SearchOptions, root_dev: u64) -> (Vec<Candidate>, Stats) {
         let threads = o.threads.max(1);
         let shared = Mutex::new((Vec::<Candidate>::new(), Stats::default()));
         par_for_each(jobs, threads, |job, spawn| {
-            let out = read_job(job, o, want_dirs, &ids);
+            let out = read_job(job, o, want_dirs, AbsPath::Fill, &ids);
             for child in out.children {
                 spawn(child);
             }
@@ -827,6 +843,8 @@ struct Ahead {
     cv: std::sync::Condvar,
     /// Job identities, handed out to every directory a read produces.
     ids: Ids,
+    /// Whether the listings it reads fill each candidate's absolute path.
+    paths: AbsPath,
 }
 
 struct AheadState {
@@ -843,8 +861,9 @@ struct AheadState {
 }
 
 impl Ahead {
-    fn new() -> Ahead {
+    fn new(paths: AbsPath) -> Ahead {
         Ahead {
+            paths,
             state: Mutex::new(AheadState {
                 queue: VecDeque::new(),
                 queued: IdMap::default(),
@@ -899,7 +918,7 @@ impl Ahead {
         }
         if !g.queued.contains_key(&job.id) {
             drop(g);
-            return read_job(&job, o, true, &self.ids);
+            return read_job(&job, o, true, self.paths, &self.ids);
         }
         loop {
             if let Some(out) = g.done.remove(&job.id) {
@@ -935,7 +954,7 @@ fn ahead_worker(ahead: &Ahead, o: &SearchOptions) {
                 g.parked.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
-        let out = read_job(&job, o, true, &ahead.ids);
+        let out = read_job(&job, o, true, ahead.paths, &ahead.ids);
         // The subdirectories of a directory nobody has reached yet are the read-ahead's
         // next work: that is what keeps the pool fed in the order the merge will want. They
         // are queued before the listing is handed over, so the merge's own copy stays put.
@@ -1010,11 +1029,11 @@ impl Eq for Cursor {}
 /// `visit` sees each candidate once and returns whether the walk should go on. This is the
 /// order a stream can reach — the caller uses it only for `--sort path` without `--sortr`,
 /// since a reversed or time-keyed listing needs the whole set.
-pub fn walk_paths<F>(o: &SearchOptions, visit: &mut F) -> Stats
+pub fn walk_paths<F>(o: &SearchOptions, paths: AbsPath, visit: &mut F) -> Stats
 where
     F: FnMut(&Candidate) -> bool,
 {
-    let ahead = Ahead::new();
+    let ahead = Ahead::new(paths);
     let (direct, jobs, mut stats) = root_jobs(o, root_device(o), &ahead.ids);
     let mut heap: BinaryHeap<Reverse<Cursor>> = BinaryHeap::new();
     let mut seq = 0u64;
@@ -1601,7 +1620,7 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
             if found_one.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
-            let out = read_job(job, o, false, &ids);
+            let out = read_job(job, o, false, AbsPath::Fill, &ids);
             for child in out.children {
                 spawn(child);
             }
@@ -2107,7 +2126,7 @@ fn walk_stream(scans: &Scans, o: &SearchOptions, window: usize) -> Stats {
     // Directories are read here, in the order their entries print: a content search is bound
     // by the files, so reading listings ahead of the scan only bought wakeups.
     for job in jobs {
-        let cursor = open_cursor(read_job(&job, o, true, &ids), &mut stats, seq);
+        let cursor = open_cursor(read_job(&job, o, true, AbsPath::Fill, &ids), &mut stats, seq);
         seq += 1;
         if cursor.head().is_some() {
             heap.push(Reverse(Flat::new(cursor)));
@@ -2129,7 +2148,7 @@ fn walk_stream(scans: &Scans, o: &SearchOptions, window: usize) -> Stats {
             // Nothing prints for a directory: opening it is what puts the entries below it in
             // their place in the order.
             let Some(job) = kid else { continue };
-            let child = open_cursor(read_job(&job, o, true, &ids), &mut stats, seq);
+            let child = open_cursor(read_job(&job, o, true, AbsPath::Fill, &ids), &mut stats, seq);
             seq += 1;
             if child.head().is_some() {
                 heap.push(Reverse(Flat::new(child)));
@@ -4107,7 +4126,7 @@ mod tests {
         let mut o = opts(&f, "x");
         o.scope = Scope::Paths;
         let mut streamed: Vec<String> = Vec::new();
-        let stats = walk_paths(&o, &mut |c| {
+        let stats = walk_paths(&o, AbsPath::Fill, &mut |c| {
             streamed.push(c.rel.clone());
             true
         });
@@ -4138,13 +4157,13 @@ mod tests {
         let mut o = opts(&f, "x");
         o.scope = Scope::Paths;
         let mut seen = 0;
-        let partial = walk_paths(&o, &mut |_| {
+        let partial = walk_paths(&o, AbsPath::Skip, &mut |_| {
             seen += 1;
             seen < 12
         });
         assert_eq!(seen, 12, "the visitor decided the count");
         let mut all = 0;
-        let full = walk_paths(&o, &mut |_| {
+        let full = walk_paths(&o, AbsPath::Skip, &mut |_| {
             all += 1;
             true
         });

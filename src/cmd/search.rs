@@ -8,7 +8,7 @@ use crate::glob::Glob;
 use crate::pattern::Pattern;
 use crate::report;
 use crate::search::{
-    search, walk_expr, walk_paths, Candidate, Scope, SearchOptions, Segment, SortKey,
+    search, walk_expr, walk_paths, Candidate, AbsPath, Scope, SearchOptions, Segment, SortKey,
 };
 use std::io::Read;
 use std::io::{IsTerminal, Write};
@@ -1534,7 +1534,14 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 r.stats
             } else {
                 let mut write_err: Option<std::io::Error> = None;
-                let stats = walk_paths(&o, &mut |c: &Candidate| {
+                // A listing prints `rel`; only the filters that stat a path read the other
+                // one, so the walk skips it unless one of them is on.
+                let paths = if since.is_some_and(|(_, which)| which != 0) {
+                    AbsPath::Fill
+                } else {
+                    AbsPath::Skip
+                };
+                let stats = walk_paths(&o, paths, &mut |c: &Candidate| {
                     if !keep(c) {
                         return true;
                     }
