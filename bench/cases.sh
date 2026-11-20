@@ -131,6 +131,13 @@ bench_row find-type find-type both primary "dusage find -t go" "$BIN find --colo
 
 bench_row find-type find-type both reference "find -name" "find '$T' -name '*.go'" "$T"
 
+# The expression form is find's own language and a different walk from the glob form: one
+# `DirReader` at a time, because `-prune` and `-depth` decide the next step from the entry just
+# seen. It had no row of its own, which is how it stayed the slowest find path unmeasured.
+bench_row find-expr find-expr both primary "dusage find (expression)" "$BIN find '$T' -name '*.go'" "$T"
+
+bench_row find-expr find-expr both reference "find -name" "find '$T' -name '*.go'" "$T"
+
 # --- du --------------------------------------------------------------------
 
 bench_row du-s du-s both primary "dusage du -s" "$BIN du -s '$S'" "$S"
