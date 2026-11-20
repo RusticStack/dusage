@@ -225,6 +225,54 @@ fn protected_roots_refused() {
     }
 }
 
+/// Every root the macOS guard protects, including the spellings that only answer after
+/// canonicalisation: `/etc`, `/bin` and `/sbin` are symlinks into `/private` on a stock
+/// system, so the plain spelling is the interesting one.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_every_protected_root_is_refused() {
+    let mut roots: Vec<String> = [
+        "/",
+        "/System",
+        "/System/Library",
+        "/Library",
+        "/usr",
+        "/usr/bin",
+        "/bin",
+        "/bin/sh",
+        "/sbin",
+        "/etc",
+        "/etc/hosts",
+        "/private",
+        "/private/etc/hosts",
+        "/Applications",
+        "/cores",
+        "/dev",
+        "/Users",
+        "/Volumes",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if let Some(h) = std::env::var_os("HOME") {
+        let home = Path::new(&h);
+        roots.push(h.to_string_lossy().into_owned());
+        if let Some(parent) = home.parent() {
+            roots.push(parent.to_string_lossy().into_owned());
+        }
+    }
+    for r in &roots {
+        // The prefix matches nothing, so even a guard bug could not delete real data.
+        for extra in [&["--dry"][..], &[][..]] {
+            let mut args = vec![r.as_str(), "-1", "zzz_no_such_prefix_"];
+            args.extend(extra);
+            let o = fastdel(&args);
+            assert_eq!(code(&o), 2, "{r} {extra:?}: {}", stderr(&o));
+            assert!(stderr(&o).contains("refusing"), "{r}: {}", stderr(&o));
+        }
+    }
+}
+
 #[test]
 fn log_file_contents() {
     let root = fixture("log");

@@ -334,11 +334,27 @@ mod macos {
     /// Directories that hold user or service data: the directory itself and anything
     /// above it are refused, but their children (`$HOME/scratch`, `/opt/app/cache`) stay
     /// prunable.
+    ///
+    /// Every mounted volume root belongs in this set too, and the volumes a person
+    /// mounts are the ones `/Volumes` lists. `getmntinfo` would name the rest, but its
+    /// `struct statfs` is not bound in this crate, so a volume mounted outside `/Volumes`
+    /// is not refused as a volume root — only the device comparison in the prune stops it
+    /// being walked into.
     fn data_dirs() -> Vec<PathBuf> {
-        let mut v: Vec<PathBuf> = ["/Users", "/opt"].iter().map(PathBuf::from).collect();
+        let mut v: Vec<PathBuf> = ["/Users", "/opt", "/Volumes"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
         if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
             if let Some(p) = lexical(Path::new(&h)) {
                 v.push(p);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+            for e in entries.flatten() {
+                if let Some(p) = lexical(&e.path()) {
+                    v.push(p);
+                }
             }
         }
         v
@@ -445,6 +461,123 @@ mod linux {
             .unwrap_or(abs);
         system_trees().iter().any(|s| real.starts_with(s))
             || data_dirs().iter().any(|s| s.starts_with(&real))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use std::fs;
+
+    fn prot(p: &str) -> bool {
+        is_protected_root(Path::new(p))
+    }
+
+    #[test]
+    fn the_filesystem_root_and_every_system_tree_are_protected() {
+        for s in [
+            "/",
+            "/.",
+            "/System",
+            "/System/Library",
+            "/Library",
+            "/usr",
+            "/usr/bin",
+            "/bin",
+            "/sbin",
+            "/etc",
+            "/private",
+            "/private/var",
+            "/Applications",
+            "/cores",
+            "/dev",
+        ] {
+            assert!(prot(s), "{s:?} should be protected");
+        }
+    }
+
+    /// `/etc` and `/bin` are symlinks into `/private` on macOS, so a path that names them
+    /// only protects because the second layer canonicalises before comparing. Both
+    /// spellings, plus a `/private`-prefixed one, have to answer the same.
+    #[test]
+    fn both_spellings_of_a_symlinked_system_dir_are_protected() {
+        for s in [
+            "/etc/hosts",
+            "/bin/sh",
+            "/sbin/ifconfig",
+            "/private/etc/hosts",
+        ] {
+            assert!(is_protected_root(&lexical(Path::new(s)).unwrap()), "{s:?}");
+            assert!(prot(s), "{s:?} reached under a different spelling");
+        }
+        // A link the user made, pointing at a protected tree, is caught by canonicalising.
+        let dir = std::env::temp_dir().join(format!("dusage_guard_mac_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("sys");
+        if std::os::unix::fs::symlink("/System", &link).is_ok() {
+            assert!(is_protected_root(&link), "a link into /System");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn home_and_its_ancestors_are_protected() {
+        if let Some(h) = std::env::var_os("HOME") {
+            let home = Path::new(&h);
+            assert!(is_protected_root(home), "HOME itself");
+            if let Some(p) = home.parent() {
+                assert!(is_protected_root(p), "an ancestor of HOME");
+            }
+            assert!(is_protected_root(Path::new("/Users")), "/Users");
+            assert!(
+                !is_protected_root(&home.join("scratch/x")),
+                "inside HOME is prunable"
+            );
+        }
+    }
+
+    #[test]
+    fn volume_roots_are_protected_but_their_contents_are_not() {
+        assert!(prot("/Volumes"));
+        for e in fs::read_dir("/Volumes").into_iter().flatten().flatten() {
+            assert!(
+                is_protected_root(&e.path()),
+                "{:?} is a volume root",
+                e.path()
+            );
+            assert!(
+                !is_protected_root(&e.path().join("scratch/cache")),
+                "{:?} contents are prunable",
+                e.path()
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_dirs_are_prunable() {
+        assert!(!prot("/tmp/x"));
+        assert!(!prot("/private/var/log/journal"));
+        assert!(!prot("/opt/app"));
+        assert!(!prot("/usrx"));
+        assert!(!prot("/etcx/y"));
+        assert!(!prot("some-relative-dir"));
+        // A relative path climbing far enough lands on the filesystem root.
+        assert!(prot(&(0..40).map(|_| "..").collect::<Vec<_>>().join("/")));
+    }
+
+    #[test]
+    fn empty_and_unnormalisable_paths_fail_closed() {
+        assert!(prot(""));
+        assert!(prot("   "));
+    }
+
+    /// `/private` is refused as a whole subtree, which is a deliberate over-refusal: the
+    /// natural scratch space under it is not prunable, and no flag opens the guard.
+    #[test]
+    fn private_tmp_is_refused_although_it_is_scratch_space() {
+        assert!(prot("/private/tmp"));
+        assert!(prot("/private/tmp/x"));
     }
 }
 
