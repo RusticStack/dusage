@@ -319,44 +319,45 @@ generated tables: `bench/summary.sh` over `bench/results.json`, plus the guard
 output. Read the case ids there — `search-rare`, `search-common`, `search-ci`,
 `search-regex`, `search-regex-nomatch`, `search-count`, `search-only-matching`,
 `search-multiline`, `search-gzip`, `search-files-with-matches`, `find-name`,
-`find-path`, `find-type`, `du-s`, `du`, `threads-scan-*`, `threads-search-*` —
-rather than a table copied here, because a copy goes stale at the next merge.
-At the commit the tables were last generated at (80c99af, 2 vCPUs, warm cache):
-the output-heavy content rows are all ahead — `search-common` 0.87x,
-`search-count` 0.73x, `search-files-with-matches` 0.74x,
-`search-only-matching` 0.88x, `search-multiline` 0.85x — the plain content rows
-sit within this box's noise (`search-rare` 1.07x, `search-regex` 1.10x,
-`search-regex-nomatch` 1.06x, `search-ci` 1.02x), `search-multiline-unicode` is
-1.12x, `search-gzip` 0.30x, `find-name` 0.83x, `find-path` 1.11x, `find-type`
-1.09x, and both `du` rows are ahead of GNU `du` at 0.52x with identical totals.
-`docs/SEARCH.md` §1.4 carries the one measurement the suite has no case for: the
-find expression walk.
+`find-path`, `find-type`, `find-expr`, `du-s`, `du`, `threads-scan-*`,
+`threads-search-*` — rather than a table copied here, because a copy goes stale
+at the next merge. At the commit the tables were last generated at (7bcb7a9,
+2 vCPUs, warm cache) every content row is ahead: the output-heavy ones at
+`search-count` 0.73x, `search-files-with-matches` 0.68x,
+`search-only-matching` 0.75x, `search-multiline` 0.86x and `search-common`
+0.89x, the plain ones at `search-rare` 0.85x, `search-regex` 0.91x,
+`search-regex-nomatch` 0.91x and `search-ci` 0.91x (they were 1.02–1.10x on the
+previous pass, and callgrind counts the literal scan 25-28% cheaper and the regex
+candidate scan 29% cheaper rather than that being drift alone). Also
+`search-multiline-unicode` 1.09x, `search-gzip` 0.24x, `find-name` 0.79x,
+`find-path` 1.01x, `find-type` 1.13x, `find-expr` 1.12x, and both `du` rows ahead
+of GNU `du` at 0.55–0.56x with identical totals.
 
 **Known limits, each an open item.**
 
-- **The plain content rows are at parity, not ahead.** `search-rare` 1.07x,
-  `search-regex` 1.10x, `search-regex-nomatch` 1.06x and `search-ci` 1.02x at
-  commit 80c99af, where this box's own reference rows drift 10-20% between
-  passes; `scripts/perf-guard.sh` is the paired measurement that settles them,
-  and on it dusage is level with `rg`. Two things closed the gap that used to be
-  1.42x: the candidate scan (`Regex::candidate_find`), which walks the line a
-  required run sits on rather than the whole haystack, and the removal of an
-  `fstat` and a zero-length read per file. What is left is one automaton entry
-  per candidate line and the literal verify's `memcmp` call.
-- **Peak RSS is bounded, and still above the references.** 9-17 MiB on the
-  content rows against grep's 5, and 18 MiB on `find-name` against find's 5. It
-  no longer scales with the tree, because results stream with a 4 MiB printer
-  window and a `threads × 1024`-file path window. The floor above the references
-  is the pipeline itself — a read buffer and a queue per worker — so closing it
-  means giving up the threads that make the other rows ahead.
-- **`find`'s small-tree rows are a little behind** (`find-path` 1.11x,
-  `find-type` 1.09x), where the cost is keeping the sorted output order that GNU
-  find never has to produce. The big-tree row (`find-name` 0.83x) is ahead.
+- **Half of content search is now kernel time.** Over `/usr/local/go` a run
+  spends roughly 60 ms in user space against 180 ms in the kernel, so the
+  instruction-level work of the last two rounds has run out of room: the plain
+  rows sit at 0.85–0.91x of their reference and further gains there have to
+  remove per-file syscalls (an open, a read per 64 KiB block, a close, plus the
+  walk's `statx` per entry) rather than instructions. The find walks are
+  `getdents`-bound for the same reason.
+- **Peak RSS is bounded, and still above the references.** 10-17 MiB on the
+  content rows against both `grep`'s 5 and `ripgrep`'s 9, 15 MiB on `find-name`
+  against find's 5, and 21 MiB on `du` against 4. It no longer scales with the
+  tree, because results stream with a 4 MiB printer window and a
+  `threads × 1024`-file path window. The floor above the references is the
+  pipeline itself — a read buffer and a queue per worker — so closing it means
+  giving up the threads that make the other rows ahead.
+- **`find`'s small-tree rows are behind** (`find-path` 1.01x, `find-type` 1.13x,
+  `find-expr` 1.12x), where the cost is keeping the sorted output order that GNU
+  find never has to produce, on a job of some 40 ms where startup is a visible
+  share. The big-tree row (`find-name` 0.79x) is ahead.
 - **The expression walk is sequential**, because `-prune` and `-depth` decide the
   next step from the entry just seen: `search::walk_expr` cannot use the worker
   pool. Parallelising it needs a per-directory evaluator that can defer `-prune`
-  decisions, not a thread-pool change. There is no case for it in
-  `bench/cases.sh`, so it is a one-off measurement in `docs/SEARCH.md` §1.4.
+  decisions, not a thread-pool change. `find-expr` in `bench/cases.sh` is its
+  row, at 1.12x.
 - **Three deviations from find's output survive** and are documented in
   `docs/SEARCH.md` §1.4: per-directory sorted order instead of readdir order,
   `-ls`'s date column, and an expression holding both `-exec` and `-execdir`
