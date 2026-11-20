@@ -304,6 +304,35 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// The decimal digits of `v`, written into `buf` and returned from where they start.
+///
+/// `write!` reaches the same digits through the formatting machinery — a formatter, a `Display`
+/// impl and its padding logic — for a field that is a handful of bytes on a row printed once
+/// per match; the digits are pushed from a stack buffer instead.
+fn digits(mut v: u64, buf: &mut [u8; 20]) -> usize {
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            return at;
+        }
+    }
+}
+
+fn write_u64(out: &mut dyn Write, v: u64) -> io::Result<()> {
+    let mut buf = [0u8; 20];
+    let at = digits(v, &mut buf);
+    out.write_all(&buf[at..])
+}
+
+fn push_u64(buf: &mut Vec<u8>, v: u64) {
+    let mut tmp = [0u8; 20];
+    let at = digits(v, &mut tmp);
+    buf.extend_from_slice(&tmp[at..]);
+}
+
 fn write_match_line(
     out: &mut dyn Write,
     text: &[u8],
@@ -340,6 +369,17 @@ fn write_path(out: &mut dyn Write, path: &str, o: &SearchOptions) -> io::Result<
             }
             out.write_all(&buf)
         }
+    }
+}
+
+/// The same bytes in a buffer, for a row whose name field is built once and reused.
+fn push_path(buf: &mut Vec<u8>, path: &str, o: &SearchOptions) {
+    match o.path_separator {
+        None => buf.extend_from_slice(path.as_bytes()),
+        Some(sep) => buf.extend(path.as_bytes().iter().map(|b| match b {
+            b'/' | b'\\' => sep,
+            _ => *b,
+        })),
     }
 }
 
@@ -382,17 +422,17 @@ impl Row<'_> {
         if o.line_numbers {
             if self.color {
                 out.write_all(color::LINE.as_bytes())?;
-                write!(out, "{}", h.number)?;
+                write_u64(out, h.number)?;
                 out.write_all(color::RESET.as_bytes())?;
             } else {
-                write!(out, "{}", h.number)?;
+                write_u64(out, h.number)?;
             }
             out.write_all(sep)?;
         }
         // A line with no located match (an inverted one) has no column to print at all.
         if (o.column || o.vimgrep) && span.is_some() {
             let (s, _) = span.unwrap_or_default();
-            write!(out, "{}", h.text_start + s + 1)?;
+            write_u64(out, (h.text_start + s + 1) as u64)?;
             out.write_all(sep)?;
         }
         if o.byte_offset {
@@ -401,7 +441,7 @@ impl Row<'_> {
                 Some((s, _)) if o.vimgrep => h.offset + s as u64,
                 _ => h.offset,
             };
-            write!(out, "{at}")?;
+            write_u64(out, at)?;
             out.write_all(sep)?;
         }
         write_match_line(out, text, marks, self.color)?;
@@ -438,6 +478,19 @@ pub struct SearchStream<'a> {
     /// A line has printed: the context separator goes between groups, not before the first.
     printed: bool,
     printed_heading: bool,
+    /// The start of a row that is the same for every row of the file being printed: the
+    /// terminator the row before it owed, then the path and its separator. `name_fresh` is
+    /// where it starts when no terminator is owed, which is only the first row of the output.
+    name: Vec<u8>,
+    name_fresh: usize,
+    /// Which separator `name` holds; a `--passthru` file mixes both, and the name is rebuilt
+    /// when it changes.
+    name_context: Option<bool>,
+    /// The numbers a row prints — line, column, byte offset — each closed by its separator.
+    nums: Vec<u8>,
+    /// A row has printed and its terminator is still to come. It opens the next row's name
+    /// rather than closing this one, which is one write fewer per row.
+    owed: bool,
 }
 
 impl<'a> SearchStream<'a> {
@@ -460,6 +513,11 @@ impl<'a> SearchStream<'a> {
             },
             printed: false,
             printed_heading: false,
+            name: Vec::new(),
+            name_fresh: 0,
+            name_context: None,
+            nums: Vec::new(),
+            owed: false,
         }
     }
 
@@ -469,6 +527,10 @@ impl<'a> SearchStream<'a> {
         let many = self.many;
         let end = self.row.end;
         let color = self.row.color;
+        if self.owed {
+            out.write_all(end)?;
+            self.owed = false;
+        }
         if o.files_with_matches || o.files_without_matches {
             write_path(out, &f.path, o)?;
             out.write_all(if o.null { b"\0" } else { end })?;
@@ -480,7 +542,7 @@ impl<'a> SearchStream<'a> {
                 write_path(out, &f.path, o)?;
                 out.write_all(if o.null { b"\0" } else { &o.field_match_sep })?;
             }
-            write!(out, "{n}")?;
+            write_u64(out, n)?;
             out.write_all(end)?;
             return Ok(());
         }
@@ -511,13 +573,26 @@ impl<'a> SearchStream<'a> {
         // grep and ripgrep separate context groups and nothing else; a plain match list has no
         // separator at all, and `--no-context-separator` prints none between groups either.
         let grouped = o.before > 0 || o.after > 0;
+        // A row without colour or a NUL name is a name, its numbers and its text: the name is
+        // the same on every row of the file, so it is built once (with the previous row's
+        // terminator in front of it) and the row costs a write of it, one of the numbers and
+        // one of the text rather than a call per field. Colour paints inside the text and
+        // `--null` ends the name with NUL, so those keep the field-by-field `Row`.
+        let fast = !color && !o.null;
+        // No row of this file prints a number, so its text follows the name directly.
+        let numbered = o.line_numbers || o.column || o.byte_offset || o.vimgrep;
         let mut last: Option<u64> = None;
         for h in &f.hits {
             let consecutive = last.is_some_and(|l| h.number == l + 1);
             if grouped && self.printed && (last.is_none() || !consecutive) {
                 if let Some(sep) = &o.context_sep {
+                    if self.owed {
+                        out.write_all(end)?;
+                        self.owed = false;
+                    }
                     out.write_all(sep)?;
                     out.write_all(end)?;
+                    self.name_context = None;
                 }
             }
             self.printed = true;
@@ -537,23 +612,93 @@ impl<'a> SearchStream<'a> {
             } else {
                 &h.spans
             };
-            let row = &self.row;
-            if o.vimgrep && !spans.is_empty() {
-                for span in spans {
-                    row.write(
-                        out,
-                        &f.path,
-                        h,
-                        sep,
-                        Some(*span),
-                        std::slice::from_ref(span),
-                        text,
-                    )?;
+            if !fast {
+                let row = &self.row;
+                if o.vimgrep && !spans.is_empty() {
+                    for span in spans {
+                        row.write(
+                            out,
+                            &f.path,
+                            h,
+                            sep,
+                            Some(*span),
+                            std::slice::from_ref(span),
+                            text,
+                        )?;
+                    }
+                } else {
+                    row.write(out, &f.path, h, sep, spans.first().copied(), spans, text)?;
                 }
-            } else {
-                row.write(out, &f.path, h, sep, spans.first().copied(), spans, text)?;
+                continue;
+            }
+            if self.name_context != Some(h.matched) {
+                self.name.clear();
+                self.name.extend_from_slice(end);
+                self.name_fresh = self.name.len();
+                if self.row.named {
+                    push_path(&mut self.name, &f.path, o);
+                    self.name.extend_from_slice(sep);
+                }
+                self.name_context = Some(h.matched);
+            }
+            // A `--vimgrep` row reports one match, so it prints the line once per span; every
+            // other row reports its line once.
+            let per_span = o.vimgrep && !spans.is_empty();
+            let mut at = 0;
+            loop {
+                let span = if per_span {
+                    Some(spans[at])
+                } else {
+                    spans.first().copied()
+                };
+                // The name leads every row, with the terminator the row before it owed in
+                // front — which for a span after the first is the row it just ended.
+                if self.owed {
+                    out.write_all(&self.name[..])?;
+                } else {
+                    out.write_all(&self.name[self.name_fresh..])?;
+                }
+                if !numbered {
+                    out.write_all(text)?;
+                    self.owed = true;
+                    break;
+                }
+                self.nums.clear();
+                if o.line_numbers {
+                    push_u64(&mut self.nums, h.number);
+                    self.nums.extend_from_slice(sep);
+                }
+                if (o.column || o.vimgrep) && span.is_some() {
+                    let (s, _) = span.unwrap_or_default();
+                    push_u64(&mut self.nums, (h.text_start + s + 1) as u64);
+                    self.nums.extend_from_slice(sep);
+                }
+                if o.byte_offset {
+                    let at = match span {
+                        Some((s, _)) if o.vimgrep => h.offset + s as u64,
+                        _ => h.offset,
+                    };
+                    push_u64(&mut self.nums, at);
+                    self.nums.extend_from_slice(sep);
+                }
+                if !self.nums.is_empty() {
+                    out.write_all(&self.nums)?;
+                }
+                out.write_all(text)?;
+                self.owed = true;
+                at += 1;
+                if !per_span || at == spans.len() {
+                    break;
+                }
             }
         }
+        // The last row of a file owes its terminator, and a file is where the next one's lead
+        // would start, so it is written here.
+        if self.owed {
+            out.write_all(end)?;
+            self.owed = false;
+        }
+        self.name_context = None;
         Ok(())
     }
 }
