@@ -984,6 +984,24 @@ impl Cursor {
         self.items.front()
     }
 
+    /// Whether this cursor's head leads everything still in the heap. The heap orders cursors
+    /// by head, so a cursor that leads cannot be overtaken while it prints: the walk takes the
+    /// run its head starts without a pop and a push per entry. The order is the heap's own,
+    /// which breaks a tie between two identical heads by sequence.
+    fn leads(&self, heap: &BinaryHeap<Reverse<Cursor>>) -> bool {
+        match heap.peek() {
+            None => true,
+            Some(Reverse(other)) => match (self.head(), other.head()) {
+                (Some(a), Some(b)) => {
+                    cmp_paths(&a.cand, &b.cand).then_with(|| self.seq.cmp(&other.seq))
+                        == Ordering::Less
+                }
+                (Some(_), None) => true,
+                _ => false,
+            },
+        }
+    }
+
     /// The job for a directory entry about to be visited, when the walk may descend into it.
     /// Every job here has an entry in `items`, and both are in the same order, so the front
     /// job is this entry's or a later one's.
@@ -1060,28 +1078,33 @@ where
                 heap.push(Reverse(cursor));
             }
         }
-        while let Some(Reverse(mut cur)) = heap.pop() {
-            let Some(found) = cur.items.pop_front() else {
-                continue;
-            };
-            let kid = if found.cand.is_dir {
-                cur.take_kid(&found.cand.rel)
-            } else {
-                None
-            };
+        'walk: while let Some(Reverse(mut cur)) = heap.pop() {
+            while cur.leads(&heap) {
+                let Some(found) = cur.items.pop_front() else {
+                    break;
+                };
+                let kid = if found.cand.is_dir {
+                    cur.take_kid(&found.cand.rel)
+                } else {
+                    None
+                };
+                if !visit(&found.cand) {
+                    break 'walk;
+                }
+                if let Some(job) = kid {
+                    let child = open_cursor(ahead.take(job, o), &mut stats, seq);
+                    seq += 1;
+                    ahead.want(child.kids.iter());
+                    if child.head().is_some() {
+                        heap.push(Reverse(child));
+                    }
+                    // A subdirectory holds entries that sort inside its parent's, so the
+                    // parent goes back in the heap for the merge to order.
+                    break;
+                }
+            }
             if cur.head().is_some() {
                 heap.push(Reverse(cur));
-            }
-            if !visit(&found.cand) {
-                break;
-            }
-            if let Some(job) = kid {
-                let child = open_cursor(ahead.take(job, o), &mut stats, seq);
-                seq += 1;
-                ahead.want(child.kids.iter());
-                if child.head().is_some() {
-                    heap.push(Reverse(child));
-                }
             }
         }
         ahead.close();
