@@ -10,8 +10,9 @@
 #
 #   1. the fastest reference row of the same case on this box (rg / grep): fail when dusage
 #      is more than TOL percent slower;
-#   2. its own recorded median in bench/baseline.json: fail when dusage is more than TOL
-#      percent above it.
+#   2. its own recorded ratio against that reference in bench/baseline.json: fail when
+#      today's ratio is more than TOL percent above it. A ratio is comparable across boxes
+#      and across a host's noisy hours, where an absolute median is not.
 #
 # The baseline is machine specific. A run on a box with a different CPU count still works
 # but says so, because the comparison then carries the machine's own spread.
@@ -201,10 +202,12 @@ done
 
 # --- baseline --------------------------------------------------------------
 
-baseline_ms() {
+# baseline_field <case> <field>: one number out of the baseline's case block.
+baseline_field() {
     [ -f "$BASELINE" ] || return 1
     local v
-    v=$(grep -m1 "\"$1\": {" "$BASELINE" 2>/dev/null | sed -n 's/.*"dusage_ms": \([0-9.]*\).*/\1/p')
+    v=$(grep -m1 "\"$1\": {" "$BASELINE" 2>/dev/null |
+        sed -n "s/.*\"$2\": \([0-9.]*\).*/\1/p")
     [ -n "$v" ] || return 1
     echo "$v"
 }
@@ -238,8 +241,10 @@ if [ "$UPDATE" = 1 ]; then
             done
             [ "$first" = 1 ] || echo ","
             first=0
-            printf '    "%s": {"dusage_ms": %s, "reference_tool": "%s", "reference_ms": %s}' \
-                "${g_case[i]}" "${med[i]}" "$ref_tool" "${ref_ms:-0}"
+            ratio=$(awk -v d="${med[i]}" -v r="${ref_ms:-0}" \
+                'BEGIN { if (r > 0) printf "%.3f", d / r; else printf "0" }')
+            printf '    "%s": {"dusage_ms": %s, "reference_tool": "%s", "reference_ms": %s, "ratio": %s}' \
+                "${g_case[i]}" "${med[i]}" "$ref_tool" "${ref_ms:-0}" "$ratio"
         done
         echo ""
         echo "  }"
@@ -256,8 +261,8 @@ fi
 # --- compare ---------------------------------------------------------------
 
 fail=0
-printf '%-24s %10s %10s %10s %10s  %s\n' case dusage_ms ref ref_ms baseline_ms verdict
-printf '%-24s %10s %10s %10s %10s  %s\n' ------------------------ ---------- ---------- ---------- ------------ --------
+printf '%-24s %10s %10s %10s %8s %8s  %s\n' case dusage_ms ref ref_ms ratio base_ratio verdict
+printf '%-24s %10s %10s %10s %8s %8s  %s\n' ------------------------ ---------- ---------- ---------- -------- -------- --------
 
 for i in "${!g_cmd[@]}"; do
     [ -n "${g_case[i]}" ] || continue
@@ -273,21 +278,37 @@ for i in "${!g_cmd[@]}"; do
         fi
     done
 
-    base=$(baseline_ms "${g_case[i]}") || base=""
+    # The gate is a ratio, not a wall-clock number: the same binary on the same box
+    # measures two times apart on either side of a host's noisy afternoon, while the ratio
+    # to the reference tool measured in the same minute does not move with it.
+    ratio=$(awk -v d="${med[i]}" -v r="${ref_ms:-0}" \
+        'BEGIN { if (r > 0) printf "%.2f", d / r; else printf "–" }')
+    base_ratio=$(baseline_field "${g_case[i]}" ratio) || base_ratio=""
+    base_ms=$(baseline_field "${g_case[i]}" dusage_ms) || base_ms=""
     verdict=ok
     if [ -n "$ref_ms" ] && awk -v d="${med[i]}" -v r="$ref_ms" -v tol="$TOL" \
         'BEGIN { exit !(d > r * (1 + tol / 100)) }'; then
         verdict="SLOWER than $ref_tool by more than ${TOL}%"
         fail=1
     fi
-    if [ -z "$base" ]; then
+    if [ -n "$base_ratio" ]; then
+        if awk -v r="$ratio" -v b="$base_ratio" -v tol="$TOL" \
+            'BEGIN { exit !(r > b * (1 + tol / 100)) }'; then
+            verdict="ratio above baseline by more than ${TOL}%"
+            fail=1
+        fi
+    elif [ -n "$base_ms" ]; then
+        # An older baseline has no ratio: fall back to its absolute median and say so.
+        if awk -v d="${med[i]}" -v b="$base_ms" -v tol="$TOL" \
+            'BEGIN { exit !(d > b * (1 + tol / 100)) }'; then
+            verdict="ABOVE baseline by more than ${TOL}% (absolute; re-record for a ratio)"
+            fail=1
+        fi
+    else
         [ "$verdict" = ok ] && verdict="ok (no baseline)"
-    elif awk -v d="${med[i]}" -v b="$base" -v tol="$TOL" 'BEGIN { exit !(d > b * (1 + tol / 100)) }'; then
-        verdict="ABOVE baseline by more than ${TOL}%"
-        fail=1
     fi
-    printf '%-24s %10s %10s %10s %10s  %s\n' \
-        "${g_case[i]}" "${med[i]}" "${ref_tool:-–}" "${ref_ms:-–}" "${base:-–}" "$verdict"
+    printf '%-24s %10s %10s %10s %8s %8s  %s\n' \
+        "${g_case[i]}" "${med[i]}" "${ref_tool:-–}" "${ref_ms:-–}" "$ratio" "${base_ratio:-–}" "$verdict"
 done
 
 base_cpus=$(baseline_cpus)

@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "generated": "2026-11-20T04:10:13Z",
+  "generated": "2026-11-20T12:01:14Z",
   "machine": {"uname": "Linux 6.1.158+ x86_64", "cpus": 2},
   "runs": 5,
   "tolerance_pct": 25,
   "cases": {
-    "search-rare": {"dusage_ms": 93.4, "reference_tool": "rg", "reference_ms": 91.1},
-    "search-regex-nomatch": {"dusage_ms": 97.9, "reference_tool": "rg", "reference_ms": 89.8},
-    "search-count": {"dusage_ms": 103.0, "reference_tool": "grep -rIc", "reference_ms": 134.5}
+    "search-rare": {"dusage_ms": 88.9, "reference_tool": "rg", "reference_ms": 86.5, "ratio": 1.028},
+    "search-regex-nomatch": {"dusage_ms": 93.3, "reference_tool": "rg", "reference_ms": 87.1, "ratio": 1.071},
+    "search-count": {"dusage_ms": 103.4, "reference_tool": "grep -rIc", "reference_ms": 128.2, "ratio": 0.807}
   }
 }
