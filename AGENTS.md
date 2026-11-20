@@ -34,6 +34,10 @@ src/unix/sys.rs       errno table + inotify/poll FFI decls
 src/unix/enumerate.rs readdir + statx enumeration, symlink/reparse-root checks, mount helpers
 src/unix/delete.rs    unlink/rmdir delete that never follows symlinks
 src/unix/watch.rs     --watch change feed over inotify
+src/mac/sys.rs        Darwin `struct stat`/`struct dirent` layouts, kqueue decls, errno helpers
+src/mac/enumerate.rs  readdir$INODE64 + fstatat enumeration, symlink/mount helpers
+src/mac/delete.rs     unlink/rmdir delete that never follows symlinks
+src/mac/watch.rs      --watch change feed over kqueue (EVFILT_VNODE)
 src/cmd/              subcommand front ends: scan/big, search/find, prune/fastdel
 src/bin/dusage.rs     thin CLI over cmd::dispatch + cmd::finish
 src/bin/fastdel.rs    thin CLI over cmd::prune
@@ -51,7 +55,7 @@ delete::delete_entry
 watch::{resolve_root, ChangeSource::open(root), ChangeSource::poll(interval) -> Vec<PathBuf>}
 ```
 
-All `unsafe` and FFI lives under `src/win/`, `src/unix/` or `src/simd.rs`; code
+All `unsafe` and FFI lives under `src/win/`, `src/unix/`, `src/mac/` or `src/simd.rs`; code
 outside those is safe Rust. `src/simd.rs` is the only non-platform module with
 intrinsics: x86 vector loads for one-byte search and counting, reached only
 after a runtime feature check and always falling back to a portable loop.
@@ -93,12 +97,12 @@ enqueued via `push`. It stops when the queue is empty and nothing is active.
    `""` prefix keeps its original meaning (all entries) for back-compat.
 5. Deletion/scan callbacks must handle per-entry errors by skipping — a
    locked or vanished file must not abort the run.
-6. **`unsafe` stays under `src/win/`, `src/unix/` and `src/simd.rs`**, each block with a
+6. **`unsafe` stays under `src/win/`, `src/unix/`, `src/mac/` and `src/simd.rs`**, each block with a
    `// SAFETY:` comment and FFI structs checked by size/offset tests.
 
 7. **One platform surface.** `scan.rs`, `prune.rs` and `report.rs` must stay free
    of `#[cfg(target_os)]` where possible: put platform differences behind
-   `crate::native`. The crate builds only for Windows and Linux (see `lib.rs`).
+   `crate::native`. The crate builds only for Windows, Linux and macOS (see `lib.rs`).
 
 ## Domain facts learned (Linux)
 
@@ -151,6 +155,12 @@ walk plus a parallel content scanner) and the single binary with subcommands
 (`dusage scan|big|search|find|prune`, `fastdel` and `del` aliases for `prune`,
 presets for the pruner). Search limits are listed in `docs/ROADMAP.md`.
 
+Also done on the macOS branch: the macOS port, `src/mac/` as the third `crate::native`
+arm — `readdir$INODE64`/`fstatat` enumeration, `unlink`/`rmdir` deletion, a kqueue
+`EVFILT_VNODE` change feed and a macOS guard — cross-checked for `x86_64-apple-darwin`
+from Linux, with a `macos-15-intel` CI leg. See the open item below for what that does
+not prove.
+
 Open:
 - Validate the USN `--watch` path on a real volume in an elevated shell (the
   MFT backend is validated and benchmarked; see README).
@@ -158,8 +168,14 @@ Open:
 - Measure the Linux backends properly: the thread sweep and the cold-cache numbers in
   README were taken on a 2-vCPU container, and a `getdents64`-level enumerator (raw
   syscall, no `read_dir` allocation) is unexplored.
-- macOS: `unix/` would build except for inotify; a kqueue/FSEvents feed plus a guard list
-  is the work, and the crate currently refuses to compile there on purpose.
+- Verify the macOS port on a real Mac. Everything there is cross-checked from Linux and
+  nothing has been run on macOS: the Darwin `struct stat`/`dirent`/`kevent` layouts and the
+  `$INODE64` symbol aliases are pinned by `const` assertions that prove the declaration is
+  self-consistent and nothing about libSystem, so the first `cargo build` and `cargo test`
+  on a Mac is what confirms them. arm64 is untested; FSEvents is deferred (CoreFoundation
+  against zero dependencies); the kqueue feed stops at 4096 watched directories and gives
+  up wholesale past that; `getmntinfo` is unbound, so only the mounts `/Volumes` lists are
+  refused as volume roots and `-fstype` answers nothing. Details in `docs/ROADMAP.md`.
 
 ## Style
 

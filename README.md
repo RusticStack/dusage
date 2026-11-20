@@ -5,7 +5,7 @@
 <h1 align="center">dusage</h1>
 
 <p align="center"><b>See where your disk space went, then get it back.</b><br>
-A fast disk-usage scanner, a content and path search, and a safe parallel pruner for Windows and Linux. One binary with subcommands, zero dependencies.</p>
+A fast disk-usage scanner, a content and path search, and a safe parallel pruner for Windows, Linux and macOS. One binary with subcommands, zero dependencies.</p>
 
 <p align="center">
   <a href="https://github.com/RusticStack/dusage/releases/latest"><img src="https://img.shields.io/badge/Download_for_Windows-dusage-CC420C?style=for-the-badge&logo=windows11&logoColor=white" height="44" alt="Download dusage for Windows"></a>
@@ -16,6 +16,7 @@ A fast disk-usage scanner, a content and path search, and a safe parallel pruner
   <a href="https://github.com/RusticStack/dusage/releases/latest"><img src="https://img.shields.io/github/v/release/RusticStack/dusage?style=flat-square&label=latest&color=CC420C" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-2A2A30?style=flat-square" alt="Windows 10 and 11">
   <img src="https://img.shields.io/badge/Linux-x86__64-2A2A30?style=flat-square&logo=linux&logoColor=white" alt="Linux x86_64">
+  <img src="https://img.shields.io/badge/macOS-x86__64%20(arm64%20unverified)-2A2A30?style=flat-square&logo=apple&logoColor=white" alt="macOS x86_64; arm64 unverified">
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2A2A30?style=flat-square" alt="MIT OR Apache-2.0"></a>
   <a href="https://github.com/RusticStack/dusage/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/RusticStack/dusage/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
   <img src="https://img.shields.io/badge/dependencies-0-2A2A30?style=flat-square" alt="Zero dependencies">
@@ -130,10 +131,10 @@ default backend for small ones. Its totals match the default backend, plus the N
 files (`$MFT`, `$LogFile`, `$Extend`) that a directory walk cannot see.
 
 **Watch.** `--watch` asks the platform's change feed which top-level entries moved and
-rescans only those: the NTFS change journal in an elevated shell on Windows, inotify on Linux.
-When the feed is unavailable (`--watch` without admin rights on Windows, or an exceeded
-inotify watch limit) every tick is a full rescan. An update is printed only when something
-changed.
+rescans only those: the NTFS change journal in an elevated shell on Windows, inotify on
+Linux, kqueue on macOS. When the feed is unavailable (`--watch` without admin rights on
+Windows, an exceeded inotify watch limit, or a tree larger than the kqueue watch budget)
+every tick is a full rescan. An update is printed only when something changed.
 
 **Mount points.** A scan follows them by default, like `du`. `-x`/`--one-filesystem` stops at
 a directory on another device and counts it in the "skipped mount points" note, which is what
@@ -141,17 +142,24 @@ you want for `dusage /`. Windows mount points are reparse points and are always 
 
 ### Platforms
 
-| | Windows | Linux |
-|---|---|---|
-| `batched` / `auto` backend | `GetFileInformationByHandleEx` batches | `read_dir` + one `statx` per entry |
-| Size on disk (`--on-disk`) | `AllocationSize` | `st_blocks * 512` |
-| Hardlink dedup (`--dedup-hardlinks`) | 128-bit file id | `dev << 64 \| ino` |
-| `--watch` change feed | NTFS USN journal (elevated) | inotify (no privileges) |
-| `--mft` | raw NTFS `$MFT` | not applicable, refused with a reason |
-| `--streams` | named NTFS streams | no named streams, reports 0 |
-| Links never followed | reparse points of any kind | symlinks |
-| `--one-filesystem` | no-op (mount points are links) | skips other devices |
-| Protected `fastdel` roots | volume roots, `Windows`, `Program Files`, `ProgramData`, profile | `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` |
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| `batched` / `auto` backend | `GetFileInformationByHandleEx` batches | `read_dir` + one `statx` per entry | `readdir$INODE64` + one `fstatat` per entry |
+| Size on disk (`--on-disk`) | `AllocationSize` | `st_blocks * 512` | `st_blocks * 512` |
+| Hardlink dedup (`--dedup-hardlinks`) | 128-bit file id | `dev << 64 \| ino` | `dev << 64 \| ino` |
+| `--watch` change feed | NTFS USN journal (elevated) | inotify (no privileges) | kqueue `EVFILT_VNODE`, up to 4096 directories |
+| `--mft` | raw NTFS `$MFT` | not applicable, refused with a reason | not applicable, refused with a reason |
+| `--streams` | named NTFS streams | no named streams, reports 0 | no named streams, reports 0 |
+| `-fstype` | no names | `/proc/self/mountinfo` | no names yet (`getmntinfo` unbound) |
+| Links never followed | reparse points of any kind | symlinks | symlinks |
+| `--one-filesystem` | no-op (mount points are links) | skips other devices | skips other devices |
+| Protected `fastdel` roots | volume roots, `Windows`, `Program Files`, `ProgramData`, profile | `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` | `/`, `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private`, `/Applications`, `/cores`, `/dev`, `/Users`, `$HOME`, `/opt`, `/Volumes` and each volume root in it |
+
+macOS is built and cross-checked for `x86_64-apple-darwin`. Apple-silicon `arm64` is a
+different target and is **unverified**: nothing in this repository has run it. The Darwin
+`struct stat`, `struct dirent`, `struct kevent` and the `$INODE64` symbol aliases are pinned
+by compile-time `size_of`/`offset_of` assertions, which a cross-check executes but cannot
+prove against libSystem; a build and a test run on a Mac is what confirms them.
 
 ## fastdel
 

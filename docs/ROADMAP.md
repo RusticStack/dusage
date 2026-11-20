@@ -12,6 +12,12 @@ with a memory pass, a cold-cache pass and a regression guard now lives in
 `bench/` and `docs/BENCHMARKS.md`; the section at the end lists what shipped,
 the numbers and the limits that are still open.
 
+**Status (macOS, x86_64).** The crate compiles for `x86_64-apple-darwin` and has a third
+platform module, `src/mac/`: enumeration over `readdir$INODE64`/`fstatat`, deletion over
+`unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed and a macOS guard. Everything is
+cross-checked from Linux; nothing has been built or run on a Mac yet, and arm64 is
+untested. The limits that come with it are in the macOS section at the end.
+
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
 tested; the NTFS-only read paths (`--mft`, `--streams`) are refused or report zero with an
@@ -226,8 +232,7 @@ directory-entry noise.
   container on overlayfs, so delete timings are not comparable to ext4 or btrfs).
 - `--watch` under `max_user_watches` pressure: the fallback is implemented (full rescans)
   but has only been tested by construction, not by lowering the limit.
-- macOS would need a kqueue/FSEvents change feed and its own guard list; the crate refuses
-  to compile there today, on purpose.
+- macOS build numbers, arm64, FSEvents and `getmntinfo` — see the macOS section at the end.
 
 ## Search suite, find and du (0.5.0, as shipped)
 
@@ -386,3 +391,43 @@ at 0.58–0.60x with identical totals. The content row still behind is
   `-prune`/`-depth` semantics.
 - `--stats` is one line today; a per-directory breakdown would make "why is this
   slow" answerable without a profiler.
+
+## macOS (x86_64), as built
+
+**Status.** `lib.rs` accepts `target_os = "macos"` and aliases `src/mac/` as `crate::native`,
+the third arm beside `src/unix/` and `src/win/`. The crate cross-checks for
+`x86_64-apple-darwin` from Linux — `cargo check`, `cargo check --tests` and
+`cargo clippy --all-targets -D warnings` — and CI carries a `macos-15-intel` leg that runs
+the format, lint, test and release-build steps the other platforms run. **Nothing here has
+been built or run on a Mac.** Cross-checking proves the `cfg` wiring, the types and the FFI
+declarations compile; it cannot prove a symbol resolves or that a struct layout matches
+libSystem.
+
+**Done.** Enumeration is `open` + `fdopendir` + `readdir$INODE64`, with `fstatat$INODE64`
+per entry against the open directory descriptor, so `alloc` is `st_blocks * 512` and
+`file_id` is `dev << 64 | ino` exactly as on Linux. Deletion is `unlink`/`rmdir`, path-based
+and never following a symlink. `--watch` is kqueue. The guard refuses `/`, the system trees,
+`/Users`, `$HOME`, `/opt` and every volume root under `/Volumes`.
+
+**Open, each with what it costs.**
+
+- **The Darwin struct layouts are asserted, not verified.** `struct stat` (144 bytes),
+  `struct dirent`, `struct kevent` and the `$INODE64` symbol aliases are pinned by
+  `size_of`/`offset_of` assertions that run during the cross-check, which proves the
+  declaration is self-consistent and nothing about libSystem. The first `cargo build` and
+  `cargo test` on a Mac is what confirms them.
+- **The kqueue feed has a directory budget.** A watch is per-descriptor, so the feed admits
+  4096 directories; a tree past that gets no feed at all and every tick is a full rescan.
+  That is a behaviour change from Linux, whose inotify feed covers every directory or gives
+  up as a whole.
+- **FSEvents is deferred.** It needs CoreFoundation, which zero dependencies rules out for
+  this port. kqueue is what shipped.
+- **`/private` is refused as a whole subtree**, so `/private/tmp` and `/private/var/tmp` are
+  not prunable. Over-refusal is the correct bias for a delete path and no flag opens the
+  guard.
+- **A volume mounted outside `/Volumes` is not refused as a volume root.** `getmntinfo` and
+  `struct statfs` are not bound, so the guard only sees the mounts `/Volumes` lists; the
+  prune's device comparison is what stops a walk into any other one. `-fstype` answers
+  nothing for the same reason.
+- **CI is on a clock.** The `macos-15-intel` runner label is Intel-only and GitHub retires
+  x86_64 macOS runners in August 2027, so an arm64 answer is needed before then.
