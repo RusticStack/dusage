@@ -99,7 +99,9 @@ fn parse(text: &str) -> Vec<(String, String)> {
         .filter(|l| !l.is_empty())
         .map(|l| {
             let mut parts = l.split('\t');
-            let size = parts.next().unwrap_or("").to_string();
+            // Trimmed: BSD `du -h` pads its column with a leading space and GNU does not,
+            // which is a difference in their formatting, not in the arithmetic compared.
+            let size = parts.next().unwrap_or("").trim().to_string();
             let path = parts.next_back().unwrap_or("").replace('\\', "/");
             (size, path)
         })
@@ -618,14 +620,37 @@ fn tree_alloc(dir: &Path) -> u64 {
     total
 }
 
-/// GNU `du`'s own rows for the same arguments, when the system has one: the oracle the
-/// default has to match, byte for byte after sorting. `None` where there is no `du`.
+/// The system `du`'s own rows for the same arguments, when the system has one: the oracle
+/// the default has to match, byte for byte after sorting. `None` where there is no `du`.
+///
+/// `-k` is pinned unless the caller names a unit itself, because the two implementations
+/// disagree about the default one: GNU `du` counts 1024-byte blocks and BSD `du` — what
+/// macOS ships — counts 512-byte ones. Without the flag the oracle silently asks a
+/// different question on a Mac than on Linux, and every row differs by exactly two. The
+/// same two implementations also disagree about `-h` column padding, which is why the size
+/// field is trimmed before anything is compared.
 #[cfg(unix)]
-fn gnu_du(args: &[&str]) -> Option<Vec<(String, String)>> {
-    let o = Command::new("du").args(args).output().ok()?;
+fn system_du(args: &[&str]) -> Option<Vec<(String, String)>> {
+    let mut argv: Vec<&str> = Vec::with_capacity(args.len() + 1);
+    if !names_a_unit(args) {
+        argv.push("-k");
+    }
+    argv.extend_from_slice(args);
+    let o = Command::new("du").args(&argv).output().ok()?;
     o.status
         .success()
         .then(|| by_path(parse(&String::from_utf8_lossy(&o.stdout))))
+}
+
+/// True when the argument list already selects a block size or a size basis.
+#[cfg(unix)]
+fn names_a_unit(args: &[&str]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            *a,
+            "-k" | "-m" | "-h" | "--si" | "-b" | "--bytes" | "--apparent-size"
+        ) || a.starts_with("--block-size")
+    })
 }
 
 /// Rows sorted by path, so two producers of the same numbers compare row for row.
@@ -663,7 +688,7 @@ fn default_counts_allocated_blocks_and_matches_du() {
         };
         assert_eq!(value(&r, dir), want.div_ceil(1024), "{dir} in {r:?}");
     }
-    let want = gnu_du(&["-a", root.to_str().unwrap()]);
+    let want = system_du(&["-a", root.to_str().unwrap()]);
     if let Some(want) = want {
         assert_eq!(by_path(r), want);
     } else {
@@ -687,7 +712,7 @@ fn a_file_of_only_holes_costs_nothing() {
     assert_eq!(size(&r, "holes"), "0", "{r:?}");
     let b = rows(&du(&["-a", "-b", root.to_str().unwrap()]));
     assert_eq!(size(&b, "holes"), (1 << 20).to_string(), "{b:?}");
-    if let Some(want) = gnu_du(&["-a", root.to_str().unwrap()]) {
+    if let Some(want) = system_du(&["-a", root.to_str().unwrap()]) {
         assert_eq!(by_path(r), want);
     }
 }
@@ -747,7 +772,7 @@ fn block_size_scales_the_allocated_base() {
         alloc_of(&root.join("sparse")).div_ceil(4096),
         "{r:?}"
     );
-    if let Some(want) = gnu_du(&["-a", "--block-size=4096", root.to_str().unwrap()]) {
+    if let Some(want) = system_du(&["-a", "--block-size=4096", root.to_str().unwrap()]) {
         assert_eq!(by_path(r), want);
     }
 }
@@ -825,10 +850,10 @@ fn human_and_si_follow_the_allocated_base() {
         size(&si, "sparse").ends_with('k') && size(&si, "sparse") != "1.0k",
         "{si:?}"
     );
-    if let Some(want) = gnu_du(&["-a", "-h", root.to_str().unwrap()]) {
+    if let Some(want) = system_du(&["-a", "-h", root.to_str().unwrap()]) {
         assert_eq!(by_path(h), want);
     }
-    if let Some(want) = gnu_du(&["-a", "--si", root.to_str().unwrap()]) {
+    if let Some(want) = system_du(&["-a", "--si", root.to_str().unwrap()]) {
         assert_eq!(by_path(si), want);
     }
 }
@@ -859,7 +884,7 @@ fn a_child_directory_own_blocks_are_counted() {
         files.div_ceil(1024).to_string(),
         "the directory's own blocks must move the number: {r:?}"
     );
-    if let Some(want) = gnu_du(&["-s", many.to_str().unwrap()]) {
+    if let Some(want) = system_du(&["-s", many.to_str().unwrap()]) {
         assert_eq!(r, want);
     }
 }
@@ -888,7 +913,7 @@ fn a_start_point_own_blocks_are_counted() {
         (tree_alloc(&root) - own).div_ceil(1024).to_string(),
         "the start point's own blocks must move the number: {r:?}"
     );
-    if let Some(want) = gnu_du(&["-s", root.to_str().unwrap()]) {
+    if let Some(want) = system_du(&["-s", root.to_str().unwrap()]) {
         assert_eq!(r, want);
     }
 }
@@ -919,7 +944,7 @@ fn separate_dirs_excludes_children_in_the_default_base() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_default_totals_match_the_system_du_on_usr() {
-    let Some(want_rows) = gnu_du(&["-sk", "/usr"]) else {
+    let Some(want_rows) = system_du(&["-sk", "/usr"]) else {
         eprintln!("skipped: no du(1) on this host");
         return;
     };
@@ -945,36 +970,94 @@ fn macos_the_device_boundary_is_honoured_on_a_real_mount() {
         eprintln!("skipped: /System/Volumes does not exist on this host");
         return;
     }
-    let here = std::fs::metadata(std::env::temp_dir()).map(|m| m.dev());
-    let Ok(dev) = here.map(|d| (d, std::fs::metadata(root).map(|m| m.dev()))) else {
-        eprintln!("skipped: cannot read device ids");
+    // Finding out whether a second device is there costs a handful of `metadata` calls on
+    // the entries of one directory, never a walk: the precondition must not be the slow
+    // part of a test that is meant to be skipped most of the time.
+    let temp_dev = std::fs::metadata(std::env::temp_dir()).map(|m| m.dev());
+    let Ok(temp_dev) = temp_dev else {
+        eprintln!("skipped: cannot read the temp directory's device id");
         return;
     };
-    let (temp_dev, volumes_dev) = (dev.0, dev.1.ok());
-    let mut second = volumes_dev.is_some_and(|d| d != temp_dev);
-    if !second {
-        for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
-            if std::fs::metadata(e.path()).is_ok_and(|m| m.dev() != temp_dev) {
-                second = true;
-                break;
-            }
-        }
-    }
+    let second = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| std::fs::metadata(e.path()).is_ok_and(|m| m.dev() != temp_dev));
     if !second {
         eprintln!("skipped: no second device to compare against");
         return;
     }
-    let Some(want_rows) = gnu_du(&["-sk", "-x", "/System/Volumes"]) else {
-        eprintln!("skipped: no du(1) on this host");
+    // Both sides walk a whole volume here — that is what `-x` over a directory whose child
+    // is a mount means — so each is capped. A cap that trips skips, because the point of
+    // the bound is that this can never hang a runner, not that it measures speed.
+    let Some(want_rows) = bounded_rows(du_argv(&["-sk", "-x", "/System/Volumes"]), WALK_LIMIT)
+    else {
+        eprintln!("skipped: du -sk -x /System/Volumes did not finish within {WALK_LIMIT:?}");
+        return;
+    };
+    let Some(got_rows) = bounded_rows(
+        dusage_argv(&["du", "-k", "-s", "-x", "/System/Volumes"]),
+        WALK_LIMIT,
+    ) else {
+        eprintln!("skipped: dusage du -x did not finish within {WALK_LIMIT:?}");
         return;
     };
     let want = value(&want_rows, "/System/Volumes");
-    let got = value(
-        &rows(&du(&["-k", "-s", "-x", "/System/Volumes"])),
-        "/System/Volumes",
-    );
+    let got = value(&got_rows, "/System/Volumes");
     assert_eq!(
         got, want,
         "-x over /System/Volumes: dusage {got} KiB vs du {want} KiB"
     );
+}
+
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+
+/// How long one side of the whole-volume comparison may take before the test skips.
+#[cfg(target_os = "macos")]
+const WALK_LIMIT: Duration = Duration::from_secs(120);
+
+#[cfg(target_os = "macos")]
+fn du_argv(args: &[&str]) -> Command {
+    let mut c = Command::new("du");
+    c.args(args);
+    c
+}
+
+#[cfg(target_os = "macos")]
+fn dusage_argv(args: &[&str]) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_dusage"));
+    c.args(args);
+    c
+}
+
+/// Run a command and parse its rows, giving up after `limit`. `None` means it did not
+/// finish in time and was killed.
+#[cfg(target_os = "macos")]
+fn bounded_rows(mut cmd: Command, limit: Duration) -> Option<Vec<(String, String)>> {
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() < limit => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let o = child.wait_with_output().ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    Some(by_path(parse(&String::from_utf8_lossy(&o.stdout))))
 }
