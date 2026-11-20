@@ -236,10 +236,19 @@ Cold cache method: fadvise (posix_fadvise DONTNEED per file: file data evicted e
 
 The guard is the cheap check that runs before the full suite. It measures three
 content cases (`search-rare`, `search-regex-nomatch`, `search-count` by default),
-warm cache, medians of five alternating runs, and fails when dusage is more than
-25% slower than the fastest reference on the same box **or** more than 25% above
-its own median in `bench/baseline.json`. `DUSAGE_PERF_TOL` moves the threshold,
-`--runs` the round count and `DUSAGE_PERF_CASES` the case list.
+warm cache, medians of five alternating runs, and fails on either of two things:
+dusage being more than 25% slower than the fastest reference on the same box, or
+**today's ratio to that reference** being more than 25% above the ratio recorded
+in `bench/baseline.json`. `DUSAGE_PERF_TOL` moves the threshold, `--runs` the
+round count and `DUSAGE_PERF_CASES` the case list.
+
+The second check compares a ratio rather than a stored median on purpose. The
+same binary on the same box measured a 51 ms median in the evening and 96 ms the
+same night, while its ratio to the reference tool measured in the same minute
+did not move — so a stored absolute time turns a busy host into a false positive.
+The ratio is still machine specific in one way an absolute number is not: a
+4-vCPU box gives a search the parallelism a 2-vCPU box cannot, so re-record the
+baseline on whatever machine you gate on (`--update-baseline`).
 
 Verbatim output of `bash scripts/perf-guard.sh` at the same commit:
 
