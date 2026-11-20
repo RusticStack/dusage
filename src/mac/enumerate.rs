@@ -1,33 +1,31 @@
-//! Directory enumeration for macOS.
+//! Directory enumeration for macOS, over libSystem.
 //!
-//! Slice 1 of the port: names, kinds, sizes, allocation, file id and device all come
-//! from `std::fs`, which on Darwin is `getdirentries64` under `read_dir` and `fstatat`
-//! under `symlink_metadata`/`metadata`. The shapes are the ones `src/unix/enumerate.rs`
-//! established, so `scan`, `du`, `prune`, `search` and `find` need no platform branch:
+//! [`Dir`] is the primitive: one `open` of a directory, then `fdopendir`, then `readdir`
+//! record by record, with the entry type coming free from `d_type` and the name read out
+//! of the record the kernel handed back. Anything that needs the inode — size, allocation,
+//! mtime, device, file id — is one `fstatat` on the open directory descriptor, which is
+//! `lstat` without a path to resolve.
 //!
-//! - a symlink is the "do not follow" class, reported as `Kind::Symlink` and never
-//!   descended into;
-//! - `alloc` is `st_blocks * 512` and `file_id` is `dev << 64 | ino`, so
-//!   `--dedup-hardlinks`, `-size` and the on-disk columns mean the same as on Linux;
-//! - a directory's size is reported as 0 by the eager `Entry`, because that is its own
-//!   record and not its contents, while `lstat` reports the record itself;
-//! - `read_plain` leaves `alloc`, `file_id` and `dev` at zero.
+//! [`list`] is the names-and-kinds layer. [`DirReader::read`] and [`read_plain`] add the
+//! `fstatat`; [`Lite::stat`] defers it until asked. Symlinks take the place of Windows
+//! reparse points: they are reported and never followed. Per-entry failures are recorded
+//! in the caller's `ErrorCounts` and the walk continues; only an unreadable directory is
+//! returned as `Err`.
 //!
-//! [`list`] is the names-and-kinds layer [`Lite`] walks, and [`DirReader::read`] adds the
-//! `lstat`; [`Lite::stat`] defers it until asked and caches the answer. Per-entry
-//! failures are recorded in the caller's `ErrorCounts` and the walk continues; only an
-//! unreadable directory is returned as `Err`.
+//! Darwin has no `getdents64`: `readdir` hands back one record at a time from the
+//! directory stream it keeps, so the batch-restart logic the Linux enumerator needs for a
+//! directory that mutates mid-read has no counterpart here. A directory that gains or
+//! loses an entry during a read is reported as the kernel streamed it, and the next walk
+//! sees the new state.
 
 use super::sys;
 use crate::model::{ErrorCounts, Kind, Stat};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
-use std::fs;
+use std::ffi::{c_int, CStr, CString, OsStr, OsString};
 use std::io;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -65,42 +63,44 @@ impl Entry {
 /// `-gid` and `-links` answer here the way they do on Linux.
 pub const POSIX_FIELDS: bool = true;
 
-fn kind_of_type(t: &fs::FileType) -> Kind {
-    if t.is_symlink() {
-        Kind::Symlink
-    } else if t.is_dir() {
-        Kind::Dir
-    } else if t.is_file() {
-        Kind::File
-    } else if t.is_fifo() {
-        Kind::Fifo
-    } else if t.is_socket() {
-        Kind::Socket
-    } else if t.is_char_device() {
-        Kind::Char
-    } else if t.is_block_device() {
-        Kind::Block
-    } else {
-        Kind::Other
-    }
+fn malformed() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "malformed dirent record")
 }
 
-fn mode_kind(mode: u32) -> Kind {
-    match mode & 0o170_000 {
-        0o040_000 => Kind::Dir,
-        0o100_000 => Kind::File,
-        0o120_000 => Kind::Symlink,
-        0o010_000 => Kind::Fifo,
-        0o140_000 => Kind::Socket,
-        0o020_000 => Kind::Char,
-        0o060_000 => Kind::Block,
+/// The `dirent` type, which is exact and free: `readdir` reports it, so neither `list`
+/// nor a walk that only needs names pays a syscall for it. `None` is `DT_UNKNOWN`, where
+/// only one `fstatat` can answer.
+fn kind_of_dtype(t: u8) -> Option<Kind> {
+    Some(match t {
+        sys::DT_DIR => Kind::Dir,
+        sys::DT_REG => Kind::File,
+        sys::DT_LNK => Kind::Symlink,
+        sys::DT_FIFO => Kind::Fifo,
+        sys::DT_CHR => Kind::Char,
+        sys::DT_BLK => Kind::Block,
+        sys::DT_SOCK => Kind::Socket,
+        sys::DT_UNKNOWN => return None,
+        _ => Kind::Other,
+    })
+}
+
+fn kind_of_mode(mode: u32) -> Kind {
+    match mode & sys::S_IFMT {
+        sys::S_IFDIR => Kind::Dir,
+        sys::S_IFREG => Kind::File,
+        sys::S_IFLNK => Kind::Symlink,
+        sys::S_IFIFO => Kind::Fifo,
+        sys::S_IFSOCK => Kind::Socket,
+        sys::S_IFCHR => Kind::Char,
+        sys::S_IFBLK => Kind::Block,
         _ => Kind::Other,
     }
 }
 
 fn time_of(secs: i64, nsec: i64) -> SystemTime {
     if secs < 0 && nsec > 0 && nsec < 1_000_000_000 {
-        // `tv_sec` floors: -0.5 s arrives as `tv_sec = -1, tv_nsec = 500_000_000`.
+        // `tv_sec` floors: -0.5 s arrives as `tv_sec = -1, tv_nsec = 500_000_000`, so
+        // there is one whole second less before the epoch than `|tv_sec|` reads.
         UNIX_EPOCH - Duration::new(secs.unsigned_abs() - 1, 1_000_000_000 - nsec as u32)
     } else {
         let span = Duration::new(secs.unsigned_abs(), nsec.clamp(0, 1_999_999_999) as u32);
@@ -112,39 +112,200 @@ fn time_of(secs: i64, nsec: i64) -> SystemTime {
     }
 }
 
-fn stat_of(md: &fs::Metadata) -> Stat {
+/// One `struct stat` as the shared [`Stat`].
+fn stat_of(s: &sys::StatBuf) -> Stat {
     Stat {
-        kind: mode_kind(md.mode()),
-        size: md.size(),
-        blocks: md.blocks(),
-        mtime: time_of(md.mtime(), md.mtime_nsec()),
-        atime: time_of(md.atime(), md.atime_nsec()),
-        ctime: time_of(md.ctime(), md.ctime_nsec()),
-        links: md.nlink(),
-        inode: md.ino(),
-        dev: md.dev(),
-        mode: md.mode(),
-        uid: md.uid(),
-        gid: md.gid(),
+        kind: kind_of_mode(u32::from(s.st_mode)),
+        size: s.st_size.max(0) as u64,
+        blocks: s.st_blocks.max(0) as u64,
+        mtime: time_of(s.st_mtime, s.st_mtime_nsec),
+        atime: time_of(s.st_atime, s.st_atime_nsec),
+        ctime: time_of(s.st_ctime, s.st_ctime_nsec),
+        links: u64::from(s.st_nlink),
+        inode: s.st_ino,
+        dev: s.st_dev as u64,
+        mode: u32::from(s.st_mode),
+        uid: s.st_uid,
+        gid: s.st_gid,
     }
 }
 
-/// `lstat` one path: the root, a `--follow` target, or a `-newerXY` reference file.
+fn c_path(p: &OsStr) -> io::Result<CString> {
+    CString::new(p.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))
+}
+
+fn stat_path(p: &Path, follow: bool) -> io::Result<Stat> {
+    let path = c_path(p.as_os_str())?;
+    let mut stx = sys::StatBuf::default();
+    // SAFETY: `path` is NUL-terminated and outlives the call, and `stx` is a live
+    // `struct stat` of exactly the size declared above.
+    let rc = unsafe {
+        if follow {
+            sys::stat(path.as_ptr(), &mut stx)
+        } else {
+            sys::lstat(path.as_ptr(), &mut stx)
+        }
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(stat_of(&stx))
+}
+
+/// `lstat` one path: the root, a `--follow` target, or a `-newerXY` reference file. The
+/// walk itself never comes through here — it stats names against its open directory.
 pub fn lstat(p: &Path) -> io::Result<Stat> {
-    fs::symlink_metadata(p).map(|m| stat_of(&m))
+    stat_path(p, false)
 }
 
 /// `stat` one path, following a symlink (what `-follow` and `-L` turn an entry into).
 pub fn stat(p: &Path) -> io::Result<Stat> {
-    fs::metadata(p).map(|m| stat_of(&m))
+    stat_path(p, true)
+}
+
+// One reused name buffer per thread, so naming a file to `fstatat` costs a copy, not an
+// allocation.
+thread_local! {
+    static NAME_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `lstat` one name of an open directory, without resolving a path.
+fn fstat_at(fd: c_int, name: &[u8]) -> io::Result<Stat> {
+    NAME_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        buf.extend_from_slice(name);
+        buf.push(0);
+        let cname = CStr::from_bytes_with_nul(&buf).map_err(|_| malformed())?;
+        let mut stx = sys::StatBuf::default();
+        // SAFETY: `cname` is NUL-terminated for the whole call — it is borrowed from this
+        // thread's buffer, which nothing else borrows while it runs — `fd` is open on the
+        // directory the name is relative to, and `stx` is a live `struct stat`.
+        let rc = unsafe { sys::fstatat(fd, cname.as_ptr(), &mut stx, sys::AT_SYMLINK_NOFOLLOW) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(stat_of(&stx))
+    })
+}
+
+/// An open directory stream, closed when the last entry listed with it is dropped.
+struct Dir {
+    ptr: *mut sys::DIR,
+}
+
+impl Dir {
+    fn open(path: &Path) -> io::Result<Dir> {
+        let p = c_path(path.as_os_str())?;
+        // SAFETY: `p` is NUL-terminated and outlives the call, and the flags are the ones
+        // a directory is opened with: read-only, must be a directory, close-on-exec, and
+        // non-blocking so a FIFO-shaped path cannot park the open.
+        let fd = unsafe {
+            sys::open(
+                p.as_ptr(),
+                sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC | sys::O_NONBLOCK,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a descriptor this call just opened; `fdopendir` takes ownership
+        // of it on success.
+        let ptr = unsafe { sys::fdopendir(fd) };
+        if ptr.is_null() {
+            let e = io::Error::last_os_error();
+            // SAFETY: `fd` is still ours, because `fdopendir` failed and did not take it.
+            unsafe { sys::close(fd) };
+            return Err(e);
+        }
+        Ok(Dir { ptr })
+    }
+
+    fn fd(&self) -> c_int {
+        // SAFETY: `self.ptr` is a live `DIR *` for as long as `self` lives.
+        unsafe { sys::dirfd(self.ptr) }
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        // SAFETY: `self.ptr` came from `fdopendir` and is closed exactly once, here.
+        unsafe { sys::closedir(self.ptr) };
+    }
+}
+
+/// One record out of the directory stream, borrowed from the kernel's own copy.
+struct Rec<'a> {
+    name: &'a [u8],
+    /// `None` when `d_type` was `DT_UNKNOWN`.
+    kind: Option<Kind>,
+}
+
+/// Where one directory's records go.
+trait Sink {
+    /// Take one record from the directory open as `dir`, which `fstat_at` resolves names in.
+    fn push(&mut self, dir: &Rc<Dir>, rec: &Rec<'_>);
+}
+
+/// One `readdir` pass over `dir`, feeding every record to `sink`. `.` and `..` never come
+/// out of here.
+fn read_dir_raw<S: Sink + ?Sized>(dir: &Path, sink: &mut S) -> io::Result<()> {
+    let d = Rc::new(Dir::open(dir)?);
+    let name_cap = std::mem::size_of::<[u8; 1024]>();
+    loop {
+        // `readdir` answers the end of the directory and a failure the same way, so errno
+        // is cleared first and only a value set again afterwards is an error.
+        // SAFETY: `__error` returns this thread's errno slot.
+        unsafe { *sys::__error() = 0 };
+        // SAFETY: `d.ptr` is a live `DIR *`; the record it returns is owned by the stream
+        // and stays valid until the next call on it, which is why it is read here and
+        // nowhere later.
+        let ent = unsafe { sys::readdir(d.ptr) };
+        if ent.is_null() {
+            let e = io::Error::last_os_error();
+            return match e.raw_os_error() {
+                None | Some(0) => Ok(()),
+                Some(_) => Err(e),
+            };
+        }
+        let d_type = unsafe { (*ent).d_type };
+        let d_name = unsafe { (*ent).d_name.as_ptr() };
+        let len = usize::from(unsafe { (*ent).d_namlen });
+        // A record with no length names nothing, and `dir.join("")` names the directory
+        // itself: the walk would descend into it.
+        if len == 0 || len > name_cap {
+            return Err(malformed());
+        }
+        let name = unsafe { std::slice::from_raw_parts(d_name, len) };
+        if name.contains(&0) {
+            return Err(malformed());
+        }
+        if name == b"." || name == b".." {
+            continue;
+        }
+        sink.push(
+            &d,
+            &Rec {
+                name,
+                kind: kind_of_dtype(d_type),
+            },
+        );
+    }
 }
 
 /// Every name of one directory, back to back: the entries listed with it index into this
-/// one allocation instead of owning a name each.
+/// one allocation instead of owning a name each. The bytes are the kernel's, copied once,
+/// so a name that is not valid UTF-8 reaches the caller exactly as it was reported.
 type Names = Rc<Vec<u8>>;
 
-/// One entry's name: a byte range in its directory's [`Names`], which is why a name is
-/// only readable once [`list`] has returned.
+/// One entry's name: a byte range in its directory's [`Names`].
+///
+/// This is what a walker borrows a name from, so it derefs to `OsStr` and compares and
+/// orders the way `OsStr` does. The range is set when the entry is read and the arena it
+/// points into when the directory ends, which is why a name is only readable once
+/// [`list`] has returned.
 #[derive(Clone)]
 pub struct Name {
     names: Option<Names>,
@@ -229,13 +390,19 @@ impl PartialEq<&str> for Name {
     }
 }
 
-/// One name from a directory: the name, the type that came with the directory record,
-/// the directory it was read from, and an empty slot for its `lstat` data.
+/// One name from a directory, as cheaply as the kernel gives it up: a name, a type that
+/// came with the `dirent`, the directory it was read from, and an empty slot for its
+/// `lstat` data.
+///
+/// `stat` is the only thing that costs a syscall, and it runs once: the entry remembers the
+/// answer, so a size asked for in a filter and again in the output is one `fstatat`. It
+/// resolves the name against the open directory, never the full path, which is what find's
+/// `fstatat` does.
 pub struct Lite {
     pub name: Name,
     kind: Kind,
     /// The directory this name came from, alive as long as any entry listed with it.
-    dir: Rc<PathBuf>,
+    dir: Rc<Dir>,
     stat: Cell<Option<Stat>>,
 }
 
@@ -248,7 +415,7 @@ impl Lite {
         self.kind == Kind::Symlink
     }
 
-    /// The kind the directory record reported: exact, and free.
+    /// The kind the `dirent` reported: exact, and free.
     pub fn kind(&self) -> Kind {
         self.kind
     }
@@ -258,49 +425,67 @@ impl Lite {
         if let Some(s) = self.stat.get() {
             return Ok(s);
         }
-        let s = lstat(&self.dir.join(self.name.os()))?;
+        let s = fstat_at(self.dir.fd(), self.name.slice())?;
         self.stat.set(Some(s));
         Ok(s)
     }
 }
 
-/// List one directory into `out`: names and kinds only, no `lstat` per entry.
-pub fn list(dir: &Path, out: &mut Vec<Lite>, errs: &mut ErrorCounts) -> io::Result<()> {
-    out.clear();
-    let dir = Rc::new(dir.to_path_buf());
-    let mut names: Vec<u8> = Vec::new();
-    for e in fs::read_dir(&*dir)? {
-        let e = match e {
-            Ok(e) => e,
-            Err(err) => {
-                errs.record(&err);
-                continue;
-            }
+struct LiteSink<'a> {
+    out: &'a mut Vec<Lite>,
+    errs: &'a mut ErrorCounts,
+    /// The names pushed so far, back to back, which become the arena when the directory
+    /// ends. Grown once rather than once per entry.
+    names: Vec<u8>,
+}
+
+impl Sink for LiteSink<'_> {
+    fn push(&mut self, dir: &Rc<Dir>, rec: &Rec<'_>) {
+        let kind = match rec.kind {
+            // One `fstatat` answers a type the filesystem left out; an entry that vanished
+            // meanwhile is counted and dropped.
+            None => match fstat_at(dir.fd(), rec.name) {
+                Ok(s) => s.kind,
+                Err(err) => {
+                    self.errs.record(&err);
+                    return;
+                }
+            },
+            Some(kind) => kind,
         };
-        let kind = match e.file_type() {
-            Ok(t) => kind_of_type(&t),
-            Err(err) => {
-                errs.record(&err);
-                continue;
-            }
-        };
-        let name = e.file_name();
-        let bytes = name.as_bytes();
-        let at = names.len();
-        names.extend_from_slice(bytes);
-        out.push(Lite {
+        let at = self.names.len();
+        self.names.extend_from_slice(rec.name);
+        self.out.push(Lite {
             name: Name {
                 names: None,
                 at,
-                len: bytes.len(),
+                len: rec.name.len(),
             },
             kind,
-            dir: Rc::clone(&dir),
+            dir: Rc::clone(dir),
             stat: Cell::new(None),
         });
     }
-    let names: Names = Rc::new(names);
-    for e in out.iter_mut() {
+}
+
+/// List one directory into `out`: names and types only, no `stat`.
+///
+/// `out` is cleared and its allocation reused, so a walk keeps one entry vector instead of
+/// allocating one per directory. An entry that cannot be typed is recorded in `errs` and
+/// dropped, like an entry that vanishes between `readdir` and `lstat` always was.
+///
+/// The directory's names are copied into one buffer and shared by every entry listed, which
+/// is one allocation per directory instead of one per name.
+pub fn list(dir: &Path, out: &mut Vec<Lite>, errs: &mut ErrorCounts) -> io::Result<()> {
+    out.clear();
+    let mut sink = LiteSink {
+        out,
+        errs,
+        names: Vec::new(),
+    };
+    read_dir_raw(dir, &mut sink)?;
+    let names: Names = Rc::new(sink.names);
+    for e in sink.out.iter_mut() {
         e.name.names = Some(Rc::clone(&names));
     }
     Ok(())
@@ -309,6 +494,35 @@ pub fn list(dir: &Path, out: &mut Vec<Lite>, errs: &mut ErrorCounts) -> io::Resu
 /// True for entries that are counted as links and never descended into.
 pub fn is_skipped(e: &Entry) -> bool {
     e.is_link
+}
+
+struct EntrySink<'a> {
+    out: &'a mut Vec<Entry>,
+    errs: &'a mut ErrorCounts,
+    detail: bool,
+}
+
+impl Sink for EntrySink<'_> {
+    fn push(&mut self, dir: &Rc<Dir>, rec: &Rec<'_>) {
+        // `fstatat` with `AT_SYMLINK_NOFOLLOW` is `lstat`: a symlink is described, not
+        // followed.
+        match fstat_at(dir.fd(), rec.name) {
+            Ok(s) => self.out.push(Entry {
+                name: OsString::from_vec(rec.name.to_vec()),
+                is_dir: s.kind == Kind::Dir,
+                is_link: s.kind == Kind::Symlink,
+                // A directory's size is its own bookkeeping, not its contents.
+                size: if s.kind == Kind::Dir { 0 } else { s.size },
+                alloc: if self.detail { s.alloc() } else { 0 },
+                file_id: if self.detail { s.file_id() } else { 0 },
+                dev: if self.detail { s.dev } else { 0 },
+                modified: s.mtime,
+            }),
+            Err(err) => {
+                self.errs.record(&err);
+            }
+        }
+    }
 }
 
 /// Enumerator with the batched backend's contract: every entry carries its allocated
@@ -337,8 +551,8 @@ impl DirReader {
 }
 
 /// List one directory with an `lstat` per entry. `detail` fills allocation size, device
-/// and file id, which costs nothing extra here but keeps the `readdir` backend's
-/// documented "on-disk unknown, no file ids" behaviour.
+/// and file id, which costs nothing extra here (one `fstatat` per entry either way) but
+/// keeps the `readdir` backend's documented "on-disk unknown, no file ids" behaviour.
 fn read_with(
     dir: &Path,
     out: &mut Vec<Entry>,
@@ -346,32 +560,7 @@ fn read_with(
     detail: bool,
 ) -> io::Result<()> {
     out.clear();
-    for e in fs::read_dir(dir)? {
-        let (e, md) = match e.and_then(|e| e.metadata().map(|m| (e, m))) {
-            Ok(x) => x,
-            Err(err) => {
-                errs.record(&err);
-                continue;
-            }
-        };
-        let kind = mode_kind(md.mode());
-        out.push(Entry {
-            name: e.file_name(),
-            is_dir: kind == Kind::Dir,
-            is_link: kind == Kind::Symlink,
-            // A directory's size is its own bookkeeping, not its contents.
-            size: if kind == Kind::Dir { 0 } else { md.size() },
-            alloc: if detail { md.blocks() * 512 } else { 0 },
-            file_id: if detail {
-                (md.dev() as u128) << 64 | md.ino() as u128
-            } else {
-                0
-            },
-            dev: if detail { md.dev() } else { 0 },
-            modified: time_of(md.mtime(), md.mtime_nsec()),
-        });
-    }
-    Ok(())
+    read_dir_raw(dir, &mut EntrySink { out, errs, detail })
 }
 
 /// The `readdir` backend: names and sizes only, no allocation sizes or file ids.
@@ -379,9 +568,8 @@ pub fn read_plain(dir: &Path, out: &mut Vec<Entry>, errs: &mut ErrorCounts) -> i
     read_with(dir, out, errs, false)
 }
 
-/// Err when `path` is itself a symlink: scanning or pruning it would silently act on
-/// its target instead. The wording is Linux's, because the callers and the tests match
-/// on it.
+/// Err when `path` is itself a symlink: scanning or pruning it would silently act on its
+/// target instead. The wording is Linux's, because the callers and the tests match on it.
 pub fn refuse_reparse_root(path: &Path) -> io::Result<()> {
     match lstat(path) {
         Ok(s) if s.kind == Kind::Symlink => Err(io::Error::new(
@@ -410,9 +598,11 @@ pub fn dev_of(path: &Path) -> io::Result<u64> {
     Ok(stat(path)?.dev)
 }
 
-/// Filesystem type names by device, for `-fstype`. Darwin answers this from
-/// `getmntinfo`, which slice 1 does not carry yet: an empty map means the walk has no
-/// names to compare against, so `-fstype` matches nothing rather than lying.
+/// Filesystem type names by device, for `-fstype`.
+///
+/// Darwin answers this from `getmntinfo`, whose `struct statfs` this layer does not bind
+/// yet, so the map is empty and `-fstype` matches nothing — the same answer Windows gives,
+/// and an honest one: no names is not the same as a wrong name.
 pub fn filesystem_types() -> HashMap<u64, String> {
     HashMap::new()
 }
@@ -447,6 +637,8 @@ pub fn os_from_bytes(b: &[u8]) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     struct Fixture(PathBuf);
@@ -500,6 +692,35 @@ mod tests {
     }
 
     #[test]
+    fn fields_match_std_metadata() {
+        use std::os::unix::fs::MetadataExt;
+        let f = Fixture::new("statx");
+        fs::create_dir(f.0.join("sub")).unwrap();
+        fs::write(f.0.join("a.bin"), vec![0u8; 9000]).unwrap();
+        std::os::unix::fs::symlink(f.0.join("a.bin"), f.0.join("lnk")).unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        DirReader::new().read(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(errs.total(), 0);
+        assert_eq!(v.len(), 3);
+        for e in &v {
+            let md = fs::symlink_metadata(f.0.join(&e.name)).unwrap();
+            let name = &e.name;
+            assert_eq!(e.size, if md.is_dir() { 0 } else { md.len() }, "{name:?}");
+            assert_eq!(e.alloc, md.blocks() * 512, "{name:?}");
+            assert_eq!(e.dev, md.dev(), "{name:?}");
+            assert_eq!(
+                e.file_id,
+                (md.dev() as u128) << 64 | md.ino() as u128,
+                "{name:?}"
+            );
+            assert_eq!(e.is_dir, md.is_dir(), "{name:?}");
+            assert_eq!(e.is_link, md.file_type().is_symlink(), "{name:?}");
+            assert_eq!(e.modified(), md.modified().unwrap(), "{name:?}");
+        }
+    }
+
+    #[test]
     fn hardlinks_share_one_file_id() {
         let f = Fixture::new("hl");
         fs::write(f.0.join("a.bin"), b"x").unwrap();
@@ -533,6 +754,18 @@ mod tests {
         assert!(DirReader::new()
             .read(&f.0.join("nope"), &mut v, &mut errs)
             .is_err());
+        assert!(list(&f.0.join("nope"), &mut Vec::new(), &mut errs).is_err());
+    }
+
+    #[test]
+    fn a_file_is_not_a_directory() {
+        let f = Fixture::new("notdir");
+        fs::write(f.0.join("a"), b"x").unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        assert!(DirReader::new()
+            .read(&f.0.join("a"), &mut v, &mut errs)
+            .is_err());
     }
 
     #[test]
@@ -565,10 +798,10 @@ mod tests {
     }
 
     #[test]
-    fn lite_names_come_from_the_record_and_stat_is_cached() {
+    fn lite_types_come_from_the_dirent() {
         let f = Fixture::new("lite");
         fs::create_dir(f.0.join("sub")).unwrap();
-        fs::write(f.0.join("a.bin"), vec![0u8; 5000]).unwrap();
+        fs::write(f.0.join("a.bin"), vec![0u8; 4096]).unwrap();
         std::os::unix::fs::symlink(f.0.join("a.bin"), f.0.join("link")).unwrap();
         let mut v = Vec::new();
         let mut errs = ErrorCounts::default();
@@ -580,20 +813,51 @@ mod tests {
             .collect();
         got.sort();
         assert_eq!(got, ["a.bin", "link", "sub"]);
-        assert!(!v.iter().find(|e| e.name == "link").unwrap().is_dir());
-        assert!(v.iter().find(|e| e.name == "sub").unwrap().is_dir());
-        let a = v.iter().find(|e| e.name == "a.bin").unwrap();
-        let s = a.stat().unwrap();
-        assert_eq!(s.size, 5000);
-        assert!(s.alloc() >= 5000, "on-disk {} for 5000 bytes", s.alloc());
-        assert_eq!(a.stat().unwrap(), s, "cached, so the answer is stable");
-        // A link stats as itself, not as its target.
-        let link = v.iter().find(|e| e.name == "link").unwrap();
-        assert_eq!(link.stat().unwrap().kind, Kind::Symlink);
-        assert_ne!(link.stat().unwrap().size, 5000);
+        let dir = |n: &str| v.iter().find(|e| e.name == n).unwrap().is_dir();
+        assert!(dir("sub") && !dir("a.bin") && !dir("link"));
+        assert!(v.iter().find(|e| e.name == "link").unwrap().is_reparse());
         // `list` clears and reuses the caller's vector.
         list(&f.0.join("sub"), &mut v, &mut errs).unwrap();
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn lite_stat_is_exact_and_cached() {
+        use std::os::unix::fs::MetadataExt;
+        let f = Fixture::new("stat");
+        fs::write(f.0.join("a"), vec![0u8; 5000]).unwrap();
+        std::os::unix::fs::symlink(f.0.join("a"), f.0.join("lnk")).unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        for e in &v {
+            let p = f.0.join(&e.name);
+            let md = fs::symlink_metadata(&p).unwrap();
+            let s = e.stat().unwrap();
+            assert_eq!(
+                s.size,
+                if md.is_dir() { 0 } else { md.len() },
+                "{:?}",
+                e.name
+            );
+            assert_eq!(s.alloc(), md.blocks() * 512, "{:?}", e.name);
+            assert_eq!(s.dev, md.dev(), "{:?}", e.name);
+            assert_eq!(s.file_id(), (md.dev() as u128) << 64 | md.ino() as u128);
+            assert_eq!(s.modified(), md.modified().unwrap(), "{:?}", e.name);
+            assert_eq!(
+                e.stat().unwrap(),
+                s,
+                "cached: the same answer, byte for byte"
+            );
+        }
+        // A link stats as itself: its own length, not its target's 5000 bytes.
+        let lone = v.iter().find(|e| e.name == "lnk").unwrap();
+        assert_eq!(lone.stat().unwrap().kind, Kind::Symlink);
+        assert_ne!(lone.stat().unwrap().size, 5000);
+        assert_ne!(
+            file_id_of(&f.0.join("lnk")).unwrap(),
+            file_id_of(&f.0.join("a")).unwrap()
+        );
     }
 
     #[test]
@@ -607,8 +871,27 @@ mod tests {
         assert!(v[0].stat().is_err());
     }
 
+    /// `Lite::stat` resolves the name against the directory the entry was read from, so it
+    /// keeps working when the path it was reached by no longer leads there — the whole
+    /// point of `fstatat(dirfd, name)` over a path-resolving `lstat`.
+    #[test]
+    fn lite_stat_survives_the_path_being_renamed() {
+        let f = Fixture::new("moved");
+        fs::create_dir(f.0.join("real")).unwrap();
+        fs::write(f.0.join("real/a"), b"12345").unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0.join("real"), &mut v, &mut errs).unwrap();
+        fs::rename(f.0.join("real"), f.0.join("moved")).unwrap();
+        assert!(!f.0.join("real/a").exists());
+        let s = v[0].stat().unwrap();
+        assert_eq!(s.size, 5);
+        assert_eq!(s.kind, Kind::File);
+    }
+
     #[test]
     fn posix_fields_are_present() {
+        use std::os::unix::fs::MetadataExt;
         let f = Fixture::new("posix");
         fs::write(f.0.join("a"), vec![0u8; 7000]).unwrap();
         fs::hard_link(f.0.join("a"), f.0.join("b")).unwrap();
@@ -639,24 +922,80 @@ mod tests {
         let mut v = Vec::new();
         let mut errs = ErrorCounts::default();
         list(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(errs.total(), 0);
         let e = v
             .iter()
             .find(|e| e.name.as_bytes() == b"bad\xff\xfedir")
             .expect("the name reaches the caller exactly as the kernel gave it");
         assert!(e.is_dir());
         assert_eq!(e.stat().unwrap().kind, Kind::Dir);
+        let mut w = Vec::new();
+        list(&f.0.join(dir), &mut w, &mut errs).unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].name.as_bytes(), b"in\xff.go");
+        assert_eq!(w[0].stat().unwrap().size, 1);
     }
 
     #[test]
-    fn kinds_come_from_the_mode() {
-        assert_eq!(mode_kind(0o040_755), Kind::Dir);
-        assert_eq!(mode_kind(0o100_644), Kind::File);
-        assert_eq!(mode_kind(0o120_777), Kind::Symlink);
-        assert_eq!(mode_kind(0o010_644), Kind::Fifo);
-        assert_eq!(mode_kind(0o140_755), Kind::Socket);
-        assert_eq!(mode_kind(0o020_600), Kind::Char);
-        assert_eq!(mode_kind(0o060_600), Kind::Block);
-        assert_eq!(mode_kind(0), Kind::Other);
+    fn a_name_at_the_name_limit() {
+        let f = Fixture::new("namelen");
+        let exact = "e".repeat(255);
+        fs::write(f.0.join(&exact), vec![0u8; 11]).unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].stat().unwrap().size, 11);
+    }
+
+    #[test]
+    fn names_survive_a_large_directory() {
+        let f = Fixture::new("many");
+        let want: Vec<String> = (0..2000).map(|i| format!("f{i:05}")).collect();
+        for n in &want {
+            fs::write(f.0.join(n), b"x").unwrap();
+        }
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        assert_eq!(errs.total(), 0);
+        let mut got: Vec<String> = v
+            .iter()
+            .map(|e| e.name.to_string_lossy().into_owned())
+            .collect();
+        got.sort();
+        assert_eq!(got, want);
+        let mut w: Vec<Entry> = Vec::new();
+        DirReader::new().read(&f.0, &mut w, &mut errs).unwrap();
+        assert_eq!(w.len(), want.len());
+        assert!(w.iter().all(|e| !e.is_dir && e.size == 1 && e.file_id != 0));
+    }
+
+    #[test]
+    fn an_empty_directory_lists_nothing() {
+        let f = Fixture::new("empty");
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        DirReader::new().read(&f.0, &mut v, &mut errs).unwrap();
+        assert!(v.is_empty() && errs.total() == 0);
+        let mut lite = Vec::new();
+        list(&f.0, &mut lite, &mut errs).unwrap();
+        assert!(lite.is_empty() && errs.total() == 0);
+    }
+
+    #[test]
+    fn kinds_come_from_the_dirent_and_the_mode() {
+        assert_eq!(kind_of_dtype(sys::DT_FIFO), Some(Kind::Fifo));
+        assert_eq!(kind_of_dtype(sys::DT_CHR), Some(Kind::Char));
+        assert_eq!(kind_of_dtype(sys::DT_BLK), Some(Kind::Block));
+        assert_eq!(kind_of_dtype(sys::DT_SOCK), Some(Kind::Socket));
+        assert_eq!(kind_of_dtype(sys::DT_DIR), Some(Kind::Dir));
+        assert_eq!(kind_of_dtype(sys::DT_UNKNOWN), None);
+        assert_eq!(kind_of_mode(sys::S_IFIFO | 0o644), Kind::Fifo);
+        assert_eq!(kind_of_mode(sys::S_IFCHR | 0o600), Kind::Char);
+        assert_eq!(kind_of_mode(sys::S_IFBLK | 0o600), Kind::Block);
+        assert_eq!(kind_of_mode(sys::S_IFSOCK | 0o755), Kind::Socket);
+        assert_eq!(kind_of_mode(sys::S_IFLNK | 0o777), Kind::Symlink);
     }
 
     #[test]
@@ -672,26 +1011,39 @@ mod tests {
             UNIX_EPOCH - Duration::new(1, 750_000_000)
         );
         assert_eq!(time_of(-1, 0), UNIX_EPOCH - Duration::new(1, 0));
+        assert_eq!(
+            time_of(-1, 1_500_000_000),
+            UNIX_EPOCH - Duration::new(2, 500_000_000)
+        );
     }
 
     #[test]
-    fn a_name_is_readable_once_its_directory_ends() {
-        let n = Name::owned(b"x");
-        assert_eq!(&*n, OsStr::from_bytes(b"x"));
-    }
-
-    #[test]
-    fn the_name_buffer_is_shared_per_directory() {
-        let f = Fixture::new("arena");
-        for i in 0..100 {
-            fs::write(f.0.join(format!("f{i:03}")), b"x").unwrap();
-        }
+    fn the_name_buffer_is_reused_without_truncation() {
+        let f = Fixture::new("namebuf");
+        let long = "l".repeat(250);
+        fs::write(f.0.join(&long), vec![0u8; 300]).unwrap();
+        fs::write(f.0.join("s"), vec![0u8; 7]).unwrap();
         let mut v = Vec::new();
         let mut errs = ErrorCounts::default();
         list(&f.0, &mut v, &mut errs).unwrap();
-        assert_eq!(v.len(), 100);
-        let ptr = |e: &Lite| Rc::as_ptr(e.name.names.as_ref().unwrap()) as *const u8;
-        assert!(v.windows(2).all(|w| ptr(&w[0]) == ptr(&w[1])));
-        assert!(v.iter().all(|e| e.stat().is_ok()));
+        let stat = |n: &str| v.iter().find(|e| e.name == n).unwrap().stat().unwrap();
+        assert_eq!(stat(&long).size, 300);
+        assert_eq!(stat("s").size, 7);
+        assert_eq!(stat(&long).size, 300);
+        assert_eq!(stat(&long).kind, Kind::File);
+    }
+
+    #[test]
+    fn a_name_with_a_nul_cannot_be_stat_ed() {
+        let f = Fixture::new("nul");
+        fs::write(f.0.join("a"), b"x").unwrap();
+        let mut v = Vec::new();
+        let mut errs = ErrorCounts::default();
+        list(&f.0, &mut v, &mut errs).unwrap();
+        let bad = Name::owned(b"a\0b");
+        assert_eq!(
+            fstat_at(v[0].dir.fd(), bad.slice()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

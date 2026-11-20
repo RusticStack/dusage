@@ -1,21 +1,44 @@
-//! Deletion for macOS. A symlink is unlinked as a link (never followed), a directory
-//! is removed with `rmdir` so a non-empty result is reported instead of silently
-//! recursing, and every other entry is unlinked.
+//! Deletion for macOS. A symlink is unlinked as a link (never followed), a directory is
+//! removed with `rmdir` so a non-empty result is reported instead of silently recursing,
+//! and every other entry is unlinked.
+//!
+//! Both calls are the path-based libSystem ones, not `unlinkat`: `delete_entry` is handed
+//! a full path and no directory descriptor, so a relative call would mean opening the
+//! parent on every entry purely to drop the descriptor again. `unlink` removes the link
+//! itself and `rmdir` removes the directory itself, which is the property the invariant
+//! needs; neither follows a symlink.
 
 use crate::mac::enumerate::DirReader;
 use crate::model::ErrorCounts;
+use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+fn c_path(p: &Path) -> io::Result<CString> {
+    CString::new(p.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))
+}
 
 /// Remove one entry without following it.
 pub fn delete_entry(path: &Path) -> io::Result<()> {
+    let c = c_path(path)?;
     // `symlink_metadata` is `lstat`, so a symlink to a directory is removed as a link.
-    match fs::symlink_metadata(path) {
-        Ok(m) if m.is_dir() => fs::remove_dir(path),
-        Ok(_) => fs::remove_file(path),
-        Err(e) => Err(e),
+    let is_dir = fs::symlink_metadata(path)?.is_dir();
+    // SAFETY: `c` is NUL-terminated and outlives the call; both functions take a path and
+    // return -1 with errno set on failure.
+    let rc = unsafe {
+        if is_dir {
+            crate::mac::sys::rmdir(c.as_ptr())
+        } else {
+            crate::mac::sys::unlink(c.as_ptr())
+        }
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
     }
+    Ok(())
 }
 
 /// Recursive delete that never descends into symlinks. Per-entry errors are counted and
@@ -132,6 +155,20 @@ mod tests {
         assert_eq!(errs.total(), 0, "{errs:?}");
         assert_eq!(n, 3, "sf, sl, tree");
         assert!(!tree.exists());
+        assert!(target.join("keep").exists(), "target must survive");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn delete_entry_removes_the_link_not_its_target() {
+        let base = tmp("one");
+        let target = base.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep"), b"x").unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        delete_entry(&link).unwrap();
+        assert!(!link.exists());
         assert!(target.join("keep").exists(), "target must survive");
         let _ = fs::remove_dir_all(&base);
     }
