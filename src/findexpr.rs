@@ -941,6 +941,34 @@ fn parse_when(s: &str) -> Result<SystemTime, String> {
 struct Glob {
     tokens: Vec<Tok>,
     fold: bool,
+    /// Decided once at compile time, so the per-entry path never inspects the tokens to find
+    /// out what it could have answered directly.
+    shape: Shape,
+    /// The literal text a shape compares: the whole pattern for `Literal`, and the part
+    /// before the `*` for `Prefix` and `Between`.
+    head: Vec<u8>,
+    /// The part after the `*`, for `Suffix` and `Between`.
+    tail: Vec<u8>,
+    /// Every text a `Full` pattern matches contains this run, so a miss rejects the entry
+    /// before the walk runs. See [`longest_lit_run`].
+    anchor: Option<Vec<u8>>,
+}
+
+/// What a pattern's tokens let the per-entry path answer without the wildcard walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// No wildcard at all: the text must equal the pattern.
+    Literal,
+    /// A lone `*`: anything, the empty text included.
+    Any,
+    /// `*` then literals: a tail.
+    Suffix,
+    /// Literals then `*`: a head.
+    Prefix,
+    /// Literals, one `*`, literals: a head and a tail that may not overlap.
+    Between,
+    /// A `?`, a class, or more than one `*`: the walk decides.
+    Full,
 }
 
 #[derive(Clone, Debug)]
@@ -1000,55 +1028,259 @@ impl Glob {
                 }
             }
         }
-        Ok(Glob { tokens, fold })
+        let (shape, head, tail, anchor) = analyze(&tokens);
+        Ok(Glob {
+            tokens,
+            fold,
+            shape,
+            head,
+            tail,
+            anchor,
+        })
     }
 
     fn matches(&self, text: &str) -> bool {
-        let mut ti = 0;
-        let mut pi = 0;
-        let mut star: Option<(usize, usize)> = None;
-        while let Some(c) = char_at(text, ti) {
-            let c = if self.fold { c.to_ascii_lowercase() } else { c };
-            let hit = match self.tokens.get(pi) {
-                Some(Tok::Star) => {
-                    star = Some((pi + 1, ti));
-                    pi += 1;
-                    continue;
-                }
-                Some(Tok::One) => true,
-                Some(Tok::Lit(l)) => *l == c,
-                Some(Tok::Class { negated, items }) => {
-                    let inside = items.iter().any(|item| match *item {
-                        ClassItem::Char(x) => x == c,
-                        ClassItem::Range(a, b) => a <= c && c <= b,
-                    });
-                    inside != *negated
-                }
-                None => false,
+        let bytes = text.as_bytes();
+        match self.shape {
+            Shape::Literal => lit_eq(&self.head, bytes, self.fold),
+            Shape::Any => true,
+            Shape::Suffix => lit_suffix(&self.tail, bytes, self.fold),
+            Shape::Prefix => lit_prefix(&self.head, bytes, self.fold),
+            Shape::Between => lit_between(&self.head, &self.tail, bytes, self.fold),
+            Shape::Full => self.walk(text),
+        }
+    }
+
+    fn walk(&self, text: &str) -> bool {
+        if let Some(run) = &self.anchor {
+            let hit = if self.fold {
+                crate::bytes::memmem_ci(text.as_bytes(), run).is_some()
+            } else {
+                crate::bytes::memmem(text.as_bytes(), run).is_some()
             };
-            if hit {
+            if !hit {
+                return false;
+            }
+        }
+        // One byte is one character in an ASCII text, and a literal holds whole characters,
+        // so a byte that is not ASCII is the only thing `?` and a class can disagree about.
+        if text.is_ascii() {
+            walk_bytes(&self.tokens, text.as_bytes(), self.fold)
+        } else {
+            walk_chars(&self.tokens, text, self.fold)
+        }
+    }
+}
+
+/// Which direct test a pattern's tokens allow, plus the literals that test reads and the
+/// anchor a [`Shape::Full`] pattern pre-filters on.
+fn analyze(tokens: &[Tok]) -> (Shape, Vec<u8>, Vec<u8>, Option<Vec<u8>>) {
+    let wild: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !matches!(t, Tok::Lit(_)))
+        .map(|(i, _)| i)
+        .collect();
+    let shape = match wild[..] {
+        [] => Shape::Literal,
+        [at] if matches!(tokens[at], Tok::Star) => match at {
+            0 if tokens.len() == 1 => Shape::Any,
+            0 => Shape::Suffix,
+            last if last == tokens.len() - 1 => Shape::Prefix,
+            _ => Shape::Between,
+        },
+        _ => Shape::Full,
+    };
+    let (head, tail) = match shape {
+        Shape::Literal => (lit_bytes(tokens), Vec::new()),
+        Shape::Suffix => (Vec::new(), lit_bytes(&tokens[1..])),
+        Shape::Prefix => (lit_bytes(&tokens[..tokens.len() - 1]), Vec::new()),
+        Shape::Between => {
+            let star = wild[0];
+            (lit_bytes(&tokens[..star]), lit_bytes(&tokens[star + 1..]))
+        }
+        Shape::Any | Shape::Full => (Vec::new(), Vec::new()),
+    };
+    let anchor = match shape {
+        Shape::Full => longest_lit_run(tokens),
+        _ => None,
+    };
+    (shape, head, tail, anchor)
+}
+
+/// The bytes a run of literal tokens spells. Only a shape that has no wildcard but the one
+/// star it split on reaches this, so a wildcard here is a shape that lied.
+fn lit_bytes(toks: &[Tok]) -> Vec<u8> {
+    let mut buf = [0u8; 4];
+    let mut out = Vec::with_capacity(toks.len());
+    for t in toks {
+        match t {
+            Tok::Lit(c) => out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes()),
+            _ => debug_assert!(false, "literal run holds a wildcard"),
+        }
+    }
+    out
+}
+
+/// The longest run of literal tokens, when it is long enough to be worth looking for. Every
+/// text the pattern matches contains it, so a miss is a definitive answer.
+fn longest_lit_run(toks: &[Tok]) -> Option<Vec<u8>> {
+    // A name is short, and a search spends a fixed hundred instructions setting up whatever
+    // it does; a run of four bytes is where the misses it saves start to pay that back.
+    const USEFUL: usize = 4;
+    let mut best = (0, 0);
+    let mut start = 0;
+    while start < toks.len() {
+        let mut end = start;
+        while end < toks.len() && matches!(toks[end], Tok::Lit(_)) {
+            end += 1;
+        }
+        if end - start > best.1 - best.0 {
+            best = (start, end);
+        }
+        start = end + 1;
+    }
+    if best.1 - best.0 < USEFUL {
+        return None;
+    }
+    Some(lit_bytes(&toks[best.0..best.1]))
+}
+
+fn lit_eq(lit: &[u8], text: &[u8], fold: bool) -> bool {
+    lit.len() == text.len() && eq_lits(lit, text, fold)
+}
+
+fn lit_suffix(tail: &[u8], text: &[u8], fold: bool) -> bool {
+    match text.len().checked_sub(tail.len()) {
+        Some(at) => eq_lits(tail, &text[at..], fold),
+        None => false,
+    }
+}
+
+fn lit_prefix(head: &[u8], text: &[u8], fold: bool) -> bool {
+    text.len() >= head.len() && eq_lits(head, &text[..head.len()], fold)
+}
+
+/// Literals, one `*`, literals: a head and a tail with nothing in between to compare.
+fn lit_between(head: &[u8], tail: &[u8], text: &[u8], fold: bool) -> bool {
+    let rest = match text.len().checked_sub(tail.len()) {
+        Some(rest) if head.len() <= rest => rest,
+        _ => return false,
+    };
+    eq_lits(head, &text[..head.len()], fold) && eq_lits(tail, &text[rest..], fold)
+}
+
+#[inline]
+fn eq_lits(lit: &[u8], text: &[u8], fold: bool) -> bool {
+    if fold {
+        lit.eq_ignore_ascii_case(text)
+    } else {
+        lit == text
+    }
+}
+
+/// The wildcard walk over an ASCII text, one byte per character.
+fn walk_bytes(tokens: &[Tok], text: &[u8], fold: bool) -> bool {
+    let mut ti = 0;
+    let mut pi = 0;
+    let mut star: Option<(usize, usize)> = None;
+    while ti < text.len() {
+        let c = if fold {
+            text[ti].to_ascii_lowercase()
+        } else {
+            text[ti]
+        };
+        let hit = match tokens.get(pi) {
+            Some(Tok::Star) => {
+                star = Some((pi + 1, ti));
                 pi += 1;
-                ti = next_char(text, ti);
                 continue;
             }
-            match star {
-                Some((sp, st)) => {
-                    let advanced = next_char(text, st);
-                    if advanced == st {
-                        return false;
-                    }
-                    pi = sp;
-                    ti = advanced;
-                    star = Some((sp, advanced));
-                }
-                None => return false,
-            }
-        }
-        while matches!(self.tokens.get(pi), Some(Tok::Star)) {
+            Some(Tok::One) => true,
+            Some(Tok::Lit(l)) => *l == c as char,
+            Some(Tok::Class { negated, items }) => class_hit_bytes(items, *negated, c),
+            None => false,
+        };
+        if hit {
             pi += 1;
+            ti += 1;
+            continue;
         }
-        pi == self.tokens.len()
+        match star {
+            Some((sp, st)) => {
+                if st == text.len() {
+                    return false;
+                }
+                pi = sp;
+                ti = st + 1;
+                star = Some((sp, st + 1));
+            }
+            None => return false,
+        }
     }
+    while matches!(tokens.get(pi), Some(Tok::Star)) {
+        pi += 1;
+    }
+    pi == tokens.len()
+}
+
+/// The wildcard walk over a text that holds a character no single byte spells.
+fn walk_chars(tokens: &[Tok], text: &str, fold: bool) -> bool {
+    let mut ti = 0;
+    let mut pi = 0;
+    let mut star: Option<(usize, usize)> = None;
+    while let Some(c) = char_at(text, ti) {
+        let c = if fold { c.to_ascii_lowercase() } else { c };
+        let hit = match tokens.get(pi) {
+            Some(Tok::Star) => {
+                star = Some((pi + 1, ti));
+                pi += 1;
+                continue;
+            }
+            Some(Tok::One) => true,
+            Some(Tok::Lit(l)) => *l == c,
+            Some(Tok::Class { negated, items }) => class_hit_chars(items, *negated, c),
+            None => false,
+        };
+        if hit {
+            pi += 1;
+            ti = next_char(text, ti);
+            continue;
+        }
+        match star {
+            Some((sp, st)) => {
+                let advanced = next_char(text, st);
+                if advanced == st {
+                    return false;
+                }
+                pi = sp;
+                ti = advanced;
+                star = Some((sp, advanced));
+            }
+            None => return false,
+        }
+    }
+    while matches!(tokens.get(pi), Some(Tok::Star)) {
+        pi += 1;
+    }
+    pi == tokens.len()
+}
+
+fn class_hit_bytes(items: &[ClassItem], negated: bool, b: u8) -> bool {
+    let c = b as char;
+    let inside = items.iter().any(|item| match *item {
+        ClassItem::Char(x) => x == c,
+        ClassItem::Range(a, z) => a <= c && c <= z,
+    });
+    inside != negated
+}
+
+fn class_hit_chars(items: &[ClassItem], negated: bool, c: char) -> bool {
+    let inside = items.iter().any(|item| match *item {
+        ClassItem::Char(x) => x == c,
+        ClassItem::Range(a, z) => a <= c && c <= z,
+    });
+    inside != negated
 }
 
 fn parse_class(chars: &[char], start: usize, fold: &dyn Fn(char) -> char) -> Option<(Tok, usize)> {
@@ -2242,6 +2474,120 @@ mod tests {
         assert!(select(&["-name", "a\\*b"], &file("./a*b")));
         assert!(!select(&["-name", "a\\*b"], &file("./axb")));
         assert!(select(&["-name", "*.rs"], &file("./nested/leaf.rs")));
+    }
+
+    #[test]
+    fn shapes_are_decided_at_compile_time() {
+        let shape = |p: &str| Glob::new(p, false).unwrap().shape;
+        assert_eq!(shape("Makefile"), Shape::Literal);
+        // `\*` is a literal star, so the pattern has no wildcard at all.
+        assert_eq!(shape("a\\*b"), Shape::Literal);
+        assert_eq!(shape(""), Shape::Literal);
+        assert_eq!(shape("*"), Shape::Any);
+        assert_eq!(shape("*.go"), Shape::Suffix);
+        assert_eq!(shape("README*"), Shape::Prefix);
+        assert_eq!(shape("a*b"), Shape::Between);
+        // Adjacent stars are one star, so this is still a head, one star, a tail.
+        assert_eq!(shape("a**b"), Shape::Between);
+        assert_eq!(shape("*_test.*"), Shape::Full);
+        assert_eq!(shape("a??c"), Shape::Full);
+        assert_eq!(shape("[a-m]*.go"), Shape::Full);
+
+        let prefix = Glob::new("README*", false).unwrap();
+        assert_eq!(prefix.head, b"README");
+        let full = Glob::new("*_test.*", false).unwrap();
+        assert_eq!(full.anchor.as_deref(), Some(&b"_test."[..]));
+        // A run too short to be worth a search is not made into an anchor.
+        assert_eq!(Glob::new("[a-m]*.go", false).unwrap().anchor, None);
+    }
+
+    /// Every shape answers exactly what the wildcard walk answers, over names generated to
+    /// hit each of them: the simple shapes are a claim about the pattern, and this is the
+    /// only thing that keeps that claim honest.
+    #[test]
+    fn every_shape_agrees_with_the_walk() {
+        let patterns = [
+            "",
+            "*",
+            "Makefile",
+            "a\\*b",
+            "*.go",
+            "README*",
+            "a*b",
+            "a**b",
+            "*a*b",
+            "a??c",
+            "?",
+            "[a-m]*.go",
+            "[!a]*",
+            "[*ab]x",
+            "*_test.*",
+            "é?",
+            "*é",
+            "é*a",
+            "[a-c][x-z]?",
+            "*c*a*c*",
+        ];
+        let alphabet = ['a', 'c', 'A', '.', '*', 'é'];
+        let mut names = vec![String::new()];
+        let mut front = vec![String::new()];
+        for _ in 0..3 {
+            front = front
+                .iter()
+                .flat_map(|base| {
+                    let mut out = Vec::with_capacity(alphabet.len());
+                    for c in alphabet {
+                        let mut s = base.clone();
+                        s.push(c);
+                        out.push(s);
+                    }
+                    out
+                })
+                .collect();
+            names.extend(front.iter().cloned());
+        }
+        for longer in [
+            "archive_tar.go",
+            "README.md",
+            "main_test.go",
+            "*x",
+            "a*b",
+            ".go",
+            "cp",
+            "élan.go",
+        ] {
+            names.push(longer.to_string());
+        }
+
+        let mut seen = Vec::new();
+        for pattern in patterns {
+            for fold in [false, true] {
+                let glob = Glob::new(pattern, fold).unwrap();
+                if !seen.contains(&glob.shape) {
+                    seen.push(glob.shape);
+                }
+                for name in &names {
+                    assert_eq!(
+                        glob.matches(name),
+                        walk_chars(&glob.tokens, name, glob.fold),
+                        "pattern {pattern:?} (fold {fold}) against {name:?}"
+                    );
+                }
+            }
+        }
+        for shape in [
+            Shape::Literal,
+            Shape::Any,
+            Shape::Suffix,
+            Shape::Prefix,
+            Shape::Between,
+            Shape::Full,
+        ] {
+            assert!(
+                seen.contains(&shape),
+                "no pattern in the corpus took the {shape:?} path"
+            );
+        }
     }
 
     #[test]
