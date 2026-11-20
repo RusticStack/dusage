@@ -12,6 +12,13 @@ with a memory pass, a cold-cache pass and a regression guard now lives in
 `bench/` and `docs/BENCHMARKS.md`; the section at the end lists what shipped,
 the numbers and the limits that are still open.
 
+**Status 0.6.0 (tree and df).** Two more tools replaced: `dusage tree` prints the tree with
+two size columns per row (bytes on disk and bytes claimed), subtree totals on directory rows,
+levels, sorting, find's ignore layers and JSON; `dusage df` reports one row per mounted
+filesystem through `statvfs` and `/proc/self/mounts` on Linux and `GetDiskFreeSpaceExW` and the
+volume list on Windows. Both are measured against the tools they replace in
+`docs/BENCHMARKS.md`; the last section records what the numbers say and what is still open.
+
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
 tested; the NTFS-only read paths (`--mft`, `--streams`) are refused or report zero with an
@@ -182,6 +189,10 @@ explanation. Numbers measured on this machine are in the last section.
 - Done in 0.5.0: the tools merged under subcommands in one binary (`dusage
   scan|big|search|find|prune|du`), with the `fastdel` binary and `dusage fastdel|del`
   running `prune`; and fastdel presets (`--preset`, `--print-presets`).
+- Done in 0.6.0: `dusage tree` and `dusage df` (`dusage scan|big|search|find|prune|du|tree|df`).
+- Open after 0.6.0: tree buffers one record per entry (measured side by side with `tree -s`
+  in `docs/BENCHMARKS.md`); the Windows `df` path is compiled but has never run on a Windows
+  box, so its volume enumeration and its folder-mounted volumes are unverified.
 
 ## Sources
 
