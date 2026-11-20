@@ -614,6 +614,17 @@ impl Finder {
         Finder::build(needle, ci, anchor)
     }
 
+    /// The bytes this finder looks for.
+    pub fn needle(&self) -> &[u8] {
+        &self.needle
+    }
+
+    /// The offset in the needle of the byte a candidate scan looks for, which a caller can
+    /// check against its own rarity order to see that the scan is not hunting a common byte.
+    pub fn anchor(&self) -> usize {
+        self.anchor
+    }
+
     /// Prepare `needle` with the byte to scan for chosen by the caller, for a matcher that
     /// already knows which run of its pattern it is searching for and where that run sits in it
     /// — a regex with one mandatory literal per alternative, say. `anchor` is an index into
