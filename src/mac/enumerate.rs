@@ -63,13 +63,60 @@ impl Entry {
 /// `-gid` and `-links` answer here the way they do on Linux.
 pub const POSIX_FIELDS: bool = true;
 
-fn malformed() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "malformed dirent record")
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
-/// The `dirent` type, which is exact and free: `readdir` reports it, so neither `list`
-/// nor a walk that only needs names pays a syscall for it. `None` is `DT_UNKNOWN`, where
-/// only one `fstatat` can answer.
+/// The error one unreadable record reports.
+///
+/// It carries the record's own fields and the first bytes of both the record and its name,
+/// because the failure this diagnostic exists for is a wrong ABI: when the fields are read
+/// at the wrong offsets, the hex dump says where the name really starts and what the real
+/// `d_reclen`/`d_namlen` are. A fixed string cost a whole CI round trip once already.
+fn malformed_record(rec: &sys::Dirent, why: &str) -> io::Error {
+    // SAFETY: `rec` is a live record from `readdir`, and the 24 bytes read are inside it.
+    let head = unsafe { std::slice::from_raw_parts(rec as *const _ as *const u8, 24) };
+    let name_head = &rec.d_name[..16];
+    let c_len = c_name(rec).map_or(0, |n| n.len());
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "malformed dirent record ({why}): d_reclen={} d_namlen={} d_type={} \
+             name_strlen={c_len} d_name={} record_head={}",
+            rec.d_reclen,
+            rec.d_namlen,
+            rec.d_type,
+            hex(name_head),
+            hex(head)
+        ),
+    )
+}
+
+/// The name of one record, found by the NUL that terminates it inside `d_name`.
+///
+/// The length comes from that terminator and never from `d_namlen`. A name is
+/// self-describing without the length field, and reading the field at a guessed offset is
+/// exactly how the first real macOS run failed: every record came back with a length of
+/// zero, which rejected the first `.` of every directory. `d_namlen` is still reported
+/// when a record is rejected — see [`malformed_record`] — but nothing depends on it.
+fn c_name(rec: &sys::Dirent) -> Option<&[u8]> {
+    // SAFETY: `d_name` is an array of exactly `DIRENT_NAME_MAX` bytes inside `rec`.
+    let raw = unsafe { std::slice::from_raw_parts(rec.d_name.as_ptr(), sys::DIRENT_NAME_MAX) };
+    let nul = raw.iter().position(|&b| b == 0)?;
+    Some(&raw[..nul])
+}
+
+/// The `dirent` type, which is exact and free when the kernel fills it in: `readdir`
+/// reports it, so neither `list` nor a walk that only needs names pays a syscall for it.
+///
+/// The eight codes below are the whole set this trusts. Anything else — `DT_UNKNOWN`, the
+/// whiteout code, a value from another ABI — is left to `None`, which makes the caller ask
+/// `fstatat` rather than guess. A wrong guess here would decide whether a directory is
+/// descended into.
 fn kind_of_dtype(t: u8) -> Option<Kind> {
     Some(match t {
         sys::DT_DIR => Kind::Dir,
@@ -79,8 +126,7 @@ fn kind_of_dtype(t: u8) -> Option<Kind> {
         sys::DT_CHR => Kind::Char,
         sys::DT_BLK => Kind::Block,
         sys::DT_SOCK => Kind::Socket,
-        sys::DT_UNKNOWN => return None,
-        _ => Kind::Other,
+        _ => return None,
     })
 }
 
@@ -177,7 +223,8 @@ fn fstat_at(fd: c_int, name: &[u8]) -> io::Result<Stat> {
         buf.clear();
         buf.extend_from_slice(name);
         buf.push(0);
-        let cname = CStr::from_bytes_with_nul(&buf).map_err(|_| malformed())?;
+        let cname = CStr::from_bytes_with_nul(&buf)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains a NUL byte"))?;
         let mut stx = sys::StatBuf::default();
         // SAFETY: `cname` is NUL-terminated for the whole call — it is borrowed from this
         // thread's buffer, which nothing else borrows while it runs — `fd` is open on the
@@ -253,7 +300,6 @@ trait Sink {
 /// out of here.
 fn read_dir_raw<S: Sink + ?Sized>(dir: &Path, sink: &mut S) -> io::Result<()> {
     let d = Rc::new(Dir::open(dir)?);
-    let name_cap = std::mem::size_of::<[u8; 1024]>();
     loop {
         // `readdir` answers the end of the directory and a failure the same way, so errno
         // is cleared first and only a value set again afterwards is an error.
@@ -270,17 +316,16 @@ fn read_dir_raw<S: Sink + ?Sized>(dir: &Path, sink: &mut S) -> io::Result<()> {
                 Some(_) => Err(e),
             };
         }
-        let d_type = unsafe { (*ent).d_type };
-        let d_name = unsafe { (*ent).d_name.as_ptr() };
-        let len = usize::from(unsafe { (*ent).d_namlen });
-        // A record with no length names nothing, and `dir.join("")` names the directory
-        // itself: the walk would descend into it.
-        if len == 0 || len > name_cap {
-            return Err(malformed());
-        }
-        let name = unsafe { std::slice::from_raw_parts(d_name, len) };
-        if name.contains(&0) {
-            return Err(malformed());
+        // SAFETY: `ent` points at a record the stream owns, valid until the next call on
+        // it, which is after this one.
+        let rec = unsafe { &*ent };
+        let Some(name) = c_name(rec) else {
+            return Err(malformed_record(rec, "d_name has no NUL terminator"));
+        };
+        // A record naming nothing would make `dir.join("")` name the directory itself and
+        // send the walk into it.
+        if name.is_empty() {
+            return Err(malformed_record(rec, "empty name"));
         }
         if name == b"." || name == b".." {
             continue;
@@ -289,7 +334,7 @@ fn read_dir_raw<S: Sink + ?Sized>(dir: &Path, sink: &mut S) -> io::Result<()> {
             &d,
             &Rec {
                 name,
-                kind: kind_of_dtype(d_type),
+                kind: kind_of_dtype(rec.d_type),
             },
         );
     }
@@ -981,6 +1026,84 @@ mod tests {
         let mut lite = Vec::new();
         list(&f.0, &mut lite, &mut errs).unwrap();
         assert!(lite.is_empty() && errs.total() == 0);
+    }
+
+    /// A record as the kernel would hand it back, with the given name in `d_name`.
+    fn record(name: &[u8], d_type: u8, d_namlen: u16) -> sys::Dirent {
+        let mut rec = sys::Dirent {
+            d_ino: 1,
+            d_seekoff: 0,
+            d_reclen: 24,
+            d_namlen,
+            d_type,
+            d_name: [0; sys::DIRENT_NAME_MAX],
+        };
+        rec.d_name[..name.len()].copy_from_slice(name);
+        rec
+    }
+
+    /// The field that failed the first real macOS run. A length read at the wrong offset
+    /// was zero for every record, so every listing died on its first `.`; the name itself
+    /// is NUL-terminated and needs no length field at all.
+    #[test]
+    fn the_name_comes_from_the_terminator_not_the_length_field() {
+        for bogus in [0u16, 1, 3, 999, u16::MAX] {
+            let rec = record(b"a.txt", sys::DT_REG, bogus);
+            assert_eq!(
+                c_name(&rec),
+                Some(&b"a.txt"[..]),
+                "d_namlen={bogus} must not decide the name"
+            );
+        }
+        assert_eq!(c_name(&record(b".", sys::DT_DIR, 1)), Some(&b"."[..]));
+        assert_eq!(c_name(&record(b"..", sys::DT_DIR, 2)), Some(&b".."[..]));
+    }
+
+    /// The next failure of this kind has to explain itself from the CI log alone.
+    #[test]
+    fn a_rejected_record_reports_the_fields_an_abi_mistake_moves() {
+        let mut rec = record(b"", sys::DT_REG, 7);
+        rec.d_reclen = 4096;
+        for b in rec.d_name.iter_mut() {
+            *b = b'x';
+        }
+        assert_eq!(c_name(&rec), None, "no terminator at all");
+        let text = malformed_record(&rec, "d_name has no NUL terminator").to_string();
+        for want in [
+            "d_name has no NUL terminator",
+            "d_reclen=4096",
+            "d_namlen=7",
+            "d_type=8",
+            "name_strlen=0",
+            "record_head=",
+        ] {
+            assert!(text.contains(want), "{want:?} missing from {text}");
+        }
+        // The head dump is the raw first 24 bytes: d_ino=1 in little-endian, then
+        // d_reclen=4096, then d_namlen=7 and d_type=DT_REG.
+        assert!(text.contains("0100000000000000"), "{text}");
+        assert!(text.contains("0010"), "{text}");
+    }
+
+    /// A type code outside the eight known ones is not a guess: it is `None`, and the
+    /// caller asks `fstatat` instead. Getting this wrong decides whether a directory is
+    /// descended into.
+    #[test]
+    fn an_unknown_type_code_is_left_to_fstatat() {
+        for code in [0u8, 3, 5, 7, 9, 11, 13, 14, 200, 255] {
+            assert_eq!(kind_of_dtype(code), None, "code {code}");
+        }
+        for (code, kind) in [
+            (sys::DT_DIR, Kind::Dir),
+            (sys::DT_REG, Kind::File),
+            (sys::DT_LNK, Kind::Symlink),
+            (sys::DT_FIFO, Kind::Fifo),
+            (sys::DT_CHR, Kind::Char),
+            (sys::DT_BLK, Kind::Block),
+            (sys::DT_SOCK, Kind::Socket),
+        ] {
+            assert_eq!(kind_of_dtype(code), Some(kind), "code {code}");
+        }
     }
 
     #[test]

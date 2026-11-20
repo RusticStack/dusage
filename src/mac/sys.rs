@@ -79,6 +79,9 @@ pub struct StatBuf {
     pub st_qspare: [i64; 2],
 }
 
+/// The largest name a directory record can carry (`__DARWIN_MAXNAMLEN` rounded up).
+pub const DIRENT_NAME_MAX: usize = 1024;
+
 /// `struct dirent` (dirent.h) with `_DARWIN_FEATURE_64_BIT_INODE`, which is the default
 /// on every release this crate could run on and the layout `readdir$INODE64` returns.
 #[repr(C)]
@@ -88,9 +91,9 @@ pub struct Dirent {
     pub d_reclen: u16,
     pub d_namlen: u16,
     pub d_type: u8,
-    /// NUL-terminated, `d_namlen` bytes long. Declared for its offset, which the parser
-    /// reads through; the length in that field is what bounds the name, not this array.
-    pub d_name: [u8; 1024],
+    /// NUL-terminated. The parser finds the end by scanning for that terminator, not by
+    /// trusting `d_namlen`; this array only bounds the scan.
+    pub d_name: [u8; DIRENT_NAME_MAX],
 }
 
 // struct stat, struct dirent and the layout the parser relies on. These are the
@@ -127,6 +130,7 @@ const _: () = {
     assert!(offset_of!(Dirent, d_namlen) == 18);
     assert!(offset_of!(Dirent, d_type) == 20);
     assert!(offset_of!(Dirent, d_name) == 21);
+    assert!(offset_of!(Dirent, d_name) + DIRENT_NAME_MAX <= size_of::<Dirent>());
 };
 
 extern "C" {
@@ -135,23 +139,30 @@ extern "C" {
     /// runtime symbol the standard library itself calls.
     pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn close(fd: c_int) -> c_int;
-    pub fn fdopendir(fd: c_int) -> *mut DIR;
     pub fn dirfd(dirp: *mut DIR) -> c_int;
     pub fn closedir(dirp: *mut DIR) -> c_int;
     /// Sets `errno`; read it after a call returns the failure value.
     pub fn __error() -> *mut c_int;
     pub fn unlink(path: *const c_char) -> c_int;
     pub fn rmdir(path: *const c_char) -> c_int;
-    /// The 64-bit-inode aliases the system headers resolve these names to. The plain
-    /// `readdir`/`stat` spellings are macros over these in `dirent.h` and `sys/stat.h`,
-    /// so the unaliased symbol is not what libSystem exports.
-    #[link_name = "readdir$INODE64"]
+    /// The 64-bit-inode aliases the system headers resolve these names to on every
+    /// architecture but arm64, whose exports are already 64-bit. `dirent.h` and
+    /// `sys/stat.h` macro the plain spellings onto these, so on x86_64 the unaliased
+    /// symbol is not the one the C caller would bind.
+    ///
+    /// `fdopendir` carries the alias for a reason worth recording: a stream allocated by
+    /// the legacy 32-bit-inode `fdopendir` and then read with `readdir$INODE64` returns
+    /// records in the wrong shape, which read as a zero-length name and failed every
+    /// directory listing on the first real macOS run.
+    #[cfg_attr(not(target_arch = "aarch64"), link_name = "readdir$INODE64")]
     pub fn readdir(dirp: *mut DIR) -> *mut Dirent;
-    #[link_name = "fstatat$INODE64"]
+    #[cfg_attr(not(target_arch = "aarch64"), link_name = "fdopendir$INODE64")]
+    pub fn fdopendir(fd: c_int) -> *mut DIR;
+    #[cfg_attr(not(target_arch = "aarch64"), link_name = "fstatat$INODE64")]
     pub fn fstatat(fd: c_int, path: *const c_char, buf: *mut StatBuf, flag: c_int) -> c_int;
-    #[link_name = "lstat$INODE64"]
+    #[cfg_attr(not(target_arch = "aarch64"), link_name = "lstat$INODE64")]
     pub fn lstat(path: *const c_char, buf: *mut StatBuf) -> c_int;
-    #[link_name = "stat$INODE64"]
+    #[cfg_attr(not(target_arch = "aarch64"), link_name = "stat$INODE64")]
     pub fn stat(path: *const c_char, buf: *mut StatBuf) -> c_int;
 }
 
