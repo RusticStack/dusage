@@ -840,6 +840,47 @@ mod tests {
         }
     }
 
+    /// The same sweep through the kernels a machine without AVX2 runs: the 16-byte vector loop
+    /// is called directly rather than through the level dispatch, since this machine's dispatch
+    /// never reaches it, and so is the portable tail. Windows CI has no AVX2 to run, so these
+    /// are the loops it exercises.
+    #[test]
+    fn every_pair_kernel_agrees_with_a_byte_at_a_time_scan() {
+        let mut big = [b'.'; 200];
+        for at in [0usize, 1, 15, 16, 17, 31, 32, 33, 63, 64, 100, 198, 199] {
+            big[at] = b'a';
+        }
+        for at in [3usize, 16, 33, 70, 150] {
+            if at + 9 < big.len() {
+                big[at + 9] = b'z';
+            }
+        }
+        for len in [0usize, 1, 9, 16, 17, 32, 33, 64, 150, 200] {
+            let hay = &big[..len];
+            for (a_off, b_off) in [(0usize, 1usize), (1, 0), (0, 9), (9, 0), (2, 2)] {
+                let wide = a_off.max(b_off);
+                for (a, b) in [(b'a', b'z'), (b'a', b'a')] {
+                    for from in 0..=len + 1 {
+                        let want = (from..len).find(|&p| {
+                            p + wide < len && hay[p + a_off] == a && hay[p + b_off] == b
+                        });
+                        let label = format!("len {len} offsets {a_off}/{b_off} from {from}");
+                        assert_eq!(pair_from(hay, a, a_off, b, b_off, from), want, "{label}");
+                        #[cfg(target_arch = "x86_64")]
+                        if std::arch::is_x86_feature_detected!("sse2") {
+                            // SAFETY: the loop checks `i + wide + 16 <= len` before every load,
+                            // and SSE2 is part of the x86_64 baseline, so the branch above is
+                            // the only feature check it needs.
+                            let got = unsafe { find_pair_sse2(hay, a, a_off, b, b_off, from) };
+                            assert_eq!(got, want, "sse2 {label}");
+                        }
+                        assert_eq!(find_pair(hay, a, a_off, b, b_off, from), want, "{label}");
+                    }
+                }
+            }
+        }
+    }
+
     /// The pairing decision is taken from the haystack in hand and never kept, so the same
     /// needle set over two corpora with different byte distributions decides differently for
     /// each — and answers the same matches either way.
