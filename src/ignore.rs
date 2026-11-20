@@ -4,12 +4,16 @@
 //!
 //! 1. **Built-in caches**: `.git`, `.hg`, `.svn`, `node_modules`, `target`, `__pycache__`,
 //!    `.venv`, `venv`, `.tox`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.gradle`.
-//!    Disabled by `--no-ignore`.
+//!    Disabled by `--no-ignore`, and decided before any file is read, so no `!` line in an
+//!    ignore file reaches them.
 //! 2. **Ignore files** read while walking: `.gitignore` and `.ignore` in the scanned
 //!    directory and in every directory above an entry, each applying to the paths below
-//!    it, with later rules and deeper files winning, and `!` re-including.
+//!    it, with later rules and deeper files winning, and `!` re-including. The stack is
+//!    read along the path, so a repository nested in the tree does not cut the rules above
+//!    it off; only the walk *up* from a root stops at one (`--no-ignore-parent`).
 //! 3. **Explicit `--glob` filters**, which are the only thing that can re-include a path
-//!    hidden by 1 or 2.
+//!    hidden by 1 or 2: a positive `-g` switches the ignore rules off for the whole walk
+//!    (see [`IgnoreRules::whitelisted`]).
 //!
 //! Hidden entries (a leading `.`) are the walker's business, not this module's.
 
@@ -18,21 +22,25 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Directory and file names skipped unless `--no-ignore` is given.
-const BUILTIN: &[&str] = &[
-    ".git",
-    ".hg",
-    ".svn",
-    "node_modules",
-    "target",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".gradle",
+/// Directory and file names skipped unless `--no-ignore` is given, bucketed by first byte
+/// so a component that starts like none of them rejects the list with one comparison and
+/// `BUILTIN` is compared only inside the bucket its first byte names.
+const BUILTIN: [&[&str]; 5] = [
+    &[
+        ".git",
+        ".gradle",
+        ".hg",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".svn",
+        ".tox",
+        ".venv",
+    ],
+    &["__pycache__"],
+    &["node_modules"],
+    &["target"],
+    &["venv"],
 ];
 
 /// One directory's parsed rules.
@@ -279,8 +287,14 @@ impl IgnoreRules {
             if sub.path().is_empty() {
                 continue;
             }
+            // A rule that needs a separator cannot match a bare name, which is what a
+            // directory's own rules are asked about for every entry it holds.
+            let bare = sub.is_name();
             let mut decision = None;
             for rule in &layer.rules {
+                if bare && rule.needs_separator() {
+                    continue;
+                }
                 if rule.matches_view(&sub, is_dir) {
                     decision = Some(!rule.negated);
                 }
@@ -417,6 +431,11 @@ impl IgnoreRules {
 
     /// Apply the explicit `--glob` filters. `rel` is relative to the walk root.
     pub fn glob_allows(&self, rel: &str, is_dir: bool) -> bool {
+        // No filter at all is the common run: answer before the path is split, since no
+        // pattern will read the split.
+        if self.globs.is_empty() {
+            return true;
+        }
         self.globs.walk_allows(rel, is_dir)
     }
 }
@@ -515,7 +534,15 @@ fn builtin_hit(view: &PathView<'_>) -> bool {
 /// starts like most names in a tree rejects the whole list with one comparison; `BUILTIN`
 /// is compared only inside the buckets it names.
 fn builtin_name(part: &str) -> bool {
-    BUILTIN.contains(&part)
+    let bucket: &[&str] = match part.as_bytes().first() {
+        Some(b'.') => BUILTIN[0],
+        Some(b'_') => BUILTIN[1],
+        Some(b'n') => BUILTIN[2],
+        Some(b't') => BUILTIN[3],
+        Some(b'v') => BUILTIN[4],
+        _ => return false,
+    };
+    bucket.contains(&part)
 }
 
 /// Path of the walk root's own directory heading, for `.gitignore` files above the root:
@@ -640,6 +667,39 @@ mod tests {
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn every_builtin_name_sits_in_the_bucket_its_first_byte_names() {
+        let documented = [
+            ".git",
+            ".hg",
+            ".svn",
+            "node_modules",
+            "target",
+            "__pycache__",
+            ".venv",
+            "venv",
+            ".tox",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".gradle",
+        ];
+        let mut found: Vec<&str> = BUILTIN.iter().flat_map(|b| b.iter().copied()).collect();
+        found.sort_unstable();
+        let mut want = documented.to_vec();
+        want.sort_unstable();
+        assert_eq!(found, want, "one bucket per name, no name twice");
+        for bucket in BUILTIN {
+            let first = bucket[0].as_bytes()[0];
+            for name in bucket {
+                assert_eq!(name.as_bytes()[0], first, "{name} is in the wrong bucket");
+                assert!(builtin_name(name), "{name} must be skipped");
+            }
+        }
+        assert!(!builtin_name(""));
+        assert!(!builtin_name("gi"));
     }
 
     #[test]
@@ -828,5 +888,238 @@ mod tests {
         let before = rules.mark();
         assert_eq!(rules.push_global(), before);
         assert_eq!(rules.layers.len(), before);
+    }
+
+    /// A negation in an ignore file re-includes within its own layer, but nothing it says
+    /// reaches the built-in list: that list is decided before any layer is read, so a
+    /// `!target/` line cannot bring a cache directory back.
+    #[test]
+    fn an_ignore_file_negation_cannot_reach_a_builtin_name() {
+        let base = tmp("builtin-neg");
+        fs::write(base.join(".gitignore"), "!target/\n!target/keep.txt\n").unwrap();
+        fs::create_dir_all(base.join("target")).unwrap();
+        fs::write(base.join("target/keep.txt"), "kept\n").unwrap();
+        let mut rules = IgnoreRules::new(true);
+        rules.push_dir(&base, "");
+        assert!(rules.is_ignored("target", true), "the built-in list wins");
+        assert!(rules.is_ignored("target/keep.txt", false));
+        assert!(!rules.is_ignored("keep.txt", false), "nothing else is hit");
+        let _ = fs::remove_dir_all(&base);
+        // The one way back is a positive `-g`, which switches the ignore rules off whole:
+        // that is the flag the walker reads, not a per-path answer from this module.
+        let mut globs = IgnoreRules::new(true);
+        globs.add_globs(&["*.txt".into()]).unwrap();
+        assert!(
+            globs.whitelisted(),
+            "a positive glob re-includes what it names"
+        );
+    }
+
+    /// A repository nested inside the tree is not a boundary for the rules above it: the
+    /// stack is read along the path, so an outer `*.tmp` still applies below `nested/.git`
+    /// while the nested `.gitignore` adds to it. Only the walk *up* from a root stops at a
+    /// repository root, which is what `push_ancestors` does.
+    #[test]
+    fn a_nested_repository_keeps_the_rules_above_it() {
+        let base = tmp("nested-repo");
+        fs::write(base.join(".gitignore"), "*.log\n*.tmp\n").unwrap();
+        fs::create_dir_all(base.join("nested/.git/info")).unwrap();
+        fs::write(base.join("nested/.gitignore"), "!keep.log\n*.gen\n").unwrap();
+        fs::write(base.join("nested/.git/info/exclude"), "*.exe\n").unwrap();
+        let mut rules = IgnoreRules::new(false);
+        let root = rules.push_dir(&base, "");
+        let nested = rules.push_dir(&base.join("nested"), "nested");
+        assert!(
+            rules.is_ignored("a.log", false),
+            "the outer rule still applies"
+        );
+        assert!(
+            rules.is_ignored("nested/out.tmp", false),
+            "the outer layer reaches below the nested repository"
+        );
+        assert!(rules.is_ignored("nested/out.log", false));
+        assert!(
+            !rules.is_ignored("nested/keep.log", false),
+            "the nested file re-includes it"
+        );
+        assert!(rules.is_ignored("nested/x.gen", false));
+        assert!(
+            rules.is_ignored("nested/x.exe", false),
+            "its own exclude file"
+        );
+        assert!(!rules.is_ignored("x.gen", false), "and only below it");
+        rules.pop_to(nested);
+        assert!(
+            rules.is_ignored("nested/keep.log", false),
+            "pop restores the stack"
+        );
+        rules.pop_to(root);
+        assert_eq!(rules.layers.len(), 0);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The walk up from a scan root reads an ancestor's ignore file, and stops at the first
+    /// directory holding a `.git` — so a rule that belongs to an unrelated repository is
+    /// not applied to a tree that is not inside it.
+    #[test]
+    fn the_ancestor_walk_stops_at_the_nearest_repository() {
+        let outer = tmp("ancestors");
+        fs::write(outer.join(".gitignore"), "*.log\n").unwrap();
+        fs::create_dir_all(outer.join(".git")).unwrap();
+        let inner = outer.join("deep/tree");
+        fs::create_dir_all(&inner).unwrap();
+        let mut rules = IgnoreRules::new(false);
+        rules.push_ancestors(&inner);
+        assert!(
+            rules.is_ignored("a.log", false),
+            "the repository above the root applies"
+        );
+
+        // A repository sitting between the two is the boundary: the outer one stops there.
+        fs::create_dir_all(outer.join("deep/.git")).unwrap();
+        fs::write(outer.join("deep/.gitignore"), "*.gen\n").unwrap();
+        fs::write(outer.join(".gitignore"), "*.log\n").unwrap();
+        let mut nearer = IgnoreRules::new(false);
+        nearer.push_ancestors(&inner);
+        assert!(
+            nearer.is_ignored("a.gen", false),
+            "the nearer repository wins"
+        );
+        assert!(
+            !nearer.is_ignored("a.log", false),
+            "the repository above the boundary no longer applies"
+        );
+        let _ = fs::remove_dir_all(&outer);
+    }
+
+    /// `--no-ignore-vcs`, `--no-ignore-dot` and `--no-ignore-parent` each drop their own
+    /// source and leave the others in place.
+    #[test]
+    fn each_ignore_source_can_be_switched_off_alone() {
+        let base = tmp("sources");
+        fs::create_dir_all(base.join(".git/info")).unwrap();
+        fs::write(base.join(".gitignore"), "*.vcs\n").unwrap();
+        fs::write(base.join(".git/info/exclude"), "*.exe\n").unwrap();
+        fs::write(base.join(".ignore"), "*.dot\n").unwrap();
+        let read = |vcs: bool, dot: bool| {
+            let mut rules = IgnoreRules::new(false);
+            rules.set_sources(vcs, dot, true);
+            rules.push_dir(&base, "");
+            rules
+        };
+        let both = read(true, true);
+        assert!(both.is_ignored("a.vcs", false) && both.is_ignored("a.dot", false));
+        assert!(
+            both.is_ignored("a.exe", false),
+            "the repository's own exclude"
+        );
+        let no_vcs = read(false, true);
+        assert!(!no_vcs.is_ignored("a.vcs", false), "--no-ignore-vcs");
+        assert!(!no_vcs.is_ignored("a.exe", false), "its exclude file too");
+        assert!(no_vcs.is_ignored("a.dot", false), "the .ignore layer stays");
+        let no_dot = read(true, false);
+        assert!(no_dot.is_ignored("a.vcs", false));
+        assert!(!no_dot.is_ignored("a.dot", false), "--no-ignore-dot");
+        let neither = read(false, false);
+        assert!(!neither.is_ignored("a.vcs", false) && !neither.is_ignored("a.dot", false));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A `-g` pattern without a `/` is matched against the name at any depth, one with a
+    /// `/` is matched against the whole path from the root.
+    #[test]
+    fn glob_filters_anchor_at_the_name_or_at_the_root() {
+        let mut named = IgnoreRules::new(false);
+        named.add_globs(&["*.go".into()]).unwrap();
+        assert!(named.glob_matches("x.go", false));
+        assert!(
+            named.glob_matches("deep/tree/x.go", false),
+            "name, any depth"
+        );
+        assert!(!named.glob_matches("deep/x.gox", false));
+
+        let mut rooted = IgnoreRules::new(false);
+        rooted.add_globs(&["src/*.go".into()]).unwrap();
+        assert!(rooted.glob_matches("src/x.go", false));
+        assert!(
+            !rooted.glob_matches("other/src/x.go", false),
+            "anchored at the root"
+        );
+        assert!(
+            !rooted.glob_matches("src/deep/x.go", false),
+            "`*` stays in one level"
+        );
+
+        let mut anywhere = IgnoreRules::new(false);
+        anywhere.add_globs(&["**/x.go".into()]).unwrap();
+        assert!(
+            anywhere.glob_matches("x.go", false),
+            "`**/` matches nothing"
+        );
+        assert!(anywhere.glob_matches("a/b/x.go", false));
+
+        let mut top_only = IgnoreRules::new(false);
+        top_only.add_globs(&["/x.go".into()]).unwrap();
+        assert!(top_only.glob_matches("x.go", false));
+        assert!(!top_only.glob_matches("a/x.go", false));
+
+        // A directory is walked into whatever the name filter says; only an exclusion stops
+        // the descent, which is what keeps `-g '*.go'` from walking into nothing.
+        let mut excluded = IgnoreRules::new(false);
+        excluded
+            .add_globs(&["src/*.go".into(), "!src/gen".into()])
+            .unwrap();
+        assert!(!excluded.glob_allows("src/gen", true));
+        assert!(excluded.glob_allows("docs", true));
+        assert!(excluded.glob_matches("src/a.go", false));
+    }
+
+    /// A `dir/` rule hides the directory it names and never a file of that name, and a rule
+    /// with a `/` is still read relative to the root when it names a directory.
+    #[test]
+    fn a_directory_only_rule_matches_the_directory_and_not_the_file() {
+        let base = tmp("dir-only");
+        fs::write(base.join(".gitignore"), "build/\ngen/*.o\n").unwrap();
+        let mut rules = IgnoreRules::new(false);
+        rules.push_dir(&base, "");
+        assert!(rules.is_ignored("build", true));
+        assert!(
+            !rules.is_ignored("build", false),
+            "a file named build is not hit"
+        );
+        assert!(rules.is_ignored("deep/build", true), "by name, any depth");
+        assert!(
+            !rules.is_ignored("build/x.txt", false),
+            "the walk prunes at the dir"
+        );
+        assert!(rules.is_ignored("gen/x.o", false));
+        let mut files_only = IgnoreRules::new(false);
+        files_only.add_globs(&["build/".into()]).unwrap();
+        assert!(files_only.glob_matches("build", true));
+        assert!(!files_only.glob_matches("build", false));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A name that is not UTF-8 reaches the rules as the lossy string the walker builds, and
+    /// a rule that names only its extension still matches it.
+    #[test]
+    fn a_name_that_is_not_utf8_still_reaches_the_rules() {
+        let base = tmp("non-utf8");
+        fs::write(base.join(".gitignore"), "*.log\nbad*\n").unwrap();
+        let lossy = String::from_utf8_lossy(b"bad\xffname.log").into_owned();
+        assert!(lossy.contains('\u{fffd}'), "the walker's own spelling");
+        let mut rules = IgnoreRules::new(true);
+        rules.push_dir(&base, "");
+        assert!(
+            rules.is_ignored(&lossy, false),
+            "`*.log` reads the extension"
+        );
+        assert!(rules.is_ignored(&format!("sub/{lossy}"), false));
+        let dir = String::from_utf8_lossy(b"node_modules\xff").into_owned();
+        assert!(
+            !rules.is_ignored(&dir, true),
+            "a lossy name is compared as it arrives, so this is not the built-in name"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 }

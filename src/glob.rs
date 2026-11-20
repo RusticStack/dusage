@@ -1,16 +1,20 @@
 //! Glob matching for `--glob`, `--iglob` and ignore files.
 //!
 //! One [`Glob`] compiles one gitignore-style pattern and matches it against a path
-//! relative to the walk root. Matching is character based, not byte based: `?` and a
-//! character class consume exactly one Unicode scalar value, so `?` matches `é`.
+//! relative to the walk root. `?` and a character class consume exactly one Unicode scalar
+//! value, so `?` matches `é`. A pattern that holds no `?`, no negated class and nothing
+//! outside ASCII reads its subject one byte per character instead, which cannot differ:
+//! nothing in such a pattern can consume part of a multi-byte character. Only the rest is
+//! matched character by character.
 //!
 //! Supported syntax:
 //!
 //! - `*` matches any run of characters except `/`; `?` matches one such character.
 //! - `**` matches any run of characters including `/`, wherever it appears in a path
 //!   pattern (`a/**b` matches `a/x/b`). `**/` additionally matches nothing at all, so
-//!   `a/**/b` matches `a/b` and `**/x` matches `x` at any depth. Consequence: a trailing `**` also
-//!   matches the directory itself — `foo/**` matches `foo`, where git does not.
+//!   `a/**/b` matches `a/b` and `**/x` matches `x` at any depth. A trailing `**` does not
+//!   reach the directory it hangs off: `foo/**` is `foo`, `/`, then `**`, so it matches what
+//!   is below `foo` and never `foo` itself.
 //! - `[...]` matches one character from the class; `[!...]` and `[^...]` negate it.
 //!   Members are single characters or `a-z` code point ranges, `\]` `\-` `\\` escape a
 //!   member, and a `]` immediately after `[` or `[!` is a literal member. Classes never
@@ -36,8 +40,10 @@
 //!   (`--iglob`); [`Glob::new`] is case sensitive.
 //!
 //! Matching is a suffix dynamic program over the token list, so no input can recurse,
-//! panic, or backtrack exponentially: cost is O(tokens * path characters) per
-//! alternative with O(path) memory.
+//! panic, or backtrack exponentially: cost is O(tokens * subject length) per alternative
+//! with O(subject) memory. An alternative that is literals, or literals around one `*`, is
+//! answered by a direct comparison instead, and one that does reach the DP is first tested
+//! against the literal runs every path it matches must hold.
 
 use std::fmt;
 
@@ -85,6 +91,32 @@ enum Shape {
     Full,
 }
 
+/// Necessary conditions on a path, read off one alternative's tokens: its leading literals,
+/// its trailing literals, and its longest literal run. Every one of them is a substring of
+/// any path the alternative matches, so a miss settles the alternative without the DP.
+#[derive(Debug, Clone, Default)]
+struct Pre {
+    /// The alternative starts with these bytes, so a match starts there too.
+    head: Vec<u8>,
+    /// The alternative ends with these bytes, so a match ends with them too.
+    tail: Vec<u8>,
+    /// The longest run of literals anywhere in the alternative.
+    mid: Vec<u8>,
+}
+
+/// The longest run of these kept per anchor. A shorter run is still a necessary condition,
+/// and these are the bytes that reject an entry, so a cap only costs a comparison.
+const PRE_CAP: usize = 16;
+
+impl Pre {
+    /// True when `path` can still be a match: cheap, and never in the caller's favour.
+    fn may_match(&self, path: &[u8]) -> bool {
+        path.starts_with(&self.head)
+            && path.ends_with(&self.tail)
+            && crate::bytes::memmem(path, &self.mid).is_some()
+    }
+}
+
 /// One compiled glob pattern.
 #[derive(Debug, Clone)]
 pub struct Glob {
@@ -92,10 +124,10 @@ pub struct Glob {
     alts: Vec<Vec<Tok>>,
     /// The shape of each alternative, in the same order as [`Glob::alts`].
     shapes: Vec<Shape>,
-    /// For an alternative the DP has to run: its longest literal run, which every path it
-    /// matches must contain. A pattern that has one rejects almost every entry before the
-    /// DP, which is most of the cost of a `**`-style pattern.
-    anchors: Vec<Option<Vec<u8>>>,
+    /// For an alternative the DP has to run: what every path it matches must hold. A pattern
+    /// that has one rejects almost every entry before the DP, which is most of the cost of
+    /// a `**`-style pattern.
+    pres: Vec<Option<Pre>>,
     /// Pattern began with `!`; matching is not inverted, the caller decides.
     pub negated: bool,
     /// Pattern ended with `/`; it only matches directories.
@@ -103,6 +135,13 @@ pub struct Glob {
     anchored: bool,
     has_slash: bool,
     ignore_case: bool,
+    /// Every alternative is ASCII-only and holds no `?` and no negated class, so a byte
+    /// subject answers exactly as a character subject would and the subject is never
+    /// scanned to find out whether it needs the character DP.
+    byte_safe: bool,
+    /// Every alternative holds a literal `/`, so a subject without a separator cannot match.
+    /// A `**/` prefix does not count: it is allowed to match nothing at all.
+    needs_separator: bool,
 }
 
 impl Glob {
@@ -136,11 +175,15 @@ impl Glob {
             alts.push(compile(&alt, ignore_case)?);
         }
         let shapes: Vec<Shape> = alts.iter().map(|toks| shape_of(toks)).collect();
-        let anchors = alts
+        let byte_safe = alts.iter().all(|toks| toks.iter().all(byte_token));
+        let needs_separator = alts
+            .iter()
+            .all(|toks| toks.iter().any(|tok| matches!(tok, Tok::Lit('/'))));
+        let pres = alts
             .iter()
             .zip(&shapes)
             .map(|(toks, shape)| match shape {
-                Shape::Full => longest_lit_run(toks),
+                Shape::Full => Some(prefilter(toks)),
                 _ => None,
             })
             .collect();
@@ -148,12 +191,14 @@ impl Glob {
             raw: pattern.to_string(),
             alts,
             shapes,
-            anchors,
+            pres,
             negated,
             dir_only,
             anchored,
             has_slash: body.contains('/'),
             ignore_case,
+            byte_safe,
+            needs_separator,
         })
     }
 
@@ -166,6 +211,12 @@ impl Glob {
     /// file name of an entry (it contains a `/`, or was anchored with a leading `/`).
     pub fn is_path_pattern(&self) -> bool {
         self.anchored || self.has_slash
+    }
+
+    /// True when every alternative must consume a separator, so no subject that holds none
+    /// can match and a walk need not test this pattern against a bare name.
+    pub fn needs_separator(&self) -> bool {
+        self.needs_separator
     }
 
     /// Match an entry whose directory nature is unknown; a `dir/`-style pattern never
@@ -207,9 +258,12 @@ impl Glob {
         };
         // A byte subject is matched byte for byte: `?` and a class consume one byte, which is
         // the same thing they consume from a one-byte character, and a pattern character
-        // outside ASCII can never equal one of those bytes. Anything else keeps the
-        // character DP, where `?` and a class consume one scalar value.
-        if subject.is_ascii() {
+        // outside ASCII can never equal one of those bytes. A pattern that [`byte_token`]
+        // accepts holds no `?` and nothing that a non-ASCII byte could satisfy, so it reads
+        // every subject as one byte per character and the subject is not scanned at all.
+        // Anything else keeps the character DP, where `?` and a class consume one scalar
+        // value.
+        if self.byte_safe || subject.is_ascii() {
             let path = subject.as_bytes();
             // One zip, and the anchor read only where a `**` or a class needs it: the three
             // vectors are parallel, and walking them as one pair keeps the iterator state
@@ -222,10 +276,10 @@ impl Glob {
                     Shape::Prefix => lit_prefix(toks, path, self.ignore_case),
                     Shape::Between => lit_between(toks, path, self.ignore_case),
                     Shape::Full => {
-                        let found = match &self.anchors[at] {
-                            Some(run) if !self.ignore_case => {
-                                crate::bytes::memmem(path, run).is_some()
-                            }
+                        let found = match &self.pres[at] {
+                            // Folding compares literals case-insensitively one at a time,
+                            // so a byte prefilter would answer for the unfolded path only.
+                            Some(pre) if !self.ignore_case => pre.may_match(path),
                             _ => true,
                         };
                         found && matches_bytes(toks, path, self.ignore_case)
@@ -292,6 +346,11 @@ impl<'a> PathView<'a> {
     /// The last component, as a pattern without a `/` sees it.
     pub fn name(&self) -> &str {
         &self.path[self.name_at..]
+    }
+
+    /// True when the path is one component, so no separator is available to a pattern.
+    pub fn is_name(&self) -> bool {
+        self.name_at == 0
     }
 
     /// Everything above the last component, without the separator: the directory an entry
@@ -522,6 +581,26 @@ fn class_hit(neg: bool, items: &[Item], c: char) -> bool {
     hit != neg
 }
 
+/// Whether one token answers the same on bytes as it does on characters: an ASCII literal
+/// or an ASCII class member can never equal a byte of a multi-byte character, so a byte
+/// subject fails those tokens exactly where a character subject would.
+fn byte_token(tok: &Tok) -> bool {
+    match tok {
+        Tok::Lit(c) => c.is_ascii(),
+        Tok::Any => false,
+        Tok::Star | Tok::DoubleStar | Tok::StarSlash => true,
+        // A negated class accepts every non-ASCII byte, and would then match one byte of a
+        // multi-byte character where the character DP rejects it.
+        Tok::Class { neg, items } => {
+            !*neg
+                && items.iter().all(|item| match item {
+                    Item::Ch(c) => c.is_ascii(),
+                    Item::Range(lo, hi) => lo.is_ascii() && hi.is_ascii(),
+                })
+        }
+    }
+}
+
 /// Which of the direct tests an alternative's tokens allow, if any.
 fn shape_of(toks: &[Tok]) -> Shape {
     let mut wild = toks
@@ -542,16 +621,33 @@ fn shape_of(toks: &[Tok]) -> Shape {
     }
 }
 
-/// The longest run of literal characters one alternative holds, when it is long enough to
-/// be worth looking for. Every path the alternative matches contains it, so a miss is a
-/// definitive answer.
-fn longest_lit_run(toks: &[Tok]) -> Option<Vec<u8>> {
-    const USEFUL: usize = 3;
+/// Read the necessary conditions of one alternative. A leading or trailing run of ASCII
+/// literals pins the start or the end of every path it matches; the longest run anywhere is
+/// a substring of it. Two bytes are worth a test at either end, three in the middle.
+fn prefilter(toks: &[Tok]) -> Pre {
+    let is_lit = |t: &Tok| matches!(t, Tok::Lit(c) if c.is_ascii());
+    let as_bytes = |run: &[Tok]| -> Vec<u8> {
+        run.iter()
+            .filter_map(|t| match t {
+                Tok::Lit(c) => Some(*c as u8),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut pre = Pre::default();
+    let head = toks.iter().take_while(|t| is_lit(t)).count();
+    if head >= 2 {
+        pre.head = as_bytes(&toks[..head.min(PRE_CAP)]);
+    }
+    let tail = toks.iter().rev().take_while(|t| is_lit(t)).count();
+    if tail >= 2 {
+        pre.tail = as_bytes(&toks[toks.len() - tail.min(PRE_CAP)..]);
+    }
     let mut best: &[Tok] = &[];
     let mut start = 0;
     while start < toks.len() {
         let mut end = start;
-        while end < toks.len() && matches!(toks[end], Tok::Lit(c) if c.is_ascii()) {
+        while end < toks.len() && is_lit(&toks[end]) {
             end += 1;
         }
         if end - start > best.len() {
@@ -559,17 +655,10 @@ fn longest_lit_run(toks: &[Tok]) -> Option<Vec<u8>> {
         }
         start = end + 1;
     }
-    if best.len() < USEFUL {
-        return None;
+    if best.len() >= 3 {
+        pre.mid = as_bytes(&best[..best.len().min(PRE_CAP)]);
     }
-    Some(
-        best.iter()
-            .filter_map(|t| match t {
-                Tok::Lit(c) => Some(*c as u8),
-                _ => None,
-            })
-            .collect(),
-    )
+    pre
 }
 
 /// Whether two path bytes are the same character under the pattern's case rule.
@@ -632,6 +721,10 @@ fn lit_between(toks: &[Tok], path: &[u8], fold: bool) -> bool {
 
 /// Suffix DP: `row[j]` says whether the token suffix at this row matches `path[j..]`.
 /// Rows run from the end of the token list back to its start, so nothing recurses.
+///
+/// Kept out of line: inlined, its row buffers size the frame of every caller, and most
+/// entries are answered by a direct shape or a prefilter without ever reaching it.
+#[inline(never)]
 fn matches_tokens(toks: &[Tok], path: &[char]) -> bool {
     let m = path.len();
     let mut next: Vec<bool> = (0..=m).map(|j| j == m).collect();
@@ -702,17 +795,26 @@ fn matches_tokens(toks: &[Tok], path: &[char]) -> bool {
     next[0]
 }
 
+/// Rows up to this many bytes use a small stack buffer, so the buffer a call zeroes is the
+/// size of a path rather than the size of the largest path allowed: every entry of a walk
+/// pays this, and nearly every one is short.
+const DP_SMALL: usize = 64;
+
 /// Rows above this many bytes spill to the heap instead of the stack. A path that long is
 /// rare enough that the allocation does not matter.
 const DP_STACK: usize = 512;
 
 /// The suffix DP over bytes, for an ASCII subject: one byte is one character there, so the
 /// same transitions run on `u8` with no `Vec<char>` and no heap row buffers.
+#[inline(never)]
 fn matches_bytes(toks: &[Tok], path: &[u8], fold: bool) -> bool {
     let m = path.len();
+    let mut small = [0u8; 3 * (DP_SMALL + 1)];
     let mut stack = [0u8; 3 * (DP_STACK + 1)];
     let mut spill: Vec<u8> = Vec::new();
-    let buf: &mut [u8] = if m <= DP_STACK {
+    let buf: &mut [u8] = if m <= DP_SMALL {
+        &mut small[..3 * (m + 1)]
+    } else if m <= DP_STACK {
         &mut stack[..3 * (m + 1)]
     } else {
         spill.resize(3 * (m + 1), 0);
@@ -909,6 +1011,180 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A pattern [`byte_token`] accepts reads its subject as one byte per character. That is
+    /// only sound if it answers the byte-free DP on every subject, multi-byte characters
+    /// included, so this compares the two on text that is not ASCII.
+    #[test]
+    fn a_byte_safe_pattern_answers_like_the_character_dp() {
+        let patterns = [
+            "*.go",
+            "*.log",
+            "*",
+            "a*b",
+            "build/",
+            "pkg/gen/",
+            "vendor/**/*.min.js",
+            "**/x",
+            "a/**",
+            "**/*.日本",
+            "café/*.txt",
+            "[a-z]*",
+            "x*é",
+            "**/日本/**",
+        ];
+        let subjects = [
+            "",
+            "é.go",
+            "café/x.go",
+            "café/x.txt",
+            "aé/b.txt",
+            "日本.go",
+            "a/日本/b.go",
+            "vendor/lib/v1.min.js",
+            "vendor/é/v1.min.js",
+            "pkg/gen/é.go",
+            "build",
+            "a/b/c",
+            "é/é/é",
+            "xé",
+            "x/é",
+        ];
+        // `reference` answers an entry whose directory nature is unknown and refuses every
+        // `dir/` pattern, so it is read here with that guard moved out in front of it.
+        let dp = |glob: &Glob, s: &str| {
+            let rel = s.trim_end_matches('/');
+            let subject = if glob.is_path_pattern() {
+                rel
+            } else {
+                rel.rsplit('/').next().unwrap_or(rel)
+            };
+            if subject.is_empty() {
+                return false;
+            }
+            let mut chars: Vec<char> = subject.chars().collect();
+            if glob.ignore_case {
+                for c in &mut chars {
+                    c.make_ascii_lowercase();
+                }
+            }
+            glob.alts.iter().any(|toks| matches_tokens(toks, &chars))
+        };
+        let expect =
+            |glob: &Glob, s: &str, is_dir: bool| !(glob.dir_only && !is_dir) && dp(glob, s);
+        for p in patterns {
+            for fold in [false, true] {
+                let glob = Glob::new_with(p, fold).expect("corpus compiles");
+                for s in subjects {
+                    assert_eq!(
+                        glob.matches(s, false),
+                        expect(&glob, s, false),
+                        "pattern {p:?} subject {s:?} fold {fold}"
+                    );
+                    assert_eq!(
+                        glob.matches(s, true),
+                        expect(&glob, s, true),
+                        "pattern {p:?} subject {s:?} as a directory, fold {fold}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The prefilter is a set of necessary conditions, so it can only turn a path away that
+    /// the DP would have rejected too. Checked against the DP itself, including for the
+    /// alternatives the prefilter belongs to.
+    #[test]
+    fn the_prefilter_only_rejects_what_the_dp_rejects() {
+        let patterns = [
+            "vendor/**/*.min.js",
+            "**/src/strings/*.go",
+            "a/**/f",
+            "/x*/**/y?.rs",
+            "**{a,b}/*.go",
+            "*/**/*.min.js",
+        ];
+        let subjects = [
+            "src/main.go",
+            "pkg/src/strings/x.go",
+            "vendor/lib/v1.min.js",
+            "vendor/lib/v1.js",
+            "a/b/f",
+            "a/f",
+            "x/y2.rs",
+            "zz/a.go",
+            "b/ab.go",
+            "deep/a/b/c.min.js",
+        ];
+        for p in patterns {
+            let glob = g(p);
+            for s in subjects {
+                let view = PathView::new(s);
+                let subject = if glob.is_path_pattern() {
+                    view.path()
+                } else {
+                    view.name()
+                };
+                let path = subject.as_bytes();
+                let dp = glob
+                    .alts
+                    .iter()
+                    .any(|toks| matches_bytes(toks, path, false));
+                for (at, (toks, shape)) in glob.alts.iter().zip(&glob.shapes).enumerate() {
+                    if *shape != Shape::Full {
+                        continue;
+                    }
+                    if let Some(pre) = &glob.pres[at] {
+                        assert!(
+                            !matches_bytes(toks, path, false) || pre.may_match(path),
+                            "{p:?} prefilter rejects {s:?}, which the DP accepts"
+                        );
+                    }
+                    let _ = dp;
+                }
+                assert_eq!(
+                    glob.matches_view(&view, false),
+                    reference(&glob, s),
+                    "{p:?} {s:?}"
+                );
+            }
+        }
+    }
+
+    /// A trailing `**` matches everything below a directory and not the directory: the
+    /// tokens are the literals, the separator, and then `**`, so the separator is part of
+    /// the pattern.
+    #[test]
+    fn a_trailing_double_star_needs_the_separator() {
+        assert!(
+            !g("foo/**").is_match("foo"),
+            "the separator is not optional"
+        );
+        assert!(g("foo/**").is_match("foo/x"));
+        assert!(g("foo/**").is_match("foo/x/y"));
+        assert!(!g("foo/**").matches("foo", true));
+        assert!(m("foo/**", "foo/x"), "the directory's own entries do match");
+    }
+
+    /// Whether an alternative needs a separator at all: `**/` may match nothing, so a
+    /// pattern that only reaches a separator through it still matches a bare name.
+    #[test]
+    fn needs_separator_reads_the_alternatives() {
+        assert!(!g("*.go").needs_separator());
+        assert!(!g("**").needs_separator());
+        assert!(!g("**/x").needs_separator(), "`**/` matches nothing");
+        assert!(!g("a**b").needs_separator());
+        assert!(g("a/b").needs_separator());
+        assert!(
+            !g("/x").needs_separator(),
+            "an anchoring `/` is not a separator"
+        );
+        assert!(g("a/**").needs_separator());
+        assert!(g("*/x").needs_separator());
+        assert!(g("a\\/b").needs_separator(), "an escaped separator is one");
+        assert!(!g("{a/b,c}").needs_separator(), "one alternative has none");
+        assert!(g("{a/b,c/d}").needs_separator());
     }
 
     #[test]
