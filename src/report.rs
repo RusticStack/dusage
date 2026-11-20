@@ -3,7 +3,7 @@
 //! Formatting helpers here are deliberately independent of `cli.rs`.
 
 use crate::model::{ScanResult, Totals};
-use crate::search::{LineHit, SearchOptions, SearchReport};
+use crate::search::{Candidate, LineHit, SearchOptions, SearchReport};
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -598,24 +598,36 @@ pub fn render_paths(
     out: &mut dyn Write,
 ) -> io::Result<()> {
     for c in &r.paths {
-        if long {
-            writeln!(
-                out,
-                "{:>12}  {}  {}{}",
-                crate::cli::fmt_bytes(c.size),
-                fmt_time(c.modified),
-                c.rel,
-                if c.is_dir { "/" } else { "" }
-            )?;
-        } else if null {
-            write!(out, "{}\0", c.rel)?;
-        } else if color {
-            writeln!(out, "{}{}{}", color::PATH, c.rel, color::RESET)?;
-        } else {
-            writeln!(out, "{}", c.rel)?;
-        }
+        render_path(c, long, color, null, out)?;
     }
     Ok(())
+}
+
+/// One candidate of a `dusage find` listing, in the same four shapes as [`render_paths`]:
+/// the walk prints each result as it finds it, so the per-result row is its own function.
+pub fn render_path(
+    c: &Candidate,
+    long: bool,
+    color: bool,
+    null: bool,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    if long {
+        writeln!(
+            out,
+            "{:>12}  {}  {}{}",
+            crate::cli::fmt_bytes(c.size),
+            fmt_time(c.modified),
+            c.rel,
+            if c.is_dir { "/" } else { "" }
+        )
+    } else if null {
+        write!(out, "{}\0", c.rel)
+    } else if color {
+        writeln!(out, "{}{}{}", color::PATH, c.rel, color::RESET)
+    } else {
+        writeln!(out, "{}", c.rel)
+    }
 }
 
 /// JSON for `dusage find --json`.

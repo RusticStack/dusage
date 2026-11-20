@@ -7,7 +7,9 @@ use crate::findexpr::{self, Ctx, ExecRequest, Ids, Sink};
 use crate::glob::Glob;
 use crate::pattern::Pattern;
 use crate::report;
-use crate::search::{search, walk_expr, Scope, SearchOptions, Segment, SortKey};
+use crate::search::{
+    search, walk_expr, walk_paths, Candidate, Scope, SearchOptions, Segment, SortKey,
+};
 use std::io::Read;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -1396,7 +1398,6 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                 || a.value("--size").is_some()
                 || a.value("--older").is_some()
                 || a.value("--newer").is_some();
-            let mut r = search(&o).map_err(|e| Fail(1, e.to_string()))?;
             let size_filter = match a.value("--size") {
                 None => None,
                 Some(v) => Some(SizeFilter::parse(v)?),
@@ -1407,7 +1408,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             let dirs_only = a.flag("--dirs");
             // A type filter asks for files: `find -t js` never lists directories.
             let files_only = a.flag("--files") || (!dirs_only && !type_globs.is_empty());
-            r.paths.retain(|c| {
+            let keep = |c: &Candidate| -> bool {
                 // `--mindepth` counts levels below the root, so a file in the root is 1.
                 if mindepth > 0 && c.rel.split('/').count() < mindepth {
                     return false;
@@ -1484,23 +1485,56 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
                     }
                 }
                 true
-            });
-            let long = a.flag("--long");
-            let mut out = std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock());
-            let res = if json {
-                report::render_paths_json(&r, &mut out)
-            } else {
-                report::render_paths(&r, long, color, a.flag("-Z") || a.flag("--null"), &mut out)
             };
-            res.and_then(|()| out.flush()).map_err(Fail::output)?;
-            let errs = r.stats.errors.total();
+            let long = a.flag("--long");
+            let null = a.flag("-Z") || a.flag("--null");
+            let mut out = std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock());
+            let mut kept = 0u64;
+            // A stream cannot be reversed and a time key has to be read for every result
+            // before the first one prints; `--json` closes with a count. Those keep the
+            // listing in memory. Everything else, `--sort path` included, prints as the walk
+            // finds each result.
+            let stats = if json || o.sort != SortKey::Path || o.sort_reverse {
+                let mut r = search(&o).map_err(|e| Fail(1, e.to_string()))?;
+                r.paths.retain(|c| keep(c));
+                kept = r.paths.len() as u64;
+                // `--json` counts what it prints, which the filters have already decided.
+                let res = if json {
+                    report::render_paths_json(&r, &mut out)
+                } else {
+                    report::render_paths(&r, long, color, null, &mut out)
+                };
+                res.and_then(|()| out.flush()).map_err(Fail::output)?;
+                r.stats
+            } else {
+                let mut write_err: Option<std::io::Error> = None;
+                let stats = walk_paths(&o, &mut |c: &Candidate| {
+                    if !keep(c) {
+                        return true;
+                    }
+                    kept += 1;
+                    match report::render_path(c, long, color, null, &mut out) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            write_err = Some(e);
+                            false
+                        }
+                    }
+                });
+                if let Some(e) = write_err {
+                    return Err(Fail::output(e));
+                }
+                out.flush().map_err(Fail::output)?;
+                stats
+            };
+            let errs = stats.errors.total();
             if errs > 0 && !a.flag("--no-messages") {
                 eprintln!("dusage: {errs} path(s) could not be read");
             }
             // An error is exit 2 even when something was found, which is grep's contract.
             return if errs > 0 {
                 Err(Fail(2, String::new()))
-            } else if r.paths.is_empty() {
+            } else if kept == 0 {
                 Err(Fail(1, String::new()))
             } else {
                 Ok(())

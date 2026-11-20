@@ -66,11 +66,36 @@ enum Tok {
     Class { neg: bool, items: Vec<Item> },
 }
 
+/// The shape one alternative has, when its tokens allow a direct test instead of the
+/// suffix DP. Decided once at compile time so the per-entry path never inspects tokens to
+/// find out what it could have done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// No wildcard at all: the subject must equal the text.
+    Literal,
+    /// A lone `*`: anything, empty included.
+    Any,
+    /// `*` then literals: a tail, with no `/` in what precedes it.
+    Suffix,
+    /// Literals then `*`: a head, with no `/` after it.
+    Prefix,
+    /// Literals, `*`, literals: a head and a tail with no `/` between them.
+    Between,
+    /// Anything else, including every `**` and every class: the DP decides.
+    Full,
+}
+
 /// One compiled glob pattern.
 #[derive(Debug, Clone)]
 pub struct Glob {
     raw: String,
     alts: Vec<Vec<Tok>>,
+    /// The shape of each alternative, in the same order as [`Glob::alts`].
+    shapes: Vec<Shape>,
+    /// For an alternative the DP has to run: its longest literal run, which every path it
+    /// matches must contain. A pattern that has one rejects almost every entry before the
+    /// DP, which is most of the cost of a `**`-style pattern.
+    anchors: Vec<Option<Vec<u8>>>,
     /// Pattern began with `!`; matching is not inverted, the caller decides.
     pub negated: bool,
     /// Pattern ended with `/`; it only matches directories.
@@ -110,9 +135,20 @@ impl Glob {
         for alt in expand_braces(body)? {
             alts.push(compile(&alt, ignore_case)?);
         }
+        let shapes: Vec<Shape> = alts.iter().map(|toks| shape_of(toks)).collect();
+        let anchors = alts
+            .iter()
+            .zip(&shapes)
+            .map(|(toks, shape)| match shape {
+                Shape::Full => longest_lit_run(toks),
+                _ => None,
+            })
+            .collect();
         Ok(Glob {
             raw: pattern.to_string(),
             alts,
+            shapes,
+            anchors,
             negated,
             dir_only,
             anchored,
@@ -159,6 +195,31 @@ impl Glob {
         } else {
             rel.rsplit('/').next().unwrap_or(rel)
         };
+        // A byte subject is matched byte for byte: `?` and a class consume one byte, which is
+        // the same thing they consume from a one-byte character, and a pattern character
+        // outside ASCII can never equal one of those bytes. Anything else keeps the
+        // character DP, where `?` and a class consume one scalar value.
+        if subject.is_ascii() {
+            let path = subject.as_bytes();
+            return self.alts.iter().zip(&self.shapes).zip(&self.anchors).any(
+                |((toks, shape), anchor)| match shape {
+                    Shape::Literal => lit_eq(toks, path, self.ignore_case),
+                    Shape::Any => true,
+                    Shape::Suffix => lit_suffix(toks, path, self.ignore_case),
+                    Shape::Prefix => lit_prefix(toks, path, self.ignore_case),
+                    Shape::Between => lit_between(toks, path, self.ignore_case),
+                    Shape::Full => {
+                        let found = match anchor {
+                            Some(run) if !self.ignore_case => {
+                                crate::bytes::memmem(path, run).is_some()
+                            }
+                            _ => true,
+                        };
+                        found && matches_bytes(toks, path, self.ignore_case)
+                    }
+                },
+            );
+        }
         let mut chars: Vec<char> = subject.chars().collect();
         if self.ignore_case {
             for c in &mut chars {
@@ -368,6 +429,114 @@ fn class_hit(neg: bool, items: &[Item], c: char) -> bool {
     hit != neg
 }
 
+/// Which of the direct tests an alternative's tokens allow, if any.
+fn shape_of(toks: &[Tok]) -> Shape {
+    let mut wild = toks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !matches!(t, Tok::Lit(c) if c.is_ascii()));
+    let Some((i, t)) = wild.next() else {
+        return Shape::Literal;
+    };
+    if wild.next().is_some() || !matches!(t, Tok::Star) {
+        return Shape::Full;
+    }
+    match i {
+        0 if toks.len() == 1 => Shape::Any,
+        0 => Shape::Suffix,
+        i if i == toks.len() - 1 => Shape::Prefix,
+        _ => Shape::Between,
+    }
+}
+
+/// The longest run of literal characters one alternative holds, when it is long enough to
+/// be worth looking for. Every path the alternative matches contains it, so a miss is a
+/// definitive answer.
+fn longest_lit_run(toks: &[Tok]) -> Option<Vec<u8>> {
+    const USEFUL: usize = 3;
+    let mut best: &[Tok] = &[];
+    let mut start = 0;
+    while start < toks.len() {
+        let mut end = start;
+        while end < toks.len() && matches!(toks[end], Tok::Lit(c) if c.is_ascii()) {
+            end += 1;
+        }
+        if end - start > best.len() {
+            best = &toks[start..end];
+        }
+        start = end + 1;
+    }
+    if best.len() < USEFUL {
+        return None;
+    }
+    Some(
+        best.iter()
+            .filter_map(|t| match t {
+                Tok::Lit(c) => Some(*c as u8),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// Whether two path bytes are the same character under the pattern's case rule.
+#[inline]
+fn byte_eq(a: u8, b: u8, fold: bool) -> bool {
+    a == b || (fold && a.eq_ignore_ascii_case(&b))
+}
+
+/// One literal token against one path byte. A wildcard here means the caller asked for a
+/// shape the tokens do not have, which no match satisfies.
+#[inline]
+fn lit_hit(t: &Tok, b: u8, fold: bool) -> bool {
+    match t {
+        Tok::Lit(c) if c.is_ascii() => byte_eq(*c as u8, b, fold),
+        _ => false,
+    }
+}
+
+fn lit_eq(toks: &[Tok], path: &[u8], fold: bool) -> bool {
+    path.len() == toks.len() && toks.iter().zip(path).all(|(t, b)| lit_hit(t, *b, fold))
+}
+
+fn lit_suffix(toks: &[Tok], path: &[u8], fold: bool) -> bool {
+    let tail = &toks[1..];
+    let Some(head) = path.len().checked_sub(tail.len()) else {
+        return false;
+    };
+    // What `*` covers may not hold a separator.
+    !path[..head].contains(&b'/')
+        && tail
+            .iter()
+            .zip(&path[head..])
+            .all(|(t, b)| lit_hit(t, *b, fold))
+}
+
+fn lit_prefix(toks: &[Tok], path: &[u8], fold: bool) -> bool {
+    let head = &toks[..toks.len() - 1];
+    head.len() <= path.len()
+        && head.iter().zip(path).all(|(t, b)| lit_hit(t, *b, fold))
+        && !path[head.len()..].contains(&b'/')
+}
+
+/// Literals, one `*`, literals: a head and a tail, with no separator in between.
+fn lit_between(toks: &[Tok], path: &[u8], fold: bool) -> bool {
+    let Some(star) = toks.iter().position(|t| matches!(t, Tok::Star)) else {
+        return false;
+    };
+    let (head, tail) = (&toks[..star], &toks[star + 1..]);
+    let Some(rest) = path.len().checked_sub(tail.len()) else {
+        return false;
+    };
+    head.len() <= rest
+        && head.iter().zip(path).all(|(t, b)| lit_hit(t, *b, fold))
+        && tail
+            .iter()
+            .zip(&path[rest..])
+            .all(|(t, b)| lit_hit(t, *b, fold))
+        && !path[head.len()..rest].contains(&b'/')
+}
+
 /// Suffix DP: `row[j]` says whether the token suffix at this row matches `path[j..]`.
 /// Rows run from the end of the token list back to its start, so nothing recurses.
 fn matches_tokens(toks: &[Tok], path: &[char]) -> bool {
@@ -440,6 +609,93 @@ fn matches_tokens(toks: &[Tok], path: &[char]) -> bool {
     next[0]
 }
 
+/// Rows above this many bytes spill to the heap instead of the stack. A path that long is
+/// rare enough that the allocation does not matter.
+const DP_STACK: usize = 512;
+
+/// The suffix DP over bytes, for an ASCII subject: one byte is one character there, so the
+/// same transitions run on `u8` with no `Vec<char>` and no heap row buffers.
+fn matches_bytes(toks: &[Tok], path: &[u8], fold: bool) -> bool {
+    let m = path.len();
+    let mut stack = [0u8; 3 * (DP_STACK + 1)];
+    let mut spill: Vec<u8> = Vec::new();
+    let buf: &mut [u8] = if m <= DP_STACK {
+        &mut stack[..3 * (m + 1)]
+    } else {
+        spill.resize(3 * (m + 1), 0);
+        &mut spill
+    };
+    let (mut cur, rest) = buf.split_at_mut(m + 1);
+    let (mut next, mid) = rest.split_at_mut(m + 1);
+    next[m] = 1;
+    let mut i = toks.len();
+    while i > 0 {
+        i -= 1;
+        match &toks[i] {
+            Tok::Lit(c) => {
+                for j in 0..m {
+                    cur[j] = (lit_hit(&Tok::Lit(*c), path[j], fold) && next[j + 1] == 1) as u8;
+                }
+                cur[m] = 0;
+            }
+            Tok::Any => {
+                for j in 0..m {
+                    cur[j] = (path[j] != b'/' && next[j + 1] == 1) as u8;
+                }
+                cur[m] = 0;
+            }
+            Tok::Class { neg, items } => {
+                for j in 0..m {
+                    cur[j] = (path[j] != b'/'
+                        && class_hit_byte(*neg, items, path[j], fold)
+                        && next[j + 1] == 1) as u8;
+                }
+                cur[m] = 0;
+            }
+            Tok::Star => {
+                cur[m] = next[m];
+                for j in (0..m).rev() {
+                    let step = path[j] != b'/' && cur[j + 1] == 1;
+                    cur[j] = (next[j] == 1 || step) as u8;
+                }
+            }
+            Tok::DoubleStar => {
+                cur[m] = next[m];
+                for j in (0..m).rev() {
+                    let step = cur[j + 1] == 1;
+                    cur[j] = (next[j] == 1 || step) as u8;
+                }
+            }
+            Tok::StarSlash => {
+                mid[m] = 0;
+                for j in (0..m).rev() {
+                    mid[j] = if path[j] == b'/' {
+                        (next[j + 1] == 1 || mid[j + 1] == 1) as u8
+                    } else {
+                        mid[j + 1]
+                    };
+                }
+                for j in 0..=m {
+                    cur[j] = (next[j] == 1 || mid[j] == 1) as u8;
+                }
+            }
+        }
+        std::mem::swap(&mut cur, &mut next);
+    }
+    next[0] == 1
+}
+
+/// A class against an ASCII path byte, which is one character there, folded like the
+/// character DP folds the subject.
+fn class_hit_byte(neg: bool, items: &[Item], b: u8, fold: bool) -> bool {
+    let c = if fold {
+        (b as char).to_ascii_lowercase()
+    } else {
+        b as char
+    };
+    class_hit(neg, items, c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +715,107 @@ mod tests {
 
     fn md(p: &str, rel: &str) -> bool {
         g(p).matches(rel, true)
+    }
+
+    /// What `matches` answered before the shape shortcuts: the character DP over the whole
+    /// alternative list, with the same subject rule.
+    fn reference(glob: &Glob, rel: &str) -> bool {
+        if glob.dir_only || rel.is_empty() {
+            return false;
+        }
+        let rel = rel.trim_end_matches('/');
+        let subject = if glob.is_path_pattern() {
+            rel
+        } else {
+            rel.rsplit('/').next().unwrap_or(rel)
+        };
+        let mut chars: Vec<char> = subject.chars().collect();
+        if glob.ignore_case {
+            for c in &mut chars {
+                c.make_ascii_lowercase();
+            }
+        }
+        glob.alts.iter().any(|toks| matches_tokens(toks, &chars))
+    }
+
+    /// Every shape `matches` shortcuts has to answer exactly what the DP answers, or the
+    /// listing loses entries. This is the test that keeps the two in step.
+    #[test]
+    fn shapes_agree_with_the_dp() {
+        let patterns = [
+            "*.go",
+            "*",
+            "a*b",
+            "a",
+            "*x",
+            "x*",
+            "a*/b",
+            "**/x",
+            "a/**b",
+            "x?.go",
+            "a[b-d]*",
+            "*.[ch]",
+            "src/*.go",
+            "**/*.min.js",
+            "a/*/b",
+            "*/*",
+            "x*y*z",
+            "*/x",
+            "**/src/strings/*.go",
+            "*.GP",
+            "{a,b}*.txt",
+            "{x,}y",
+            "a*b*",
+            "a*b/c",
+            "/x*",
+            "x?",
+        ];
+        let subjects = [
+            "",
+            "a",
+            "b",
+            "ab",
+            "a.x",
+            "x",
+            "xa",
+            "ax",
+            "a/b",
+            "x/b",
+            "a/x/b",
+            "src/a.go",
+            "a/x.go",
+            "pkg/src/strings/x.go",
+            "x/y/z",
+            "a.min.js",
+            "x.a.min.js",
+            "a/xyz",
+            "zzz",
+            "a.c",
+            "b.h",
+            "a-b.txt",
+            "A.GO",
+            "Ab",
+            "a/b/c",
+            "x??",
+            "y",
+        ];
+        for p in patterns {
+            for fold in [false, true] {
+                let glob = Glob::new_with(p, fold).expect("patterns in the corpus compile");
+                for s in subjects {
+                    assert_eq!(
+                        glob.matches(s, false),
+                        reference(&glob, s),
+                        "pattern {p:?} subject {s:?} fold {fold}"
+                    );
+                    assert_eq!(
+                        glob.matches(s, true),
+                        reference(&glob, s),
+                        "pattern {p:?} subject {s:?} as a directory, fold {fold}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
