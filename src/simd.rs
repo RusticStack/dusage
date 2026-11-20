@@ -16,7 +16,6 @@
 //! once per process with `is_x86_feature_detected!`, so no instruction is executed on a CPU
 //! that does not advertise it, and every path falls back to the portable loop.
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 /// The widest loop this CPU can run.
@@ -76,19 +75,16 @@ pub const MAX_PREFILTER: usize = 4;
 /// already cheap to verify, so the extra compare would cost more than the candidates it removes.
 const PAIR_MIN: usize = 3;
 
-/// Candidates per haystack byte above which comparing the second byte pays: one candidate every
-/// [`PAIR_DENSITY`] bytes still leaves the compares cheaper than the verifies they save, and a
-/// rarer leading byte leaves nothing to filter.
-const PAIR_DENSITY: usize = 256;
-
-/// Bytes sampled from the first haystack a scan sees, to decide that per needle, and the least
-/// a sample may be to count: one short file at the start of a walk says nothing about the text
-/// behind it, so the decision waits for a haystack with room to answer.
-const SAMPLE: usize = 16384;
-const SAMPLE_MIN: usize = 4096;
-
-/// Set in [`Prefilter::state`] once the sampling above has run.
-const DECIDED: u8 = 0x80;
+/// Bytes sampled from the start of a haystack to decide which needles earn a second-byte
+/// compare. One candidate away costs more than the compare that finds it, so a leading byte
+/// that shows up in this prefix is worth pairing.
+///
+/// The decision is made per haystack and never kept. A decision held for the process would be
+/// taken from whichever file the walk read first — one 4 KB window of a binary, say, while the
+/// tree behind it is source — so the same search would pick a different strategy depending on
+/// the order the tree was walked in. Both answers are exact, because the verify decides, so a
+/// wrong call here only costs or saves instructions.
+const SAMPLE: usize = 64;
 
 /// A small set of needles scanned in one pass, for a search that jumps between the positions
 /// where a match could begin instead of stepping through every byte in between.
@@ -102,11 +98,6 @@ pub struct Prefilter {
     /// The needles, longest first: at one offset the longest needle says most about the match
     /// that contains it.
     needles: Vec<Vec<u8>>,
-    /// Bit `i` means needle `i` is compared on its second byte too, and [`DECIDED`] says the
-    /// sample has been taken. Both forms answer a superset of the needle positions — the verify
-    /// step decides — so this only ever costs or saves time, and a race between two threads
-    /// costs nothing either.
-    state: AtomicU8,
 }
 
 impl Prefilter {
@@ -118,26 +109,21 @@ impl Prefilter {
         }
         needles.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         needles.dedup();
-        Some(Prefilter {
-            state: AtomicU8::new(0),
-            needles,
-        })
+        Some(Prefilter { needles })
     }
 
-    /// Which needles are worth a second-byte compare in this haystack, from one sample, or
-    /// `None` while the sample is too small to say.
-    fn decide(&self, hay: &[u8], from: usize) -> Option<u8> {
-        let sample = &hay[from.min(hay.len())..(from + SAMPLE).min(hay.len())];
-        if sample.len() < SAMPLE_MIN {
-            return None;
-        }
+    /// Which needles are worth a second-byte compare in this haystack, from its first
+    /// [`SAMPLE`] bytes. Bit `i` means needle `i` is compared on both bytes; every form answers
+    /// a superset of the needle positions, since the verify step decides.
+    fn decide(&self, hay: &[u8]) -> u8 {
+        let sample = &hay[..hay.len().min(SAMPLE)];
         let mut bits = 0u8;
         for (i, n) in self.needles.iter().enumerate() {
-            if n.len() >= PAIR_MIN && count(sample, n[0]) * PAIR_DENSITY >= sample.len() {
+            if n.len() >= PAIR_MIN && memchr(sample, n[0], 0).is_some() {
                 bits |= 1 << i;
             }
         }
-        Some(bits)
+        bits
     }
 
     /// The earliest needle at or after `from`, as its offset and its index in [`Self::needles`].
@@ -146,13 +132,7 @@ impl Prefilter {
         if from > hay.len() {
             return None;
         }
-        let mut state = self.state.load(Ordering::Relaxed);
-        if state & DECIDED == 0 {
-            if let Some(bits) = self.decide(hay, from) {
-                state = bits | DECIDED;
-                self.state.store(state, Ordering::Relaxed);
-            }
-        }
+        let state = self.decide(hay);
         // One needle whose leading byte is rare needs no mask at all: [`memchr`] is the same
         // scan with three fewer operations per block.
         if state & 1 == 0 && self.needles.len() == 1 {
@@ -489,7 +469,10 @@ unsafe fn find_pair_sse2(
     while i + wide + 16 <= len {
         let pa = unsafe { _mm_loadu_si128(ptr.add(i + a_off) as *const __m128i) };
         let pb = unsafe { _mm_loadu_si128(ptr.add(i + b_off) as *const __m128i) };
-        let cand = _mm_movemask_epi8(_mm_and_si128(_mm_cmpeq_epi8(pa, wa), _mm_cmpeq_epi8(pb, wb))) as u32;
+        let cand = _mm_movemask_epi8(_mm_and_si128(
+            _mm_cmpeq_epi8(pa, wa),
+            _mm_cmpeq_epi8(pb, wb),
+        )) as u32;
         if cand != 0 {
             return Some(i + cand.trailing_zeros() as usize);
         }
@@ -798,6 +781,85 @@ mod tests {
         assert!(Prefilter::new(Vec::new()).is_none());
         assert!(Prefilter::new(vec![Vec::new()]).is_none());
         assert!(Prefilter::new((0..5).map(|_| vec![b'x']).collect()).is_none());
+    }
+
+    /// The pair filter against the same answer a byte at a time, over every length and every
+    /// offset pair a needle can carry. Offsets far apart are included because the two loads are
+    /// independent, and lengths around one block and one block plus an offset, where the vector
+    /// loop hands over to the tail.
+    #[test]
+    fn the_pair_filter_agrees_with_a_byte_at_a_time_scan() {
+        let mut big = vec![b'.'; 300];
+        for at in [
+            0usize, 1, 30, 31, 32, 33, 62, 63, 64, 65, 126, 127, 128, 200, 255, 299,
+        ] {
+            big[at] = b'a';
+        }
+        for at in [3usize, 32, 64, 100, 200] {
+            if at + 41 < big.len() {
+                big[at + 41] = b'z';
+            }
+        }
+        for len in [
+            0usize, 1, 2, 3, 16, 17, 31, 33, 64, 65, 100, 130, 200, 299, 300,
+        ] {
+            let hay = &big[..len];
+            for (a_off, b_off) in [
+                (0usize, 1usize),
+                (1, 0),
+                (0, 0),
+                (2, 5),
+                (0, 31),
+                (31, 0),
+                (41, 3),
+                (3, 41),
+            ] {
+                let wide = a_off.max(b_off);
+                for (a, b) in [(b'a', b'z'), (b'a', b'a'), (b'z', b'a')] {
+                    for from in 0..=len + 1 {
+                        let want = (from..len).find(|&p| {
+                            p + wide < len && hay[p + a_off] == a && hay[p + b_off] == b
+                        });
+                        assert_eq!(
+                            find_pair(hay, a, a_off, b, b_off, from),
+                            want,
+                            "len {len} offsets {a_off}/{b_off} bytes {a}/{b} from {from}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The pairing decision is taken from the haystack in hand and never kept, so the same
+    /// needle set over two corpora with different byte distributions decides differently for
+    /// each — and answers the same matches either way.
+    #[test]
+    fn the_prefilter_decides_per_haystack_and_answers_the_same() {
+        let needles = vec![b"abc".to_vec(), b"ac".to_vec()];
+        let pf = Prefilter::new(needles.clone()).unwrap();
+        // One corpus has both leading bytes on every other byte; the other has neither until
+        // the needles it holds, well past the sampled prefix.
+        let dense = b"aabbcc..".repeat(40);
+        let mut sparse = b"xyzw..".repeat(40);
+        sparse.extend_from_slice(b"..abc..ac..");
+        assert_ne!(
+            pf.decide(&dense),
+            0,
+            "a haystack full of the leading bytes pairs"
+        );
+        assert_eq!(pf.decide(&sparse), 0, "a haystack without them does not");
+        for hay in [&dense[..], &sparse[..]] {
+            for from in 0..=hay.len() {
+                let want = (from..hay.len()).find_map(|at| {
+                    needles
+                        .iter()
+                        .position(|n| hay[at..].starts_with(n))
+                        .map(|i| (at, i))
+                });
+                assert_eq!(pf.find_any(hay, from), want, "from {from}");
+            }
+        }
     }
 
     #[test]

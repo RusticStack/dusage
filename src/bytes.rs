@@ -416,7 +416,13 @@ fn partner<C: Case>(needle: &[u8], anchor: usize) -> Option<usize> {
 /// needle" into "the rarest byte *and* the rarest byte near it", which is where the million
 /// window compares of a tree-wide search go.
 #[inline]
-fn search_pair<C: Case>(hay: &[u8], needle: &[u8], from: usize, a: usize, b: usize) -> Option<usize> {
+fn search_pair<C: Case>(
+    hay: &[u8],
+    needle: &[u8],
+    from: usize,
+    a: usize,
+    b: usize,
+) -> Option<usize> {
     let last = hay.len() - needle.len();
     let vectors = C::SENSITIVE && crate::simd::vectorized();
     let mut at = from;
@@ -721,8 +727,8 @@ fn search<C: Case>(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         return find_match::<C>(hay, needle[0], from, hay.len() - 1);
     }
     let anchor = anchor::<C>(needle);
-    let skips = (n >= SKIP_MIN_LEN && hay.len() - from >= SKIP_MIN_HAY)
-        .then(|| Skip::build::<C>(needle));
+    let skips =
+        (n >= SKIP_MIN_LEN && hay.len() - from >= SKIP_MIN_HAY).then(|| Skip::build::<C>(needle));
     let partner = pair_plan::<C>(needle, anchor);
     search_planned::<C>(hay, needle, from, anchor, partner, skips.as_ref())
 }
@@ -1924,6 +1930,141 @@ mod tests {
                     memmem_from(hay, needle, from),
                     naive(&hay[from..], needle).map(|p| from + p)
                 );
+            }
+        }
+    }
+
+    /// The search from `from` a byte at a time, which is the reference every plan this module
+    /// can choose has to answer to.
+    fn brute_from(hay: &[u8], needle: &[u8], from: usize, ci: bool) -> Option<usize> {
+        if from > hay.len() {
+            return None;
+        }
+        let n = needle.len();
+        if n == 0 {
+            return Some(from);
+        }
+        let last = hay.len().checked_sub(n)?;
+        (from..=last).find(|&p| match ci {
+            true => hay[p..p + n].eq_ignore_ascii_case(needle),
+            false => &hay[p..p + n] == needle,
+        })
+    }
+
+    /// Every entry point of the prepared [`Finder`], and the free functions that share its plan,
+    /// against [`brute_from`], over haystacks built to cross the boundaries the plan divides on:
+    /// the 32-byte block the pair filter steps by, the 128-byte haystack length from which its
+    /// vector loop runs, the 64-byte needle length at which Horspool takes over, and the ends of
+    /// the buffer. Needles are ASCII, non-ASCII and longer than the haystack; matches are
+    /// planted at the start, at a block edge and at the end.
+    #[test]
+    fn finder_entry_points_agree_with_the_brute_force_scan() {
+        // Enough for accidental repeats, and two bytes above 0x80 so the fold never reaches a
+        // byte it does not own.
+        const POOL: &[u8] = b"abAB cC.-_\xc3\xa9\x00";
+        let mut rng = Lcg::new(0x51ED_0A77);
+        let mut cases = 0usize;
+        for n in [1usize, 2, 3, 5, 8, 15, 16, 17, 32, 33, 40, 63, 64, 65, 127] {
+            for len in [0usize, 3, 33, 64, 127, 128, 129, 200, 512, 513] {
+                let needle: Vec<u8> = (0..n)
+                    .map(|_| POOL[rng.below(POOL.len() as u32) as usize])
+                    .collect();
+                let mut hay: Vec<u8> = (0..len)
+                    .map(|_| POOL[rng.below(POOL.len() as u32) as usize])
+                    .collect();
+                // One planted copy, at an offset that puts a block edge inside the needle when
+                // the haystack has room for it.
+                if n <= len {
+                    let at = (31 + n % 3).min(len - n);
+                    hay[at..at + n].copy_from_slice(&needle);
+                }
+                for ci in [false, true] {
+                    let finder = Finder::new(&needle, ci);
+                    assert_eq!(finder.len(), n);
+                    assert_eq!(finder.is_empty(), n == 0);
+                    let mut froms = vec![
+                        0,
+                        1,
+                        15,
+                        16,
+                        31,
+                        32,
+                        33,
+                        63,
+                        64,
+                        65,
+                        126,
+                        127,
+                        128,
+                        129,
+                        len.saturating_sub(1),
+                        len,
+                        len + 1,
+                    ];
+                    if len <= 160 {
+                        froms.extend(0..=len);
+                    }
+                    for from in froms {
+                        let want = brute_from(&hay, &needle, from, ci);
+                        let label = format!("n {n} len {len} from {from} ci {ci}");
+                        assert_eq!(finder.find_from(&hay, from), want, "{label}");
+                        if from == 0 {
+                            assert_eq!(finder.find(&hay), want, "{label}");
+                        }
+                        if ci {
+                            assert_eq!(memmem_ci_from(&hay, &needle, from), want, "{label}");
+                            if from == 0 {
+                                assert_eq!(memmem_ci(&hay, &needle), want, "{label}");
+                            }
+                        } else {
+                            assert_eq!(memmem_from(&hay, &needle, from), want, "{label}");
+                            if from == 0 {
+                                assert_eq!(memmem(&hay, &needle), want, "{label}");
+                                assert_eq!(
+                                    memmem_word(&hay, &needle, from),
+                                    naive_words(&hay, &needle, from),
+                                    "{label}"
+                                );
+                            }
+                        }
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert!(cases > 10_000, "only {cases} cases ran");
+    }
+
+    /// Folded matches planted so a block edge falls inside them: the pair filter's second byte
+    /// can land on either side of the vector load, and the fold has to hold across it.
+    #[test]
+    fn folded_matches_straddle_every_block_edge() {
+        for n in 2..=8usize {
+            let upper: Vec<u8> = (0..n)
+                .map(|k| if k % 2 == 0 { b'A' } else { b'B' })
+                .collect();
+            let lower: Vec<u8> = (0..n)
+                .map(|k| if k % 2 == 0 { b'a' } else { b'b' })
+                .collect();
+            // A mix of the two, so the match is neither wholly upper nor wholly lower case.
+            let folded: Vec<u8> = (0..n)
+                .map(|k| if k % 2 == 0 { b'A' } else { b'b' })
+                .collect();
+            for at in [31usize, 32, 33, 63, 64, 65, 126, 127, 128, 129, 200] {
+                let mut hay = vec![b'-'; at + n + 64];
+                hay[at..at + n].copy_from_slice(&lower);
+                let finder = Finder::new(&upper, true);
+                for from in 0..=at + 1 {
+                    let want = Some(at).filter(|&p| p >= from);
+                    assert_eq!(
+                        finder.find_from(&hay, from),
+                        want,
+                        "n {n} at {at} from {from}"
+                    );
+                    assert_eq!(memmem_ci_from(&hay, &upper, from), want);
+                    assert_eq!(brute_from(&hay, &upper, from, true), want);
+                }
+                assert_eq!(Finder::new(&folded, true).find(&hay), Some(at));
             }
         }
     }
