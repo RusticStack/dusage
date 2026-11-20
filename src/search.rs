@@ -13,12 +13,12 @@ use crate::model::{ErrorCounts, Stat};
 use crate::native::enumerate;
 use crate::par_for_each;
 use crate::pattern::{Match, Pattern};
+use std::borrow::Cow;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read};
-use std::borrow::Cow;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -479,7 +479,13 @@ fn allow(rules: &IgnoreRules, o: &SearchOptions, rel: &str, name: &str, is_dir: 
 
 /// Read one directory: apply the hidden, ignore, glob, depth and filesystem filters, and
 /// return the entries that survive together with the subdirectories to visit next.
-fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, paths: AbsPath, ids: &Ids) -> JobOut {
+fn read_job(
+    job: &WalkJob,
+    o: &SearchOptions,
+    want_dirs: bool,
+    paths: AbsPath,
+    ids: &Ids,
+) -> JobOut {
     let mut out = JobOut {
         cands: Vec::new(),
         stats: Stats::default(),
@@ -542,8 +548,8 @@ fn read_job(job: &WalkJob, o: &SearchOptions, want_dirs: bool, paths: AbsPath, i
         }
         if is_dir {
             let descend = o.max_depth.is_none_or(|m| job.depth + 1 < m);
-            let mut child = (want_dirs || descend || o.one_filesystem)
-                .then(|| child_path(&job.dir, &e.name));
+            let mut child =
+                (want_dirs || descend || o.one_filesystem).then(|| child_path(&job.dir, &e.name));
             if o.one_filesystem
                 && child
                     .as_deref()
@@ -2149,7 +2155,11 @@ fn walk_stream(scans: &Scans, o: &SearchOptions, window: usize) -> Stats {
     // Directories are read here, in the order their entries print: a content search is bound
     // by the files, so reading listings ahead of the scan only bought wakeups.
     for job in jobs {
-        let cursor = open_cursor(read_job(&job, o, true, AbsPath::Fill, &ids), &mut stats, seq);
+        let cursor = open_cursor(
+            read_job(&job, o, true, AbsPath::Fill, &ids),
+            &mut stats,
+            seq,
+        );
         seq += 1;
         if cursor.head().is_some() {
             heap.push(Reverse(Flat::new(cursor)));
@@ -2171,7 +2181,11 @@ fn walk_stream(scans: &Scans, o: &SearchOptions, window: usize) -> Stats {
             // Nothing prints for a directory: opening it is what puts the entries below it in
             // their place in the order.
             let Some(job) = kid else { continue };
-            let child = open_cursor(read_job(&job, o, true, AbsPath::Fill, &ids), &mut stats, seq);
+            let child = open_cursor(
+                read_job(&job, o, true, AbsPath::Fill, &ids),
+                &mut stats,
+                seq,
+            );
             seq += 1;
             if child.head().is_some() {
                 heap.push(Reverse(Flat::new(child)));

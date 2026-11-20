@@ -8,7 +8,7 @@ use crate::glob::Glob;
 use crate::pattern::Pattern;
 use crate::report;
 use crate::search::{
-    search, walk_expr, walk_paths, Candidate, AbsPath, Scope, SearchOptions, Segment, SortKey,
+    search, walk_expr, walk_paths, AbsPath, Candidate, Scope, SearchOptions, Segment, SortKey,
 };
 use std::io::Read;
 use std::io::{IsTerminal, Write};
