@@ -2104,6 +2104,20 @@ fn expr_tree(tag: &str) -> (Fixture, PathBuf) {
     (f, dir)
 }
 
+#[cfg(unix)]
+#[test]
+fn find_expression_samefile_matches_the_other_name_of_an_inode() {
+    let (_f, dir) = expr_tree("expr_samefile");
+    // A hardlink pair: same device and inode, so both names answer `-samefile`.
+    fs::hard_link(dir.join("a.rs"), dir.join("linked.rs")).unwrap();
+    let o = find_at(&dir, &["-samefile", dir.join("a.rs").to_str().unwrap()]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains(&shown(&dir, "a.rs")), "{out}");
+    assert!(out.contains(&shown(&dir, "linked.rs")), "{out}");
+    assert_eq!(out.lines().count(), 2, "{out}");
+}
+
 #[test]
 fn find_expression_name_or_not_and_parentheses() {
     let (_f, dir) = expr_tree("expr_or");

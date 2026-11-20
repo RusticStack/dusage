@@ -425,6 +425,17 @@ fn time_prints_a_stamp_between_size_and_path() {
     assert_eq!(stamp.as_bytes()[4], b'-', "{line}");
     assert_eq!(stamp.as_bytes()[10], b' ', "{line}");
     assert_eq!(stamp.as_bytes()[13], b':', "{line}");
+    // `iso` is the date alone, which is what GNU du prints for `--time-style=iso`.
+    let iso = ok(&du(&[
+        "--time",
+        "--time-style=iso",
+        "-s",
+        root.to_str().unwrap(),
+    ]));
+    let stamp = iso.lines().next().unwrap().split('\t').nth(1).unwrap();
+    assert_eq!(stamp.len(), 10, "{stamp}");
+    assert_eq!(stamp.as_bytes()[4], b'-', "{stamp}");
+    assert_eq!(stamp.as_bytes()[7], b'-', "{stamp}");
     // A custom format drops the constant parts it was not asked for.
     let c = ok(&du(&[
         "--time",

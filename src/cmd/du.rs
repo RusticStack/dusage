@@ -771,7 +771,8 @@ fn stamp(t: SystemTime, style: &TimeStyle) -> String {
     let (y, mo, d, h, mi, s) = civil(secs);
     match style {
         TimeStyle::Long => format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}"),
-        TimeStyle::Iso => format!("{mo:02}-{d:02} {h:02}:{mi:02}"),
+        // GNU du's `iso` is the date alone; `long-iso` is this plus the minutes.
+        TimeStyle::Iso => format!("{y:04}-{mo:02}-{d:02}"),
         TimeStyle::Custom(f) => {
             let mut out = String::with_capacity(f.len() + 8);
             let mut it = f.chars();

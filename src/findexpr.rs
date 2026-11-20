@@ -468,17 +468,15 @@ impl Node {
 impl Test {
     fn needs(&self, settings: &Settings, out: &mut Needs) {
         match self {
-            // Name, path, kind and the reference file's own data: nothing this entry has.
-            Test::Glob { .. }
-            | Test::Regex(_)
-            | Test::Type(_)
-            | Test::SameFile { .. }
-            | Test::Unsupported(_) => {}
+            // Name, path and kind: nothing this entry's stat holds. `-samefile` is not in
+            // this group: it compares device and inode, so the walk has to read them.
+            Test::Glob { .. } | Test::Regex(_) | Test::Type(_) | Test::Unsupported(_) => {}
             // Without `-follow` the target's kind says what the link points at.
             Test::XType(_) => out.link |= !settings.follow,
             // The target text itself, which only `-lname` reads for its own sake.
             Test::LinkGlob(_) => out.link = true,
             Test::Size { .. }
+            | Test::SameFile { .. }
             | Test::Empty
             | Test::Perm(_)
             | Test::User(_)
@@ -2062,6 +2060,8 @@ mod tests {
             &["-user", "root"],
             &["-links", "+1"],
             &["-inum", "5"],
+            // `-samefile` compares device and inode, which come from the same stat.
+            &["-samefile", "Cargo.toml"],
             &["-empty"],
             &["-fstype", "ext4"],
             &["-printf", "%s"],
