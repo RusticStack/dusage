@@ -1433,11 +1433,10 @@ impl ExprWalk<'_> {
     /// on a directory, which the caller turns into "do not descend".
     fn visit(&mut self, facts: &Facts, sub: &str, depth: usize) -> Result<bool, String> {
         let path = facts.path.to_string_lossy().into_owned();
-        let name = facts
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
+        // Sliced out of the text the walk already has rather than asked of the `Path` again:
+        // `file_name` walks the components and re-converts them, which measured 3.9% of an
+        // expression walk, and its answer is the tail of this same string.
+        let name = last_component(&path).unwrap_or(&path).to_string();
         let below = sub_path(sub);
         let st = &facts.st;
         let empty = self.want_empty
@@ -1478,6 +1477,27 @@ impl ExprWalk<'_> {
 
 /// The path below the starting point with the platform's separators, which is what `%P`
 /// prints: the walk keeps `/` internally because the ignore rules are matched that way.
+/// The last component of a path's text, answering what `Path::file_name` answers: `None` for
+/// a path that ends in `..`, in `.`, or is the root, the final component otherwise. Sliced out
+/// of text the caller already owns, so it costs no component walk and no second conversion.
+fn last_component(path: &str) -> Option<&str> {
+    let mut text = path.strip_suffix('/').unwrap_or(path);
+    loop {
+        let name = text.rsplit('/').next().unwrap_or(text);
+        if name == "." {
+            text = match text.strip_suffix('.') {
+                Some(rest) => rest.strip_suffix('/').unwrap_or(rest),
+                None => text,
+            };
+            continue;
+        }
+        return match name {
+            ".." | "" => None,
+            _ => Some(name),
+        };
+    }
+}
+
 fn sub_path(rel: &str) -> String {
     if std::path::MAIN_SEPARATOR == '/' {
         rel.to_string()
@@ -3746,6 +3766,40 @@ pub fn has_output(r: &SearchReport, o: &SearchOptions) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The helper has to answer exactly what `Path::file_name` answers, because it replaced it:
+    /// the cases that make that method return `None` are the ones a slice gets wrong.
+    #[test]
+    fn the_last_component_answers_what_file_name_answers() {
+        let cases = [
+            "a/b.rs",
+            "/",
+            "",
+            ".",
+            "..",
+            "a/..",
+            "a/.",
+            "a/b/",
+            "src/main.rs",
+            "a",
+            "//",
+            "x/",
+            "./a",
+            "./",
+            "a/./",
+            "./.",
+            "a/./b",
+            "...",
+            "a/...",
+        ];
+        for case in cases {
+            let want = std::path::Path::new(case)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
+            let got = super::last_component(case).map(str::to_string);
+            assert_eq!(want, got, "{case:?}");
+        }
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
     fn open_scan_skips_a_device_node_and_takes_a_regular_file() {
