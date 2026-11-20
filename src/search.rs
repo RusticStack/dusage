@@ -378,6 +378,69 @@ struct Found {
     kind: Kind,
 }
 
+/// The text of a path or a name for the report.
+///
+/// A path is valid UTF-8 on essentially every tree this walks, and `to_str` says so with one
+/// validating scan; `to_string_lossy` runs its chunk iterator over the bytes either way, which
+/// is several times the cost for the answer it usually reaches.
+fn path_text(p: &Path) -> Cow<'_, str> {
+    match p.to_str() {
+        Some(s) => Cow::Borrowed(s),
+        None => p.to_string_lossy(),
+    }
+}
+
+fn name_text(n: &OsStr) -> Cow<'_, str> {
+    match n.to_str() {
+        Some(s) => Cow::Borrowed(s),
+        None => n.to_string_lossy(),
+    }
+}
+
+/// The window of bytes a line is expected to fit in.
+///
+/// The newline that starts a match's line is a few words away, and `bytes::rfind_byte` hands
+/// its work to a vector scan that pays its setup before the first byte is read: inside this
+/// window the eight-bytes-at-a-time walk below is the cheaper way to the same answer, and a
+/// line longer than it falls back to that scan.
+const NEAR: usize = 1024;
+
+/// Bits set where a byte of `w` is `b`.
+#[inline]
+fn byte_mask(w: u64, b: u8) -> u64 {
+    const LOW: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let x = w ^ (u64::from(b) * LOW);
+    x.wrapping_sub(LOW) & !x & HIGH
+}
+
+#[inline]
+fn word_at(hay: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(hay[at..at + 8].try_into().expect("eight bytes"))
+}
+
+/// The last `b` before `before` and within [`NEAR`] bytes of it.
+#[inline]
+fn rfind_near(hay: &[u8], b: u8, before: usize) -> Option<usize> {
+    let end = before.min(hay.len());
+    let start = end.saturating_sub(NEAR);
+    let mut at = end;
+    while at >= start + 8 {
+        let mask = byte_mask(word_at(hay, at - 8), b);
+        if mask != 0 {
+            return Some(at - 8 + (63 - mask.leading_zeros() as usize) / 8);
+        }
+        at -= 8;
+    }
+    while at > start {
+        at -= 1;
+        if hay[at] == b {
+            return Some(at);
+        }
+    }
+    None
+}
+
 fn join_rel(rel: &str, name: &str) -> String {
     if rel.is_empty() {
         return name.to_string();
@@ -508,12 +571,7 @@ fn read_job(
     out.stats.dirs_walked += 1;
     let rel = job.rel.as_str();
     for e in &ents {
-        // A name is usually valid UTF-8, and `to_str` says so with one validating scan;
-        // `to_string_lossy` would build its lossy iterator over every name either way.
-        let name = match e.name.to_str() {
-            Some(s) => Cow::Borrowed(s),
-            None => e.name.to_string_lossy(),
-        };
+        let name = name_text(&e.name);
         let child_rel = join_rel(rel, &name);
         let is_dir = e.is_dir() && !e.is_reparse();
         // A reparse point or symlink is followed only when asked: `--follow` reads the
@@ -674,7 +732,7 @@ fn root_jobs(o: &SearchOptions, root_dev: u64, ids: &Ids) -> (Vec<Found>, Vec<Wa
             Ok(md) if md.is_file() => {
                 let rel = root
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
+                    .map(|n| name_text(n).into_owned())
                     .unwrap_or_default();
                 all.push(Found {
                     cand: Candidate {
@@ -1348,7 +1406,7 @@ impl ExprWalk<'_> {
             if settings.maxdepth.is_some_and(|m| depth as u64 > m) {
                 continue;
             }
-            let name = e.name.to_string_lossy().into_owned();
+            let name = name_text(&e.name);
             let child_rel = join_rel(rel, &name);
             let child = dir.join(&e.name);
             // A symlink is an entry of its own, as it is for find; it is only ever walked
@@ -1432,11 +1490,11 @@ impl ExprWalk<'_> {
     /// Evaluate one entry and hand its actions to the sink. `Ok(false)` means `-prune` fired
     /// on a directory, which the caller turns into "do not descend".
     fn visit(&mut self, facts: &Facts, sub: &str, depth: usize) -> Result<bool, String> {
-        let path = facts.path.to_string_lossy().into_owned();
+        let path = path_text(facts.path).into_owned();
         let name = facts
             .path
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
+            .map(|n| name_text(n).into_owned())
             .unwrap_or_else(|| path.clone());
         let below = sub_path(sub);
         let st = &facts.st;
@@ -1550,7 +1608,7 @@ fn binary_hit(path: &Path, o: &SearchOptions, stats: &mut Stats, found: bool) ->
         return None;
     }
     Some(FileHits {
-        path: path.to_string_lossy().into_owned(),
+        path: path_text(path).into_owned(),
         hits: Vec::new(),
         matches: u64::from(found),
         total: u64::from(found),
@@ -1766,7 +1824,7 @@ impl Flat {
     fn new(cursor: Cursor) -> Flat {
         let key = cursor
             .head()
-            .map(|f| f.cand.path.to_string_lossy().into_owned())
+            .map(|f| path_text(&f.cand.path).into_owned())
             .unwrap_or_default();
         Flat { cursor, key }
     }
@@ -1776,7 +1834,7 @@ impl Flat {
         let found = self.cursor.items.pop_front();
         if let Some(head) = self.cursor.head() {
             self.key.clear();
-            self.key.push_str(&head.cand.path.to_string_lossy());
+            self.key.push_str(&path_text(&head.cand.path));
         }
         found
     }
@@ -2593,7 +2651,7 @@ fn scan_multiline(
     // The whole file at once: `find_all_in` decides once, rather than once per match,
     // whether a Unicode pattern has to read these bytes as characters.
     let found = o.pattern.find_all_in(&data, usize::MAX);
-    let name = || path.to_string_lossy().into_owned();
+    let name = || path_text(path).into_owned();
     if found.is_empty() {
         let wants = o.files_without_matches || (o.include_zero && o.count) || o.passthru;
         return Ok(wants.then(|| FileHits {
@@ -2661,7 +2719,7 @@ fn scan_multiline(
 /// True when `--pre-glob` names this file. The walk already narrowed the set; this is only
 /// for the mode that runs a command per path.
 fn pre_matches(path: &Path, globs: &[String]) -> bool {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let name = path.file_name().map(|n| name_text(n).into_owned());
     globs.iter().any(|g| {
         crate::glob::Glob::new(g)
             .map(|g| name.as_deref().is_some_and(|n| g.matches(n, false)))
@@ -2758,7 +2816,7 @@ fn scan_records(
     if matches == 0 {
         let wants = o.files_without_matches || (o.include_zero && o.count);
         return Ok(wants.then(|| FileHits {
-            path: path.to_string_lossy().into_owned(),
+            path: path_text(path).into_owned(),
             hits: Vec::new(),
             matches: 0,
             total: 0,
@@ -2773,7 +2831,7 @@ fn scan_records(
         present(&mut hits, o, &[]);
     }
     Ok(Some(FileHits {
-        path: path.to_string_lossy().into_owned(),
+        path: path_text(path).into_owned(),
         hits: if keep { Vec::new() } else { hits },
         matches,
         total,
@@ -3149,14 +3207,19 @@ impl<'a> Scanner<'a> {
     /// number pays it (`-n`, `--vimgrep`, `--column`, `--json`, colour), and the count of the
     /// block it hands the next block is the sum of those counts plus the tail after the last
     /// reported line, rather than a second pass over the whole block.
+    ///
+    /// The start of a reported line is the last newline before its match, which `rfind_near`
+    /// finds in the bytes of that line rather than by handing the whole block to a vector scan
+    /// that has to set itself up first.
     fn block_lines(&mut self, body: &[u8], base: u64) -> u64 {
         let numbers = self.numbered();
-        // Newlines in `body[..counted_to]`. `base` is the number of the line before the
-        // block's first one, so the line that begins at `counted_to` is `base + counted + 1`.
+        // `line_start` is the first byte of a line, `counted` the newlines before it. `base` is
+        // the number of the line before the block's first one, so the line that begins at
+        // `line_start` is `base + counted + 1`.
         let mut counted = 0u64;
         let mut counted_to = 0usize;
+        let mut line_start = 0usize;
         let mut line_no = base;
-        let mut line_start = 0;
         let mut pos = 0;
         // A block-safe regex is found by the forward automaton alone, which is a single pass
         // over bytes no match touches; the exact span of the line it lands on is worked out
@@ -3174,20 +3237,23 @@ impl<'a> Scanner<'a> {
                 .block_match(body, pos)
                 .map(|m| (m.start, m.end))
         } {
+            let ls = match rfind_near(body, b'\n', hit) {
+                Some(i) => i + 1,
+                // The window covered the whole prefix of the block, so there is no newline
+                // before the match at all.
+                None if hit < NEAR => line_start,
+                None => match bytes::rfind_byte(body, b'\n', hit) {
+                    Some(i) => i + 1,
+                    None => line_start,
+                },
+            };
             // A match that runs across a newline is not a line match: the per-line semantics
             // never see the newline at all, so a class like `[^a-z]` must not match one.
             if bytes::find_byte(&body[hit..stop_at.max(hit)], b'\n', 0).is_some() {
                 pos = hit + 1;
-                line_start = match bytes::rfind_byte(body, b'\n', hit) {
-                    Some(i) => i + 1,
-                    None => 0,
-                };
+                line_start = ls;
                 continue;
             }
-            let ls = match bytes::rfind_byte(body, b'\n', hit) {
-                Some(i) => i + 1,
-                None => line_start,
-            };
             let le = match bytes::find_byte(body, b'\n', hit) {
                 Some(i) => i,
                 None => body.len(),
@@ -3420,7 +3486,7 @@ fn finished(
         // `--passthru` prints the file anyway, so its lines are kept even with no match.
         let wants_zero = o.files_without_matches || (o.include_zero && o.count) || (o.passthru);
         let hit = wants_zero.then(|| FileHits {
-            path: path.to_string_lossy().into_owned(),
+            path: path_text(path).into_owned(),
             hits: if o.passthru {
                 std::mem::take(&mut sc.hits)
             } else {
@@ -3437,7 +3503,7 @@ fn finished(
     stats.matches += sc.matches;
     let hits = std::mem::take(&mut sc.hits);
     let out = FileHits {
-        path: path.to_string_lossy().into_owned(),
+        path: path_text(path).into_owned(),
         hits,
         matches: sc.matches,
         total: sc.total,
