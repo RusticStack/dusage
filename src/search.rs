@@ -522,7 +522,16 @@ fn root_rules(o: &SearchOptions, root: &Path) -> Arc<IgnoreRules> {
 /// Whether a walk may report one entry: the hidden and ignore rules, then the `-g` globs.
 /// Both walks answer it here, so `find <glob>` and `find <path> <expression>` agree about
 /// which paths exist for them.
-fn allow(rules: &IgnoreRules, o: &SearchOptions, rel: &str, name: &str, is_dir: bool) -> bool {
+/// `dir_hit` is [`IgnoreRules::builtin_under`] for the directory holding the entry, worked
+/// out once per directory rather than once per entry.
+fn allow(
+    rules: &IgnoreRules,
+    o: &SearchOptions,
+    rel: &str,
+    name: &str,
+    is_dir: bool,
+    dir_hit: bool,
+) -> bool {
     if !o.hidden && name.starts_with('.') {
         // A positive glob re-includes a dotfile it names, as rg does; directories still
         // need `--hidden` so the walk never wanders into `.git`.
@@ -534,7 +543,7 @@ fn allow(rules: &IgnoreRules, o: &SearchOptions, rel: &str, name: &str, is_dir: 
     // A positive glob switches the ignore files off (`-g '*.log'` finds a file a
     // `.gitignore` hides), exactly as ripgrep does; exclusions always apply.
     let globs_win = rules.whitelisted() || o.no_ignore;
-    if !globs_win && rules.is_ignored(rel, is_dir) {
+    if !globs_win && rules.is_ignored_under(dir_hit, name, rel, is_dir) {
         return false;
     }
     rules.glob_allows(rel, is_dir)
@@ -570,6 +579,7 @@ fn read_job(
     }
     out.stats.dirs_walked += 1;
     let rel = job.rel.as_str();
+    let dir_hit = rules.builtin_under(rel);
     for e in &ents {
         let name = name_text(&e.name);
         let child_rel = join_rel(rel, &name);
@@ -600,7 +610,7 @@ fn read_job(
             out.stats.entries_ignored += 1;
             continue;
         }
-        if !allow(&rules, o, &child_rel, &name, is_dir) {
+        if !allow(&rules, o, &child_rel, &name, is_dir, dir_hit) {
             out.stats.entries_ignored += 1;
             continue;
         }
@@ -1399,6 +1409,7 @@ impl ExprWalk<'_> {
         let settings = self.expr.settings();
         let mindepth = settings.mindepth.unwrap_or(0) as usize;
         let depth_first = settings.depth_first;
+        let dir_hit = rules.builtin_under(rel);
         for e in &ents {
             if self.stop {
                 break;
@@ -1421,7 +1432,7 @@ impl ExprWalk<'_> {
                     }
                 }
             }
-            if !allow(&rules, self.o, &child_rel, &name, is_dir) {
+            if !allow(&rules, self.o, &child_rel, &name, is_dir, dir_hit) {
                 self.out.stats.entries_ignored += 1;
                 continue;
             }
@@ -1490,11 +1501,11 @@ impl ExprWalk<'_> {
     /// Evaluate one entry and hand its actions to the sink. `Ok(false)` means `-prune` fired
     /// on a directory, which the caller turns into "do not descend".
     fn visit(&mut self, facts: &Facts, sub: &str, depth: usize) -> Result<bool, String> {
-        let path = path_text(facts.path).into_owned();
-        // Sliced out of the text just made rather than asked of the `Path` again: `file_name`
-        // walks the components and converts them a second time, which measured 3.9% of an
-        // expression walk, and its answer is the tail of this same string.
-        let name = last_component(&path).unwrap_or(&path).to_string();
+        // Borrowed, not owned: an entry that already converts every visit costs two heap
+        // allocations and their frees per entry, which was a third of an expression walk.
+        let path = path_text(facts.path);
+        let path = &*path;
+        let name = last_component(path).unwrap_or(path);
         let below = sub_path(sub);
         let st = &facts.st;
         let empty = self.want_empty
@@ -1520,7 +1531,7 @@ impl ExprWalk<'_> {
             fs: self.fs_names.get(&st.dev).map(String::as_str),
             target: facts.target.as_deref(),
             target_kind: facts.target_kind,
-            ..findexpr::Entry::new(&path, &name, &below, st.kind)
+            ..findexpr::Entry::new(path, name, &below, st.kind)
         };
         let verdict = self.expr.eval(&entry, self.ctx, &mut *self.sink)?;
         if verdict.selected {
@@ -1565,11 +1576,12 @@ fn last_component(path: &str) -> Option<&str> {
     }
 }
 
-fn sub_path(rel: &str) -> String {
+/// `rel` with this platform's separators, borrowed where it already has them.
+fn sub_path(rel: &str) -> Cow<'_, str> {
     if std::path::MAIN_SEPARATOR == '/' {
-        rel.to_string()
+        Cow::Borrowed(rel)
     } else {
-        rel.replace('/', std::path::MAIN_SEPARATOR_STR)
+        Cow::Owned(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
     }
 }
 

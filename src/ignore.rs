@@ -308,6 +308,24 @@ impl IgnoreRules {
         false
     }
 
+    /// Whether `name` is skipped, given what the directory holding it already knows: the
+    /// same answer [`IgnoreRules::is_ignored`] gives for the child's path, without building
+    /// a view over that path for every entry. With no ignore file stacked — most walks — the
+    /// only rule is the builtin name list, and its answer for the directory was settled once
+    /// for the whole directory rather than once per entry.
+    pub fn is_ignored_under(&self, dir_hit: bool, name: &str, rel: &str, is_dir: bool) -> bool {
+        if self.builtin && self.layers.is_empty() {
+            return dir_hit || builtin_name(name);
+        }
+        self.is_ignored_view(&PathView::new(rel), is_dir)
+    }
+
+    /// Whether a directory's own path is skipped by the builtin name list, which is what
+    /// [`IgnoreRules::is_ignored_under`] wants handed to it for that directory's entries.
+    pub fn builtin_under(&self, rel_dir: &str) -> bool {
+        self.builtin && builtin_hit(&PathView::new(rel_dir))
+    }
+
     /// The current layer depth, for [`pop_to`] when nothing is pushed.
     pub fn mark(&self) -> usize {
         self.layers.len()
@@ -667,6 +685,47 @@ mod tests {
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// The directory-scoped answer is only worth its shortcut if it is the same answer:
+    /// every path below either spelling of the builtin list has to come out the same way
+    /// through `is_ignored_under` as through `is_ignored`.
+    #[test]
+    fn the_directory_scoped_answer_matches_the_per_path_one() {
+        let rules = IgnoreRules::new(true);
+        let paths = [
+            "",
+            "a",
+            "a/b",
+            "a/b/c",
+            "node_modules",
+            "node_modules/x",
+            "node_modules/x/y",
+            "src/node_modules/y",
+            "src/node_modules",
+            "src/node_modules/y/z",
+            ".git",
+            ".git/objects",
+            "a/.git/b",
+            "a/.gitish/b",
+            "target",
+            "a/target/debug/x",
+            "vendor",
+            "a/vendor",
+            "node_modules/x/node_modules/y",
+        ];
+        for rel in paths {
+            let (dir, name) = match rel.rfind('/') {
+                Some(at) => (&rel[..at], &rel[at + 1..]),
+                None => ("", rel),
+            };
+            let hit = rules.builtin_under(dir);
+            assert_eq!(
+                rules.is_ignored(rel, false),
+                rules.is_ignored_under(hit, name, rel, false),
+                "{rel:?}"
+            );
+        }
     }
 
     #[test]
