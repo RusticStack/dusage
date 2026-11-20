@@ -1715,11 +1715,110 @@ enum Place {
 #[derive(Debug)]
 struct Candidates {
     runs: Vec<(Vec<u8>, Place)>,
-    scan: crate::simd::Prefilter,
+    scan: Scan,
+}
+
+/// How a candidate scan finds its runs in a haystack. Both answer the earliest occurrence of
+/// any run; `One` answers a single run at index 0.
+#[derive(Debug)]
+enum Scan {
+    /// Several runs, in one vector pass for all of them.
+    Many(crate::simd::Prefilter),
+    /// One run, scanned for by its rarest byte and confirmed with an inline window compare.
+    One(OneRun),
+}
+
+/// A single run and the byte of it a scan looks for.
+#[derive(Debug)]
+struct OneRun {
+    run: Vec<u8>,
+    /// The offset in `run` of the byte to scan for: the one expected to be rarest in text.
+    anchor: usize,
+}
+
+impl Scan {
+    fn find_any(&self, hay: &[u8], from: usize) -> Option<(usize, usize)> {
+        match self {
+            Scan::Many(pre) => pre.find_any(hay, from),
+            Scan::One(one) => one.find_from(hay, from).map(|at| (at, 0)),
+        }
+    }
+}
+
+impl OneRun {
+    /// The earliest occurrence of the run at or after `from`.
+    ///
+    /// [`crate::simd::Prefilter`] answers this too, but confirming one of its candidates is a
+    /// window compare whose length is only known at run time — a `memcmp` call, about twenty
+    /// instructions for three bytes — and a run whose leading byte is common is a candidate
+    /// every hundred bytes or so: on `[A-Z][a-zA-Z0-9_]*\.go` over Go's own source, 1.8 million
+    /// candidates were confirmed to find 13 thousand occurrences, and the confirms were a third
+    /// of the whole run. Scanning for the rarest byte of the run and comparing the window with
+    /// three inline compares removes that cost, and the rarest byte is also what keeps the
+    /// candidates few when the above holds: the leading byte of a run is no clue to its rarity.
+    fn find_from(&self, hay: &[u8], from: usize) -> Option<usize> {
+        let (run, anchor) = (&self.run[..], self.anchor);
+        let mut at = from;
+        while at + run.len() <= hay.len() {
+            let p = crate::simd::memchr(hay, run[anchor], at + anchor)?;
+            let start = p - anchor;
+            if window_eq(hay, start, run) {
+                return Some(start);
+            }
+            at = start + 1;
+        }
+        None
+    }
+}
+
+/// How often a byte is expected in source text, `0` rarest. Only the ordering is used: it
+/// decides which byte of a run a scan looks for, so `\.go` is scanned for its `.` and its `o`
+/// is left to the window compare.
+fn rarity(b: u8) -> u8 {
+    match b {
+        b'e' | b't' | b'a' | b'o' | b'i' | b'n' | b's' | b'h' | b'r' | b' ' => 7,
+        b'\n' => 6,
+        b'd' | b'l' | b'u' | b'm' | b'c' => 5,
+        _ if b.is_ascii_digit() || b.is_ascii_lowercase() => 4,
+        b'\t' => 3,
+        _ if b.is_ascii_uppercase() => 3,
+        b'\r' => 2,
+        _ if b.is_ascii_punctuation() => 1,
+        _ => 0,
+    }
+}
+
+/// True when `run` occurs at `at`.
+#[inline]
+fn window_eq(hay: &[u8], at: usize, run: &[u8]) -> bool {
+    // Written as an index loop rather than a slice compare so that a run whose length is only
+    // known at run time stays a handful of loads instead of a `memcmp` call.
+    let Some(window) = hay.get(at..at + run.len()) else {
+        return false;
+    };
+    let mut i = 0;
+    while i < run.len() {
+        if window[i] != run[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 impl Candidates {
     fn new(runs: Vec<(Vec<u8>, Place)>) -> Option<Candidates> {
+        if let [(run, place)] = runs.as_slice() {
+            let anchor = (0..run.len()).min_by_key(|&i| rarity(run[i]))?;
+            let one = OneRun {
+                run: run.clone(),
+                anchor,
+            };
+            return Some(Candidates {
+                runs: vec![(run.clone(), *place)],
+                scan: Scan::One(one),
+            });
+        }
         let needles: Vec<Vec<u8>> = runs.iter().map(|(run, _)| run.clone()).collect();
         let scan = crate::simd::Prefilter::new(needles.clone())?;
         // The scan answers an index into its needles, which are sorted longest first; the runs
@@ -1729,7 +1828,10 @@ impl Candidates {
             let (_, place) = runs.iter().find(|(run, _)| run == needle)?;
             sorted.push((needle.clone(), *place));
         }
-        Some(Candidates { runs: sorted, scan })
+        Some(Candidates {
+            runs: sorted,
+            scan: Scan::Many(scan),
+        })
     }
 }
 
@@ -4715,6 +4817,76 @@ mod tests {
             "only {with_candidates} generated patterns had a candidate run"
         );
         assert!(checked > 2000, "only {checked} haystacks were compared");
+    }
+
+    #[test]
+    fn the_one_run_scan_agrees_with_the_finder() {
+        // The single-run candidate scan looks for one byte of the run and confirms the window
+        // inline; `Finder` answers the same question by a different route, so the two must
+        // return the same offset for every needle, every anchor offset and every haystack.
+        let mut seed = 0x4d59_5df4_d0f3_3173u64;
+        let mut pick = move |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        let alphabet = b"ab.go_zZ\n";
+        let mut compared = 0;
+        for _ in 0..400 {
+            let needle: Vec<u8> = (0..2 + pick(6))
+                .map(|_| alphabet[pick(alphabet.len())])
+                .collect();
+            let finder = crate::bytes::Finder::new(&needle, false);
+            let hay: Vec<u8> = (0..pick(40))
+                .map(|_| alphabet[pick(alphabet.len())])
+                .collect();
+            for anchor in 0..needle.len() {
+                let one = OneRun {
+                    run: needle.clone(),
+                    anchor,
+                };
+                for from in 0..=hay.len() + 1 {
+                    assert_eq!(
+                        one.find_from(&hay, from),
+                        finder.find_from(&hay, from),
+                        "{:?} anchor {anchor} on {:?} from {from}",
+                        String::from_utf8_lossy(&needle),
+                        String::from_utf8_lossy(&hay),
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 20_000, "only {compared} offsets were compared");
+    }
+
+    #[test]
+    fn a_single_run_is_scanned_by_its_rarest_byte() {
+        // `.go` is scanned for its `.`: a scan for the `o` every match ends with would find a
+        // candidate every few bytes.
+        let re = Regex::new(r"[A-Z][a-zA-Z0-9_]*\.go").unwrap();
+        let Some(Candidates {
+            scan: Scan::One(one),
+            ..
+        }) = &re.cand
+        else {
+            panic!("a single-run pattern should scan one run");
+        };
+        assert_eq!(one.run, b".go");
+        assert_eq!(one.anchor, 0);
+        // A run whose first byte is a common one is scanned for a rarer byte inside it.
+        let re = Regex::new(r"[a-z]*te_x").unwrap();
+        let Some(Candidates {
+            scan: Scan::One(one),
+            ..
+        }) = &re.cand
+        else {
+            panic!("a single-run pattern should scan one run");
+        };
+        assert_eq!(one.run, b"te_x");
+        assert_eq!(one.anchor, 2);
+        assert!(rarity(one.run[one.anchor]) < rarity(one.run[0]));
     }
 
     #[test]
