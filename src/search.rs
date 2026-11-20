@@ -558,15 +558,13 @@ fn read_job(
                 continue;
             }
             if want_dirs {
+                // A directory that is also descended into needs two owners; one that is only
+                // listed takes the single copy the walk already has.
+                let shown = if descend { child.clone() } else { child.take() }
+                    .unwrap_or_else(|| child_path(&job.dir, &e.name));
                 out.cands.push(Found {
                     cand: Candidate {
-                        // A directory that is also descended into needs two owners; one that
-                        // is only listed takes the single copy the walk already has.
-                        path: match &child {
-                            Some(c) if descend => c.clone(),
-                            Some(_) => child.take().unwrap_or_default(),
-                            None => child_path(&job.dir, &e.name),
-                        },
+                        path: shown,
                         rel: child_rel.clone(),
                         size: 0,
                         modified: None,
