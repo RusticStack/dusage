@@ -606,21 +606,45 @@ pub struct Finder {
 impl Finder {
     /// Prepare `needle`; `ci` selects the ASCII case-insensitive fold.
     pub fn new(needle: &[u8], ci: bool) -> Finder {
-        let (anchor, partner) = if ci {
-            let anchor = anchor::<Ci>(needle);
-            (anchor, pair_plan::<Ci>(needle, anchor))
+        let anchor = if ci {
+            anchor::<Ci>(needle)
         } else {
-            let anchor = anchor::<Exact>(needle);
-            (anchor, pair_plan::<Exact>(needle, anchor))
+            anchor::<Exact>(needle)
         };
-        let skips = if needle.len() >= SKIP_MIN_LEN {
-            Some(if ci {
-                Skip::build::<Ci>(needle)
-            } else {
-                Skip::build::<Exact>(needle)
-            })
+        Finder::build(needle, ci, anchor)
+    }
+
+    /// Prepare `needle` with the byte to scan for chosen by the caller, for a matcher that
+    /// already knows which run of its pattern it is searching for and where that run sits in it
+    /// — a regex with one mandatory literal per alternative, say. `anchor` is an index into
+    /// `needle`; one at or past its end means "no preference" and the rarest byte is used, the
+    /// same byte [`Finder::new`] would pick.
+    ///
+    /// Everything else about the plan — the partner byte that filters candidates, Horspool's
+    /// table for a long needle, the fold when `ci` is set — follows from the needle exactly as
+    /// it does for [`Finder::new`], so the answers are the same and only the scan differs.
+    pub fn with_anchor(needle: &[u8], ci: bool, anchor: usize) -> Finder {
+        let chosen = match anchor < needle.len() {
+            true => anchor,
+            false if ci => self::anchor::<Ci>(needle),
+            false => self::anchor::<Exact>(needle),
+        };
+        Finder::build(needle, ci, chosen)
+    }
+
+    /// The plan both constructors share: the anchor is already chosen, and the partner and the
+    /// skip table follow from the needle.
+    fn build(needle: &[u8], ci: bool, anchor: usize) -> Finder {
+        let (partner, skips) = if ci {
+            (
+                pair_plan::<Ci>(needle, anchor),
+                (needle.len() >= SKIP_MIN_LEN).then(|| Skip::build::<Ci>(needle)),
+            )
         } else {
-            None
+            (
+                pair_plan::<Exact>(needle, anchor),
+                (needle.len() >= SKIP_MIN_LEN).then(|| Skip::build::<Exact>(needle)),
+            )
         };
         Finder {
             needle: needle.to_vec(),
@@ -2033,6 +2057,47 @@ mod tests {
             }
         }
         assert!(cases > 10_000, "only {cases} cases ran");
+    }
+
+    /// A caller-chosen anchor changes which byte the scan looks for and nothing else: every
+    /// offset answers what the brute-force scan answers, an offset past the needle's end is the
+    /// preference-free case, and an empty needle stays empty.
+    #[test]
+    fn a_chosen_anchor_answers_what_the_brute_force_scan_answers() {
+        const POOL: &[u8] = b"abAB c.{}\xc3";
+        let mut rng = Lcg::new(0xA0C_4017);
+        for n in [0usize, 1, 2, 5, 9, 16, 40, 70] {
+            let needle: Vec<u8> = (0..n)
+                .map(|_| POOL[rng.below(POOL.len() as u32) as usize])
+                .collect();
+            for len in [0usize, 7, 64, 130, 513] {
+                let mut hay: Vec<u8> = (0..len)
+                    .map(|_| POOL[rng.below(POOL.len() as u32) as usize])
+                    .collect();
+                if n > 0 && n < len {
+                    let at = (63).min(len - n);
+                    hay[at..at + n].copy_from_slice(&needle);
+                }
+                for ci in [false, true] {
+                    for anchor in 0..n + 2 {
+                        let finder = Finder::with_anchor(&needle, ci, anchor);
+                        assert_eq!(finder.len(), n);
+                        for from in [0, 1, 31, 64, 127, 128, len] {
+                            assert_eq!(
+                                finder.find_from(&hay, from),
+                                brute_from(&hay, &needle, from, ci),
+                                "n {n} len {len} ci {ci} anchor {anchor} from {from}"
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        Finder::with_anchor(&needle, ci, usize::MAX).find(&hay),
+                        Finder::new(&needle, ci).find(&hay),
+                        "out of range is no preference"
+                    );
+                }
+            }
+        }
     }
 
     /// Folded matches planted so a block edge falls inside them: the pair filter's second byte

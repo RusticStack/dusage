@@ -86,6 +86,11 @@ const PAIR_MIN: usize = 3;
 /// wrong call here only costs or saves instructions.
 const SAMPLE: usize = 64;
 
+/// Occurrences of a needle's leading byte in that sample that make pairing worth it. One is
+/// noise — a binary file holds any single byte value somewhere — while two is a byte every
+/// [`SAMPLE`] bytes, dense enough that the candidates it finds would each pay a verify.
+const PAIR_HITS: usize = 2;
+
 /// A small set of needles scanned in one pass, for a search that jumps between the positions
 /// where a match could begin instead of stepping through every byte in between.
 ///
@@ -115,11 +120,15 @@ impl Prefilter {
     /// Which needles are worth a second-byte compare in this haystack, from its first
     /// [`SAMPLE`] bytes. Bit `i` means needle `i` is compared on both bytes; every form answers
     /// a superset of the needle positions, since the verify step decides.
+    ///
+    /// A leading byte that shows up once in the sample is not yet worth pairing: the noise of a
+    /// binary file holds any single byte value somewhere, and pairing on it costs a compare per
+    /// block for candidates that never come. Two hits, a byte every [`SAMPLE`] bytes, is.
     fn decide(&self, hay: &[u8]) -> u8 {
         let sample = &hay[..hay.len().min(SAMPLE)];
         let mut bits = 0u8;
         for (i, n) in self.needles.iter().enumerate() {
-            if n.len() >= PAIR_MIN && memchr(sample, n[0], 0).is_some() {
+            if n.len() >= PAIR_MIN && count(sample, n[0]) >= PAIR_HITS {
                 bits |= 1 << i;
             }
         }
