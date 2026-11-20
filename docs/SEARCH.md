@@ -784,21 +784,22 @@ with time keys, `--type-add`/`--type-clear`/`--type-list`, `--vimgrep`,
 `--trim`, the separator flags and `--follow` under its long name. The gaps that
 remain are listed in §1.3 and are narrow but real: `--no-unicode`,
 `--glob-case-insensitive`, the five-name `--encoding` set, terminal hyperlinks
-and diagnostics, and the `-L`/`-E`/`-I` letter collisions — plus speed: a
-general regex costs about 1.4x ripgrep's time in the last recorded run (warm
-`search-regex`, commit 547f955), so a regex-heavy interactive search still feels
-slower. Keep rg for UTF-32 or
-legacy-encoding trees and for patterns that need ripgrep's exact Unicode
-matching.
+and diagnostics, and the `-L`/`-E`/`-I` letter collisions — plus speed, though not much of it
+now: a general regex measured 0.90x ripgrep's time in the last recorded run
+(warm `search-regex`, commit 323bf88), and the one content row still behind is
+`-U` with Unicode semantics at 1.15x. Keep rg for UTF-32 or legacy-encoding
+trees, for patterns that need ripgrep's exact Unicode matching, and for the
+flags in §1.3.
 
 **`find -name`, and now `find`'s expressions.** A drop-in for most invocations:
 `dusage find . -name "*.rs" -o -type d`, `-printf`, `-prune`, `-size`, `-mtime`,
 `-perm`, `-newer`, `-maxdepth` and parentheses all run, and the comparisons above
 agree with findutils 4.9.0 on what they select. What differs is order (sorted per
 directory instead of readdir order), `-ls`'s date column, the sequential walk
-(about 1.7x find's clock over `/usr` at commit 547f955, §1.4), and the refusals: `-delete` in every
-spelling, `-exec`/`-execdir` without `--allow-exec`, symbolic `-perm`, `-ok`, and
-a `-regextype` that changes the dialect. The glob form is faster than the
+(0.99x `find -name`'s clock on the 15k-file tree at commit 323bf88, §1.4), and
+the refusals: `-delete` in every spelling, `-exec`/`-execdir` without
+`--allow-exec`, symbolic `-perm`, `-ok`, and a `-regextype` that changes the
+dialect. The glob form is faster than the
 expression walk and its globs cover `**`, anchored paths and `{a,b}` — reach for
 it when the query fits. Ours prints paths relative to the root, so
 `dusage find '*.rs' .` prints `src/main.rs` where `find . -name '*.rs'` prints
