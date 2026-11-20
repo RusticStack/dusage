@@ -42,6 +42,8 @@
 #   DUSAGE_BENCH_PAT_CI        case-insensitive literal (default memmove)
 #   DUSAGE_BENCH_PAT_NOMATCH   regex that never matches (default [Z]{6}[a-z]{9})
 #   DUSAGE_BENCH_PAT_MULTILINE pattern for the -U case (default 'func \w+\(\) \{\n')
+#   DUSAGE_BENCH_PAT_MULTILINE_UNICODE  the -U pattern whose \w is Unicode (default
+#                              'type \w+ struct')
 #   DUSAGE_BENCH_GLOB          glob for find (default *.go)
 #
 # Requires: bash, coreutils, ripgrep (rg), grep, find, du, cargo. gzip is needed for the

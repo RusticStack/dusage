@@ -28,6 +28,7 @@ PAT_REGEX=${DUSAGE_BENCH_PAT_REGEX:-'[A-Z][a-zA-Z0-9_]*\.go'}
 PAT_CI=${DUSAGE_BENCH_PAT_CI:-memmove}
 PAT_NOMATCH=${DUSAGE_BENCH_PAT_NOMATCH:-'[Z]{6}[a-z]{9}'}
 PAT_MULTILINE=${DUSAGE_BENCH_PAT_MULTILINE:-'func \w+\(\) \{\n'}
+PAT_MULTILINE_UNICODE=${DUSAGE_BENCH_PAT_MULTILINE_UNICODE:-'type \w+ struct'}
 GLOB=${DUSAGE_BENCH_GLOB:-*.go}
 
 # --- scan ------------------------------------------------------------------
@@ -95,6 +96,12 @@ bench_row search-only-matching search-only-matching both reference "grep -rIo" "
 bench_row search-multiline search-multiline both primary "dusage -U" "$BIN search --color=never -c -U '$PAT_MULTILINE' '$T'" "$T"
 
 bench_row search-multiline search-multiline both reference "rg -U" "rg --color=never -c -U '$PAT_MULTILINE' '$T'" "$T"
+
+# The same mode on a pattern whose `\w` is Unicode: matching this over bytes is only exact
+# for a file with no non-ASCII byte, so the row measures what a file that has one costs.
+bench_row search-multiline-unicode search-multiline both primary "dusage -U unicode" "$BIN search --color=never -c -U '$PAT_MULTILINE_UNICODE' '$T'" "$T"
+
+bench_row search-multiline-unicode search-multiline both reference "rg -U unicode" "rg --color=never -c -U '$PAT_MULTILINE_UNICODE' '$T'" "$T"
 
 bench_row search-files-with-matches search-files-with-matches warm primary "dusage -l" "$BIN search --color=never -l -F '$PAT_COMMON' '$T'" -
 
