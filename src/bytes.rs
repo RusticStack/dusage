@@ -370,6 +370,94 @@ fn anchor<C: Case>(needle: &[u8]) -> usize {
     best
 }
 
+/// The partner offset when the needle is short enough for the pair filter to be the plan.
+#[inline]
+fn pair_plan<C: Case>(needle: &[u8], anchor: usize) -> Option<usize> {
+    if needle.len() < PAIR_MAX_LEN {
+        partner::<C>(needle, anchor)
+    } else {
+        None
+    }
+}
+
+/// The second needle byte a candidate has to hold, next to the anchor: the rarest of the
+/// needle's other bytes, which one more compare per block turns into a filter.
+///
+/// The anchor alone is the needle's rarest byte in text, which in Go source is still every few
+/// hundred bytes for a letter like `f`; the pair turns a candidate into "the rarest byte *and*
+/// the rarest of its neighbours", and the window compare then runs on a few thousand positions
+/// per tree instead of a million.
+fn partner<C: Case>(needle: &[u8], anchor: usize) -> Option<usize> {
+    let n = needle.len();
+    if n < 2 {
+        return None;
+    }
+    let mut best: Option<(u8, usize, usize)> = None;
+    for (k, &b) in needle.iter().enumerate() {
+        if k == anchor {
+            continue;
+        }
+        let r = C::rank(b);
+        let dist = k.abs_diff(anchor);
+        // Rarest wins; between equal ranks the nearer byte keeps the block step wide.
+        let better = match best {
+            None => true,
+            Some((br, bd, _)) => r < br || (r == br && dist < bd),
+        };
+        if better {
+            best = Some((r, dist, k));
+        }
+    }
+    best.map(|(_, _, k)| k)
+}
+
+/// Scan for the anchor and the partner byte together, and compare the window only where both
+/// line up. One extra vector compare per block turns a candidate from "the rarest byte of the
+/// needle" into "the rarest byte *and* the rarest byte near it", which is where the million
+/// window compares of a tree-wide search go.
+#[inline]
+fn search_pair<C: Case>(
+    hay: &[u8],
+    needle: &[u8],
+    from: usize,
+    a: usize,
+    b: usize,
+) -> Option<usize> {
+    let last = hay.len() - needle.len();
+    let vectors = C::SENSITIVE && crate::simd::vectorized();
+    let mut at = from;
+    while at <= last {
+        let p = match vectors && hay.len() - at >= VECTOR_MIN {
+            true => crate::simd::find_pair(hay, needle[a], a, needle[b], b, at)?,
+            false => pair_word::<C>(hay, needle, at, a, b)?,
+        };
+        if p > last {
+            return None;
+        }
+        if verify::<C>(hay, needle, p) {
+            return Some(p);
+        }
+        at = p + 1;
+    }
+    None
+}
+
+/// The pair filter a word at a time, for a haystack too short to fill a vector block: the
+/// anchor comes from the same SWAR loop the anchor scan uses, and the candidate it finds is
+/// kept only when the partner byte is there too.
+fn pair_word<C: Case>(hay: &[u8], needle: &[u8], from: usize, a: usize, b: usize) -> Option<usize> {
+    let last = hay.len() - needle.len();
+    let mut at = from;
+    loop {
+        let q = find_candidate::<C>(hay, needle[a], at + a, last + a)?;
+        let p = q - a;
+        if C::eq(hay[p + b], needle[b]) {
+            return Some(p);
+        }
+        at = p + 1;
+    }
+}
+
 /// Scan for a chosen needle byte and compare the whole window on each candidate. A mismatch
 /// advances the anchor by one byte, which is all that is left to do: the anchor is the needle's
 /// rarest byte, so candidates are few and the window compare (`memcmp` under `Exact`) is rare.
@@ -398,6 +486,42 @@ fn search_anchor<C: Case>(hay: &[u8], needle: &[u8], from: usize, k: usize) -> O
         at = p + 1;
     }
     None
+}
+
+/// True when the pair filter can run for this case at all: the exact case compares raw bytes and
+/// needs the vector loop, the folded one shares the SWAR word loop the anchor scan uses.
+#[inline]
+fn pairs<C: Case>() -> bool {
+    !C::SENSITIVE || crate::simd::vectorized()
+}
+
+/// The plan a prepared needle carries: the pair scan when there is a second byte to filter on
+/// and a vector unit to run it, Horspool for a long needle on a machine that has neither, the
+/// anchor scan otherwise.
+///
+/// The order matters and it was measured: the pair filter costs one compare per block whatever
+/// the needle length, so it beats Horspool's bad-byte skip on every shape tried — 18, 21, 22, 37
+/// and 50 bytes, over Go source and over the binaries beside it — because the skip shrinks to a
+/// byte a position wherever the haystack is not text. Horspool keeps its place for the machine
+/// that has no vector unit, where the pair has no block to run in.
+#[inline]
+fn search_planned<C: Case>(
+    hay: &[u8],
+    needle: &[u8],
+    from: usize,
+    anchor: usize,
+    partner: Option<usize>,
+    skips: Option<&Skip>,
+) -> Option<usize> {
+    if pairs::<C>() {
+        if let Some(b) = partner {
+            return search_pair::<C>(hay, needle, from, anchor, b);
+        }
+    }
+    match skips {
+        Some(skips) => search_skip::<C>(hay, needle, from, skips),
+        None => search_anchor::<C>(hay, needle, from, anchor),
+    }
 }
 
 /// Horspool's bad-byte table: 256 entries packed eight to a word, so building one costs 32
@@ -450,12 +574,19 @@ fn search_skip<C: Case>(hay: &[u8], needle: &[u8], from: usize, skips: &Skip) ->
     None
 }
 
-/// Needles at least this long get a Horspool table. Measured: below 16 bytes the skip is too
-/// narrow to beat scanning for the rare anchor byte, and the window compare of every aligned
-/// window costs more than the candidates the anchor scan rejects. From 16 up Horspool wins by
-/// 1.15x to 1.6x on both shapes the searcher has — 30-byte lines and whole multi-megabyte
-/// buffers. Numbers in `bench_literal_matcher`.
+/// Needles at least this long get a Horspool table, which is the fallback for a machine with no
+/// vector unit and the plan for a needle longer than [`PAIR_MAX_LEN`]. Measured: below 16 bytes
+/// the skip is too narrow to beat scanning for the rare anchor byte. Numbers in
+/// `bench_literal_matcher`.
 const SKIP_MIN_LEN: usize = 16;
+
+/// Needle length up to which the pair filter is the plan. Measured against the Horspool skip on
+/// the two shapes the searcher has — Go source and the binaries beside it — the pair is ahead by
+/// 36% at 21 bytes, 26% at 37, 13% at 50, 5% on the binaries and 9% on the source at 64, level at
+/// 80, and behind by 5% at 96, where a skip of nearly a needle width per position takes over.
+/// The skip shrinks to one byte a position wherever the haystack is not text, which is why the
+/// pair holds for so long.
+const PAIR_MAX_LEN: usize = 64;
 
 /// A needle prepared once and searched many times: which byte to scan for, and Horspool's
 /// bad-byte table when the needle is long enough to earn one.
@@ -467,6 +598,7 @@ const SKIP_MIN_LEN: usize = 16;
 pub struct Finder {
     needle: Vec<u8>,
     anchor: usize,
+    partner: Option<usize>,
     skips: Option<Skip>,
     ci: bool,
 }
@@ -479,18 +611,45 @@ impl Finder {
         } else {
             anchor::<Exact>(needle)
         };
-        let skips = if needle.len() >= SKIP_MIN_LEN {
-            Some(if ci {
-                Skip::build::<Ci>(needle)
-            } else {
-                Skip::build::<Exact>(needle)
-            })
+        Finder::build(needle, ci, anchor)
+    }
+
+    /// Prepare `needle` with the byte to scan for chosen by the caller, for a matcher that
+    /// already knows which run of its pattern it is searching for and where that run sits in it
+    /// — a regex with one mandatory literal per alternative, say. `anchor` is an index into
+    /// `needle`; one at or past its end means "no preference" and the rarest byte is used, the
+    /// same byte [`Finder::new`] would pick.
+    ///
+    /// Everything else about the plan — the partner byte that filters candidates, Horspool's
+    /// table for a long needle, the fold when `ci` is set — follows from the needle exactly as
+    /// it does for [`Finder::new`], so the answers are the same and only the scan differs.
+    pub fn with_anchor(needle: &[u8], ci: bool, anchor: usize) -> Finder {
+        let chosen = match anchor < needle.len() {
+            true => anchor,
+            false if ci => self::anchor::<Ci>(needle),
+            false => self::anchor::<Exact>(needle),
+        };
+        Finder::build(needle, ci, chosen)
+    }
+
+    /// The plan both constructors share: the anchor is already chosen, and the partner and the
+    /// skip table follow from the needle.
+    fn build(needle: &[u8], ci: bool, anchor: usize) -> Finder {
+        let (partner, skips) = if ci {
+            (
+                pair_plan::<Ci>(needle, anchor),
+                (needle.len() >= SKIP_MIN_LEN).then(|| Skip::build::<Ci>(needle)),
+            )
         } else {
-            None
+            (
+                pair_plan::<Exact>(needle, anchor),
+                (needle.len() >= SKIP_MIN_LEN).then(|| Skip::build::<Exact>(needle)),
+            )
         };
         Finder {
             needle: needle.to_vec(),
             anchor,
+            partner,
             skips,
             ci,
         }
@@ -538,10 +697,14 @@ impl Finder {
         if n == 1 {
             return find_match::<C>(hay, needle[0], from, hay.len() - 1);
         }
-        match &self.skips {
-            Some(skips) => search_skip::<C>(hay, needle, from, skips),
-            None => search_anchor::<C>(hay, needle, from, self.anchor),
-        }
+        search_planned::<C>(
+            hay,
+            needle,
+            from,
+            self.anchor,
+            self.partner,
+            self.skips.as_ref(),
+        )
     }
 }
 
@@ -558,6 +721,7 @@ impl Finder {
         Finder {
             needle: self.needle.clone(),
             anchor: self.anchor,
+            partner: self.partner,
             skips: if skips && self.needle.len() > 1 {
                 Some(if self.ci {
                     Skip::build::<Ci>(&self.needle)
@@ -586,11 +750,11 @@ fn search<C: Case>(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if n == 1 {
         return find_match::<C>(hay, needle[0], from, hay.len() - 1);
     }
-    if n >= SKIP_MIN_LEN && hay.len() - from >= SKIP_MIN_HAY {
-        search_skip::<C>(hay, needle, from, &Skip::build::<C>(needle))
-    } else {
-        search_anchor::<C>(hay, needle, from, anchor::<C>(needle))
-    }
+    let anchor = anchor::<C>(needle);
+    let skips =
+        (n >= SKIP_MIN_LEN && hay.len() - from >= SKIP_MIN_HAY).then(|| Skip::build::<C>(needle));
+    let partner = pair_plan::<C>(needle, anchor);
+    search_planned::<C>(hay, needle, from, anchor, partner, skips.as_ref())
 }
 
 /// First occurrence of needle in hay.
@@ -1790,6 +1954,182 @@ mod tests {
                     memmem_from(hay, needle, from),
                     naive(&hay[from..], needle).map(|p| from + p)
                 );
+            }
+        }
+    }
+
+    /// The search from `from` a byte at a time, which is the reference every plan this module
+    /// can choose has to answer to.
+    fn brute_from(hay: &[u8], needle: &[u8], from: usize, ci: bool) -> Option<usize> {
+        if from > hay.len() {
+            return None;
+        }
+        let n = needle.len();
+        if n == 0 {
+            return Some(from);
+        }
+        let last = hay.len().checked_sub(n)?;
+        (from..=last).find(|&p| match ci {
+            true => hay[p..p + n].eq_ignore_ascii_case(needle),
+            false => &hay[p..p + n] == needle,
+        })
+    }
+
+    /// Every entry point of the prepared [`Finder`], and the free functions that share its plan,
+    /// against [`brute_from`], over haystacks built to cross the boundaries the plan divides on:
+    /// the 32-byte block the pair filter steps by, the 128-byte haystack length from which its
+    /// vector loop runs, the 64-byte needle length at which Horspool takes over, and the ends of
+    /// the buffer. Needles are ASCII, non-ASCII and longer than the haystack; matches are
+    /// planted at the start, at a block edge and at the end.
+    #[test]
+    fn finder_entry_points_agree_with_the_brute_force_scan() {
+        // Enough for accidental repeats, and two bytes above 0x80 so the fold never reaches a
+        // byte it does not own.
+        const POOL: &[u8] = b"abAB cC.-_\xc3\xa9\x00";
+        let mut rng = Lcg::new(0x51ED_0A77);
+        let mut cases = 0usize;
+        for n in [1usize, 2, 3, 5, 8, 15, 16, 17, 32, 33, 40, 63, 64, 65, 127] {
+            for len in [0usize, 3, 33, 64, 127, 128, 129, 200, 512, 513] {
+                let needle: Vec<u8> = (0..n)
+                    .map(|_| POOL[rng.below(POOL.len() as u32) as usize])
+                    .collect();
+                let mut hay: Vec<u8> = (0..len)
+                    .map(|_| POOL[rng.below(POOL.len() as u32) as usize])
+                    .collect();
+                // One planted copy, at an offset that puts a block edge inside the needle when
+                // the haystack has room for it.
+                if n <= len {
+                    let at = (31 + n % 3).min(len - n);
+                    hay[at..at + n].copy_from_slice(&needle);
+                }
+                for ci in [false, true] {
+                    let finder = Finder::new(&needle, ci);
+                    assert_eq!(finder.len(), n);
+                    assert_eq!(finder.is_empty(), n == 0);
+                    let mut froms = vec![
+                        0,
+                        1,
+                        15,
+                        16,
+                        31,
+                        32,
+                        33,
+                        63,
+                        64,
+                        65,
+                        126,
+                        127,
+                        128,
+                        129,
+                        len.saturating_sub(1),
+                        len,
+                        len + 1,
+                    ];
+                    if len <= 160 {
+                        froms.extend(0..=len);
+                    }
+                    for from in froms {
+                        let want = brute_from(&hay, &needle, from, ci);
+                        let label = format!("n {n} len {len} from {from} ci {ci}");
+                        assert_eq!(finder.find_from(&hay, from), want, "{label}");
+                        if from == 0 {
+                            assert_eq!(finder.find(&hay), want, "{label}");
+                        }
+                        if ci {
+                            assert_eq!(memmem_ci_from(&hay, &needle, from), want, "{label}");
+                            if from == 0 {
+                                assert_eq!(memmem_ci(&hay, &needle), want, "{label}");
+                            }
+                        } else {
+                            assert_eq!(memmem_from(&hay, &needle, from), want, "{label}");
+                            if from == 0 {
+                                assert_eq!(memmem(&hay, &needle), want, "{label}");
+                                assert_eq!(
+                                    memmem_word(&hay, &needle, from),
+                                    naive_words(&hay, &needle, from),
+                                    "{label}"
+                                );
+                            }
+                        }
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert!(cases > 10_000, "only {cases} cases ran");
+    }
+
+    /// A caller-chosen anchor changes which byte the scan looks for and nothing else: every
+    /// offset answers what the brute-force scan answers, an offset past the needle's end is the
+    /// preference-free case, and an empty needle stays empty.
+    #[test]
+    fn a_chosen_anchor_answers_what_the_brute_force_scan_answers() {
+        const POOL: &[u8] = b"abAB c.{}\xc3";
+        let mut rng = Lcg::new(0xA0C_4017);
+        for n in [0usize, 1, 2, 5, 9, 16, 40, 70] {
+            let needle: Vec<u8> = (0..n)
+                .map(|_| POOL[rng.below(POOL.len() as u32) as usize])
+                .collect();
+            for len in [0usize, 7, 64, 130, 513] {
+                let mut hay: Vec<u8> = (0..len)
+                    .map(|_| POOL[rng.below(POOL.len() as u32) as usize])
+                    .collect();
+                if n > 0 && n < len {
+                    let at = (63).min(len - n);
+                    hay[at..at + n].copy_from_slice(&needle);
+                }
+                for ci in [false, true] {
+                    for anchor in 0..n + 2 {
+                        let finder = Finder::with_anchor(&needle, ci, anchor);
+                        assert_eq!(finder.len(), n);
+                        for from in [0, 1, 31, 64, 127, 128, len] {
+                            assert_eq!(
+                                finder.find_from(&hay, from),
+                                brute_from(&hay, &needle, from, ci),
+                                "n {n} len {len} ci {ci} anchor {anchor} from {from}"
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        Finder::with_anchor(&needle, ci, usize::MAX).find(&hay),
+                        Finder::new(&needle, ci).find(&hay),
+                        "out of range is no preference"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Folded matches planted so a block edge falls inside them: the pair filter's second byte
+    /// can land on either side of the vector load, and the fold has to hold across it.
+    #[test]
+    fn folded_matches_straddle_every_block_edge() {
+        for n in 2..=8usize {
+            let upper: Vec<u8> = (0..n)
+                .map(|k| if k % 2 == 0 { b'A' } else { b'B' })
+                .collect();
+            let lower: Vec<u8> = (0..n)
+                .map(|k| if k % 2 == 0 { b'a' } else { b'b' })
+                .collect();
+            // A mix of the two, so the match is neither wholly upper nor wholly lower case.
+            let folded: Vec<u8> = (0..n)
+                .map(|k| if k % 2 == 0 { b'A' } else { b'b' })
+                .collect();
+            for at in [31usize, 32, 33, 63, 64, 65, 126, 127, 128, 129, 200] {
+                let mut hay = vec![b'-'; at + n + 64];
+                hay[at..at + n].copy_from_slice(&lower);
+                let finder = Finder::new(&upper, true);
+                for from in 0..=at + 1 {
+                    let want = Some(at).filter(|&p| p >= from);
+                    assert_eq!(
+                        finder.find_from(&hay, from),
+                        want,
+                        "n {n} at {at} from {from}"
+                    );
+                    assert_eq!(memmem_ci_from(&hay, &upper, from), want);
+                    assert_eq!(brute_from(&hay, &upper, from, true), want);
+                }
+                assert_eq!(Finder::new(&folded, true).find(&hay), Some(at));
             }
         }
     }
