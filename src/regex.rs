@@ -89,6 +89,24 @@ const MAX_REPEAT: u32 = 1000;
 /// Hands out the pattern ids a thread's DFA cache is keyed on.
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+thread_local! {
+    /// How many searches this thread settled from line windows, so a test can prove the path
+    /// it compares against a full decode is the one that ran. Thread-local because the tests
+    /// run in parallel, and a shared count would be another test's.
+    static LINE_WINDOWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_line_window() {
+    LINE_WINDOWS.with(|n| n.set(n.get() + 1));
+}
+
+#[cfg(test)]
+fn line_windows() -> u64 {
+    LINE_WINDOWS.with(|n| n.get())
+}
+
 /// 256-bit set of bytes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ByteSet([u64; 4]);
@@ -252,6 +270,29 @@ impl Hay for [u8] {
     }
 }
 
+/// The character program's assertions, answered from `chars` alone. `starts_text` and
+/// `ends_text` say whether `chars` begins and ends the haystack: `\A` and `\z` are the only
+/// assertions whose answer needs characters the slice does not hold.
+fn char_assert(chars: &[char], starts_text: bool, ends_text: bool, a: Assert, at: usize) -> bool {
+    let is_word = |c: Option<char>| c.is_some_and(unicode::is_word);
+    // Past either end of the slice sits the newline that ended the line, or nothing at all:
+    // both are non-word and both end a line, so nothing below has to tell them apart.
+    let before = if at == 0 {
+        None
+    } else {
+        chars.get(at - 1).copied()
+    };
+    let after = chars.get(at).copied();
+    match a {
+        Assert::StartText => starts_text && at == 0,
+        Assert::EndText => ends_text && at == chars.len(),
+        Assert::StartLine => at == 0 || before == Some('\n'),
+        Assert::EndLine => at == chars.len() || after == Some('\n'),
+        Assert::WordBoundary => is_word(before) != is_word(after),
+        Assert::NotWordBoundary => is_word(before) == is_word(after),
+    }
+}
+
 impl Hay for [char] {
     type Sym = char;
 
@@ -260,17 +301,27 @@ impl Hay for [char] {
     }
 
     fn assert_holds(&self, a: Assert, at: usize) -> bool {
-        let is_word = |c: Option<&char>| c.is_some_and(|c| unicode::is_word(*c));
-        let before = if at == 0 { None } else { self.get(at - 1) };
-        let after = self.get(at);
-        match a {
-            Assert::StartText => at == 0,
-            Assert::EndText => at == self.len(),
-            Assert::StartLine => at == 0 || self.get(at - 1) == Some(&'\n'),
-            Assert::EndLine => at == self.len() || self.get(at) == Some(&'\n'),
-            Assert::WordBoundary => is_word(before) != is_word(after),
-            Assert::NotWordBoundary => is_word(before) == is_word(after),
-        }
+        char_assert(self, true, true, a, at)
+    }
+}
+
+/// One line of the text read as characters, so a match that cannot cross a newline can be
+/// resolved without decoding any other line.
+struct LineHay<'a> {
+    chars: &'a [char],
+    starts_text: bool,
+    ends_text: bool,
+}
+
+impl Hay for LineHay<'_> {
+    type Sym = char;
+
+    fn sym(&self, at: usize) -> Option<char> {
+        self.chars.get(at).copied()
+    }
+
+    fn assert_holds(&self, a: Assert, at: usize) -> bool {
+        char_assert(self.chars, self.starts_text, self.ends_text, a, at)
     }
 }
 
@@ -756,6 +807,14 @@ impl Regex {
         }
         match std::str::from_utf8(hay) {
             Ok(text) => {
+                // A text file whose pattern has a mandatory ASCII literal and cannot consume
+                // a newline: every match lies on the line that holds one of the literal's
+                // occurrences, so those lines are the only ones worth decoding.
+                if let Some((run, finder)) = &self.run {
+                    if run.is_ascii() && !cprog_can_match_newline(cprog) {
+                        return self.find_all_lines(cprog, finder, hay, limit, &accept);
+                    }
+                }
                 let (chars, bytes) = decode(text);
                 let text = Text {
                     prog: cprog,
@@ -766,6 +825,80 @@ impl Regex {
             }
             Err(_) => self.find_all_parts(hay, None, limit, &accept),
         }
+    }
+
+    /// Every match in a text haystack, decoding one line at a time instead of the haystack.
+    ///
+    /// Every match holds the mandatory ASCII literal, and the caller has established that no
+    /// match can consume a newline, so a match lies on the line that holds one of the
+    /// literal's occurrences: that line is the window, and the line bounds are the ones
+    /// `candidate_find` already works from on the byte path. The character program walks the
+    /// line from where the caller's offset falls in it and never the lines between two
+    /// candidates, so a file is answered without the characters of every line it holds.
+    ///
+    /// The windows are lines and not byte ranges for a reason: a newline is one ASCII byte, so
+    /// no multi-byte character can straddle the bound of a window, and no match — which the
+    /// caller has established cannot cross a newline — can be cut by one.
+    fn find_all_lines(
+        &self,
+        cprog: &[Inst<CharClass>],
+        finder: &crate::bytes::Finder,
+        hay: &[u8],
+        limit: usize,
+        accept: &impl Fn(&Match) -> bool,
+    ) -> Vec<Match> {
+        #[cfg(test)]
+        note_line_window();
+        let mut out = Vec::new();
+        // The byte offset the next match may start at, and where the literal scan resumes.
+        let mut from = 0;
+        let mut scan = 0;
+        // The line the buffers hold, so two candidates on one line decode it once.
+        let mut held = (usize::MAX, usize::MAX);
+        let mut chars = Vec::new();
+        let mut bytes = Vec::new();
+        while out.len() < limit {
+            let Some(q) = finder.find_from(hay, scan) else {
+                break;
+            };
+            let (ls, le) = (line_start(hay, q), line_end(hay, q));
+            if held != (ls, le) {
+                let line = std::str::from_utf8(&hay[ls..le]).expect("a line of text is text");
+                decode_into(line, &mut chars, &mut bytes);
+                held = (ls, le);
+            }
+            let start = bytes.partition_point(|&at| ls + at < from);
+            let window = LineHay {
+                chars: &chars,
+                starts_text: ls == 0,
+                ends_text: le == hay.len(),
+            };
+            let Some(m) = self.run(cprog, &window, start) else {
+                // No match can begin in this line at or after `from`, so the next one, if
+                // there is one, holds a candidate on a later line.
+                scan = le + 1;
+                continue;
+            };
+            let span = Match {
+                start: ls + bytes[m.start],
+                end: ls + bytes[m.end],
+            };
+            let accepted = accept(&span);
+            if accepted {
+                out.push(span);
+            }
+            // A character offset one past the end of the line is the newline, which no match
+            // can begin with, so `bytes`' sentinel stands for it.
+            from = match accepted && m.end > m.start {
+                true => ls + bytes[m.end],
+                false => ls + bytes[m.start + 1],
+            };
+            scan = from;
+            if from > hay.len() {
+                break;
+            }
+        }
+        out
     }
 
     /// The same search with the ASCII shortcut taken away: text is decoded and its character
@@ -889,14 +1022,24 @@ impl Regex {
 /// plus one sentinel holding `text.len()`. The sentinel is what turns a character offset
 /// from the VM back into a byte offset into the line.
 fn decode(text: &str) -> (Vec<char>, Vec<usize>) {
-    let mut chars = Vec::with_capacity(text.len());
-    let mut bytes = Vec::with_capacity(text.len() + 1);
+    let mut chars = Vec::new();
+    let mut bytes = Vec::new();
+    decode_into(text, &mut chars, &mut bytes);
+    (chars, bytes)
+}
+
+/// [`decode`] into buffers a caller reuses, so a search decodes one line at a time without
+/// allocating for every line it looks at.
+fn decode_into(text: &str, chars: &mut Vec<char>, bytes: &mut Vec<usize>) {
+    chars.clear();
+    bytes.clear();
+    chars.reserve(text.len());
+    bytes.reserve(text.len() + 1);
     for (at, c) in text.char_indices() {
         bytes.push(at);
         chars.push(c);
     }
     bytes.push(text.len());
-    (chars, bytes)
 }
 
 /// Turn a slot array into capture spans, mapping each position through `to_offset`.
@@ -1689,6 +1832,14 @@ fn candidates_are_sound(n: &Node, prog: &[Inst<ByteSet>]) -> bool {
             .iter()
             .any(|inst| matches!(inst, Inst::Set(set) if set.permits(b'\n')))
         && !closure(prog, &[], 0).1
+}
+
+/// True when some instruction of the character program consumes a newline, which means a match
+/// could straddle a line and one line would not hold it whole.
+fn cprog_can_match_newline(cprog: &[Inst<CharClass>]) -> bool {
+    cprog
+        .iter()
+        .any(|inst| matches!(inst, Inst::Set(set) if set.contains('\n')))
 }
 
 /// Runs shorter than this are the byte prefilter's job: a one-byte scan is no cheaper than the
@@ -3885,6 +4036,37 @@ mod tests {
             ("blank lines", b"type A struct\n\ntype B struct\n"),
             ("not text", &[b'c', 0xff, b'a', 0xfe, b'f', 0xc3]),
             ("not text with the literal", b"type \xff Widget struct\n"),
+            // The literal's line begins with a multi-byte character, so the byte the line
+            // starts at is not the byte the candidate starts at.
+            (
+                "literal against a multi-byte character",
+                "\u{65e5}\u{672c}type Widget struct\n\u{3a3}\u{3c3}type Other struct\n"
+                    .as_bytes(),
+            ),
+            // A multi-byte character on the last place of a line and the first place of the
+            // next, so both ends of a window sit against a character wider than a byte.
+            (
+                "multi-byte on both sides of a line bound",
+                "\u{4e00}\u{4e8c}\u{4e09}\ntype A struct \u{3c2}\n\u{663}\u{301}type B struct\n"
+                    .as_bytes(),
+            ),
+            // Two candidates on one line, and a match that begins left of its own candidate.
+            (
+                "two candidates on one line",
+                b"xx type A struct type B struct\ntype C struct\n",
+            ),
+            (
+                "match begins left of the candidate",
+                "type Caf\u{e9} struct\n\u{e9}\u{e9} type \u{3bc}x struct\n".as_bytes(),
+            ),
+            // A line holding the literal without a match for it, between two lines that do.
+            (
+                "literal in a comment between matches",
+                "type A struct\n// type [ is an escape\n\u{e9}type B struct\n".as_bytes(),
+            ),
+            // The literal at the very end of the file, with and without a trailing newline.
+            ("literal at the end, no newline", "x\n\u{e9} type A struct".as_bytes()),
+            ("literal at the end, newline", "x\n\u{e9} type A struct\n".as_bytes()),
         ]
     }
 
@@ -3917,6 +4099,19 @@ mod tests {
         ("(?:ab|\u{e9})c", false),
         (r"\w+ \w+ \w+", false),
         ("\u{2014}|\u{3bc}", false),
+        // Mandatory ASCII literal plus a program that cannot consume a newline: the line
+        // windows hold every match whole.
+        (r"(?s)type \w+ struct", false),
+        (r"(?s)type.*?struct", false),
+        (r"\w+ struct", false),
+        (r"(?m)^type \w+ struct", false),
+        (r"^type \w+ struct", false),
+        (r"type \w+ struct$", false),
+        (r"\btype \w+ struct\b", false),
+        (r"[^\n]*type \w+ struct", false),
+        (r"(?s)type \w+ .*struct", false),
+        (r"é*type \w+ struct", false),
+        (r"type \w+ struct|struct \w+ type", false),
     ];
 
     /// The rule `-w` adds on top of a pattern's own answer.
@@ -3965,6 +4160,195 @@ mod tests {
             decoded_patterns >= 12,
             "the pattern list must exercise the character program"
         );
+    }
+
+    /// The claim the line windows rest on: for a pattern with a mandatory ASCII literal that
+    /// cannot consume a newline, decoding only the lines the literal puts a candidate on
+    /// reports exactly what decoding the whole file reports — same spans, same count, same
+    /// order. The corpus puts non-ASCII text against ASCII word characters, CJK, combining
+    /// marks, Greek final sigma and Arabic-Indic digits, keeps invalid UTF-8, and holds
+    /// multi-byte characters against both ends of a window.
+    #[test]
+    fn the_line_windows_answer_what_decoding_always_did() {
+        let before = line_windows();
+        let mut windowed = 0;
+        for pat in [
+            r"type \w+ struct",
+            r"\w+ struct",
+            r"(?m)^type \w+ struct",
+            r"type \w+ struct$",
+            r"\btype \w+ struct\b",
+            r"[^\n]*type \w+ struct",
+        ] {
+            let re = Regex::new(pat).unwrap_or_else(|e| panic!("{pat:?}: {e}"));
+            assert!(re.is_unicode(), "{pat:?} needs the character program");
+            assert!(re.required_literal().is_some(), "{pat:?} has a literal");
+            for (name, hay) in mixed_corpus() {
+                for word in [false, true] {
+                    let seen = line_windows();
+                    let fast = re.find_all_in(hay, usize::MAX, word_rule(hay, word));
+                    if line_windows() > seen {
+                        windowed += 1;
+                    }
+                    let slow = re.find_all_decoded(hay, usize::MAX, word_rule(hay, word));
+                    assert_eq!(fast, slow, "{pat:?} (-w {word}) on {name:?}");
+                }
+            }
+        }
+        assert_eq!(
+            line_windows() - before,
+            windowed,
+            "every windowed search above is one this test counted"
+        );
+        assert!(
+            windowed >= 60,
+            "the window path must be the path under test, {windowed} searches took it"
+        );
+    }
+
+    /// A pattern that can consume a newline keeps decoding the file: a line holds only part of
+    /// such a match, so settling one from a line would report it cut in two.
+    #[test]
+    fn a_match_across_lines_is_not_settled_from_one_line() {
+        let re = Regex::new(r"(?s)type \w+\nstruct").unwrap();
+        assert!(re.is_unicode());
+        assert!(re.required_literal().is_some());
+        let hay = "// \u{e9}\ntype Caf\u{e9}\nstruct {\n}\ntype Other struct\n".as_bytes();
+        let before = line_windows();
+        let got = re.find_all_in(hay, usize::MAX, |_| true);
+        assert_eq!(line_windows(), before, "no windows");
+        assert_eq!(got, re.find_all_decoded(hay, usize::MAX, |_| true));
+        assert_eq!(got.len(), 1);
+        assert_eq!(&hay[got[0].start..got[0].end], b"type Caf\xc3\xa9\nstruct");
+    }
+
+    /// A window is a line, and a newline is one ASCII byte, so no character can be cut by a
+    /// window bound: a line of a thousand multi-byte characters puts the literal's candidate
+    /// kilobytes away from the bound, which a fixed-width window would have to cut in half.
+    #[test]
+    fn a_wide_character_is_never_cut_by_a_window() {
+        let mut hay = "\u{65e5}".repeat(1000).into_bytes();
+        hay.extend_from_slice("type Caf\u{e9} struct\n\u{4e00}type B struct\n".as_bytes());
+        let re = Regex::new(r"type \w+ struct").unwrap();
+        let before = line_windows();
+        let got = re.find_all_in(&hay, usize::MAX, |_| true);
+        assert!(line_windows() > before, "the window path answered this");
+        assert_eq!(got, re.find_all_decoded(&hay, usize::MAX, |_| true));
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            &hay[got[0].start..got[0].end],
+            "type Caf\u{e9} struct".as_bytes()
+        );
+    }
+
+    /// A pattern with no mandatory literal puts no bound on where a match can be, so the file
+    /// is decoded whole, as it was before the windows existed.
+    #[test]
+    fn a_pattern_without_a_mandatory_literal_decodes_the_file() {
+        let re = Regex::new(r"\w+").unwrap();
+        assert!(re.required_literal().is_none());
+        let hay = "caf\u{e9} au lait\n\u{65e5}\u{672c}\u{8a9e}\n".as_bytes();
+        let before = line_windows();
+        let got = re.find_all_in(hay, usize::MAX, |_| true);
+        assert_eq!(line_windows(), before, "no windows");
+        assert_eq!(got, re.find_all_decoded(hay, usize::MAX, |_| true));
+        assert_eq!(got.len(), 4);
+    }
+
+    /// The same equivalence over generated documents, which put fragments that matter to a
+    /// window bound wherever a document builder can put them: against a line start, against a
+    /// line end, inside the literal's own line, and beside an invalid byte. A match cannot be
+    /// cut by a window, so a document that would show one cut is the point.
+    #[test]
+    fn the_line_windows_agree_over_generated_documents() {
+        const FRAGMENTS: &[&str] = &[
+            "type ",
+            "type A struct",
+            " struct",
+            "caf\u{e9}",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "e\u{301}",
+            "\u{3a3}\u{3c3}\u{3c2}",
+            "\u{663}\u{664}\u{665}",
+            "na\u{ef}ve",
+            "\n",
+            "\n\n",
+            " ",
+            "_x",
+            "struct ",
+            "\u{4e00}",
+            "3",
+        ];
+        let patterns = [
+            (r"type \w+ struct", false),
+            (r"type \w+ struct", true),
+            (r"\w+ struct", false),
+            (r"(?m)^type \w+ struct", false),
+            (r"type \w+ struct$", false),
+            (r"\btype \w+ struct\b", false),
+            (r".*type \w+ struct", false),
+            (r"(?s)type \w+ struct", false),
+            (r"\w+", false),
+            (r"\b\w+\b", false),
+        ];
+        let compiled: Vec<Regex> = patterns
+            .iter()
+            .map(|(pat, ci)| {
+                Regex::new_with(
+                    pat,
+                    Flags {
+                        case_insensitive: *ci,
+                        ..Flags::default()
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{pat:?}: {e}"))
+            })
+            .collect();
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut windowed = 0;
+        let mut decoded = 0;
+        for round in 0..240 {
+            let mut hay = Vec::new();
+            for _ in 0..=next() % 14 {
+                hay.extend_from_slice(
+                    FRAGMENTS[(next() % FRAGMENTS.len() as u64) as usize].as_bytes(),
+                );
+            }
+            // One document in five is not text at all, which is the reading a file of binary
+            // content gets, and one in five more holds a single invalid byte in the middle of
+            // text, which the whole-file check must still see.
+            match round % 5 {
+                1 => hay.insert(hay.len() / 2, 0xff),
+                3 => hay.insert(0, 0xfe),
+                _ => {}
+            }
+            for (re, word) in compiled.iter().flat_map(|re| [(re, false), (re, true)]) {
+                let accept =
+                    |m: &Match| !word || crate::bytes::at_word_boundary(&hay, m.start, m.end);
+                let seen = line_windows();
+                let fast = re.find_all_in(&hay, usize::MAX, accept);
+                match line_windows() > seen {
+                    true => windowed += 1,
+                    false => decoded += 1,
+                }
+                let slow = re.find_all_decoded(&hay, usize::MAX, accept);
+                assert_eq!(
+                    fast,
+                    slow,
+                    "{:?} (-w {word}) on {:?}",
+                    re.literal(),
+                    String::from_utf8_lossy(&hay)
+                );
+            }
+        }
+        assert!(windowed >= 240, "{windowed} windowed searches");
+        assert!(decoded >= 240, "{decoded} decoded searches");
     }
 
     /// A mandatory literal the file does not hold rules out a match under either reading, so
