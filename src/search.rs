@@ -1491,11 +1491,10 @@ impl ExprWalk<'_> {
     /// on a directory, which the caller turns into "do not descend".
     fn visit(&mut self, facts: &Facts, sub: &str, depth: usize) -> Result<bool, String> {
         let path = path_text(facts.path).into_owned();
-        let name = facts
-            .path
-            .file_name()
-            .map(|n| name_text(n).into_owned())
-            .unwrap_or_else(|| path.clone());
+        // Sliced out of the text just made rather than asked of the `Path` again: `file_name`
+        // walks the components and converts them a second time, which measured 3.9% of an
+        // expression walk, and its answer is the tail of this same string.
+        let name = last_component(&path).unwrap_or(&path).to_string();
         let below = sub_path(sub);
         let st = &facts.st;
         let empty = self.want_empty
@@ -1536,6 +1535,36 @@ impl ExprWalk<'_> {
 
 /// The path below the starting point with the platform's separators, which is what `%P`
 /// prints: the walk keeps `/` internally because the ignore rules are matched that way.
+/// The last component of a path's text, answering what `Path::file_name` answers: `None` for
+/// a path that ends in `..`, in `.`, or is the root, the final component otherwise. Sliced out
+/// of text the caller already owns, so it costs no component walk and no second conversion.
+/// Separators follow the platform, because on Windows a walk's paths are all backslashes.
+fn last_component(path: &str) -> Option<&str> {
+    fn is_separator(b: u8) -> bool {
+        b == b'/' || (cfg!(windows) && b == b'\\')
+    }
+    let bytes = path.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && is_separator(bytes[end - 1]) {
+        end -= 1;
+    }
+    let mut text = &path[..end];
+    loop {
+        let start = text
+            .rfind(|c: char| c == '/' || (cfg!(windows) && c == '\\'))
+            .map_or(0, |i| i + 1);
+        let name = &text[start..];
+        if name == "." {
+            text = &text[..start.saturating_sub(1)];
+            continue;
+        }
+        return match name {
+            "" | ".." => None,
+            _ => Some(name),
+        };
+    }
+}
+
 fn sub_path(rel: &str) -> String {
     if std::path::MAIN_SEPARATOR == '/' {
         rel.to_string()
@@ -3812,6 +3841,57 @@ pub fn has_output(r: &SearchReport, o: &SearchOptions) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The helper has to answer exactly what `Path::file_name` answers, because it replaced it:
+    /// the cases that make that method return `None` are the ones a slice gets wrong.
+    #[test]
+    fn the_last_component_answers_what_file_name_answers() {
+        let cases = [
+            "a/b.rs",
+            "/",
+            "",
+            ".",
+            "..",
+            "a/..",
+            "a/.",
+            "a/b/",
+            "src/main.rs",
+            "a",
+            "//",
+            "x/",
+            "./a",
+            "./",
+            "a/./",
+            "./.",
+            "a/./b",
+            "...",
+            "a/...",
+            "a//",
+            "a/./b/",
+            "a/b/./",
+        ];
+        for case in cases {
+            let want = std::path::Path::new(case)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
+            let got = super::last_component(case).map(str::to_string);
+            assert_eq!(want, got, "{case:?}");
+        }
+    }
+
+    /// A walk's paths on Windows are all backslashes, and a helper that split only on `/`
+    /// answered the whole path as the name, which broke `-name`, `-prune` and `-printf`.
+    #[cfg(windows)]
+    #[test]
+    fn the_last_component_reads_backslashes_the_way_windows_does() {
+        for case in [r"a\b.rs", r"C:\x\y\", r"a\.\", r"a\..", r"\\server\share\f"] {
+            let want = std::path::Path::new(case)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
+            let got = super::last_component(case).map(str::to_string);
+            assert_eq!(want, got, "{case:?}");
+        }
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
     fn open_scan_skips_a_device_node_and_takes_a_regular_file() {
