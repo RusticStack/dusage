@@ -2871,8 +2871,37 @@ fn find_ls_prints_finds_columns_and_a_link_target() {
         mode.starts_with('l'),
         "a symlink's mode starts with l: {linked}"
     );
+    // A symlink's permission bits are the filesystem's convention, not the format's: Linux
+    // stores 0777 and macOS stores 0755, so asserting `lrwxrwxrwx` was asserting ext4. What
+    // the format guarantees is ten characters beginning with `l` and nine permission
+    // characters that mirror what `lstat` reports for this link.
     #[cfg(unix)]
-    assert_eq!(mode, "lrwxrwxrwx", "{linked}");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let md = fs::symlink_metadata(&link).unwrap();
+        let expected = format!("l{}", rwx(md.permissions().mode() & 0o777));
+        assert_eq!(mode, expected, "mirrors lstat: {linked}");
+    }
+}
+
+/// The nine `rwx` characters of a permission mask, so a test can compare a printed column
+/// with what the filesystem reports instead of with one platform's constant.
+#[cfg(unix)]
+fn rwx(perm: u32) -> String {
+    let c = |bit: u32, set: char| if perm & bit != 0 { set } else { '-' };
+    [
+        c(0o400, 'r'),
+        c(0o200, 'w'),
+        c(0o100, 'x'),
+        c(0o040, 'r'),
+        c(0o020, 'w'),
+        c(0o010, 'x'),
+        c(0o004, 'r'),
+        c(0o002, 'w'),
+        c(0o001, 'x'),
+    ]
+    .iter()
+    .collect()
 }
 
 #[test]
@@ -2903,19 +2932,55 @@ fn find_lname_matches_the_link_target() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_search_and_find_smoke() {
+    // `find` takes its paths *before* the expression, which is why this uses `find_at`
+    // rather than appending the root the way `search` tolerates. Getting that wrong answers
+    // "paths must precede expression" and nothing else, so every assertion below reports
+    // the whole invocation.
+    let saw = |o: &Output| {
+        format!(
+            "status {:?}\nstderr: {}\nstdout: {}",
+            o.status.code(),
+            String::from_utf8_lossy(&o.stderr),
+            String::from_utf8_lossy(&o.stdout)
+        )
+    };
     let f = Fixture::new("macos_smoke");
+
     let o = run(&["search", "-l", "needle"], &f.root);
-    let out = stdout(&o);
-    assert!(out.contains("main.rs"), "{out}");
-    assert!(out.contains("it.rs"), "{out}");
+    assert!(o.status.success(), "search of the fixture: {}", saw(&o));
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(out.contains("main.rs"), "search found main.rs: {}", saw(&o));
+    assert!(out.contains("it.rs"), "search found it.rs: {}", saw(&o));
     assert!(
         !out.contains("index.js"),
-        "node_modules is a builtin ignore: {out}"
+        "node_modules is a builtin ignore: {}",
+        saw(&o)
     );
 
-    let o = run(&["find", "-name", "*.rs", "-type", "f"], &f.root);
-    let out = stdout(&o);
-    assert!(out.contains("main.rs"), "{out}");
-    assert!(out.contains("util.rs"), "{out}");
-    assert!(!out.contains("index.js"), "{out}");
+    let o = find_at(&f.root, &["-name", "*.rs", "-type", "f"]);
+    assert!(o.status.success(), "find of the fixture: {}", saw(&o));
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(
+        out.contains("main.rs"),
+        "find -type f kept main.rs: {}",
+        saw(&o)
+    );
+    assert!(
+        out.contains("util.rs"),
+        "find -type f kept util.rs: {}",
+        saw(&o)
+    );
+    // `-type f` rejects a directory, so the walk agreeing with `d_type` here is the whole
+    // point of the check: a wrong kind would filter every file out and print nothing.
+    assert!(
+        !out.lines()
+            .any(|l| l.ends_with("/src") || l.ends_with("/tests")),
+        "find -type f dropped the directories: {}",
+        saw(&o)
+    );
+    assert!(
+        !out.contains("index.js"),
+        "find stayed out of node_modules: {}",
+        saw(&o)
+    );
 }

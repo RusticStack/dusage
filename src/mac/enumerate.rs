@@ -861,6 +861,13 @@ mod tests {
         let dir = |n: &str| v.iter().find(|e| e.name == n).unwrap().is_dir();
         assert!(dir("sub") && !dir("a.bin") && !dir("link"));
         assert!(v.iter().find(|e| e.name == "link").unwrap().is_reparse());
+        // The kinds `find -type` filters on, taken from `d_type` with no `fstatat` behind
+        // them: a wrong offset here makes every file answer "not a regular file", and a
+        // `-type f` search then prints nothing at all.
+        let kind = |n: &str| v.iter().find(|e| e.name == n).unwrap().kind();
+        assert_eq!(kind("sub"), Kind::Dir);
+        assert_eq!(kind("a.bin"), Kind::File);
+        assert_eq!(kind("link"), Kind::Symlink);
         // `list` clears and reuses the caller's vector.
         list(&f.0.join("sub"), &mut v, &mut errs).unwrap();
         assert!(v.is_empty());

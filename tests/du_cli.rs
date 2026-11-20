@@ -621,6 +621,10 @@ fn tree_alloc(dir: &Path) -> u64 {
 }
 
 /// A rendered human size as (bytes, the place of its last printed digit).
+///
+/// Only the oracle comparisons above reach it, and those are `cfg(unix)`: Windows has no
+/// `du` to agree or disagree with, so the helper does not exist there either.
+#[cfg(unix)]
 fn human_value(s: &str) -> (f64, f64) {
     let t = s.trim();
     // Both spellings of the kilo suffix: dusage prints `K` under `-h` and `k` under `--si`,
