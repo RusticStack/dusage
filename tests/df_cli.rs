@@ -25,6 +25,7 @@ fn stdout(o: &Output) -> String {
     String::from_utf8(o.stdout.clone()).unwrap()
 }
 
+#[cfg_attr(windows, allow(dead_code))] // Windows has no df worth comparing against
 fn real_df() -> bool {
     match Command::new("df").arg("--version").output() {
         Ok(o) if o.status.success() => true,
@@ -55,6 +56,10 @@ fn here() -> String {
         .into_owned()
 }
 
+/// The reference comparisons are Linux-only on purpose: the `df` a Windows runner has on PATH
+/// is the MSYS one, which describes its own emulated mount table and names types its own way,
+/// while `dusage df` asks Windows about volumes. Comparing the two would test MSYS, not us.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_row_matches_the_real_df() {
     if !real_df() {
@@ -94,6 +99,7 @@ fn the_row_matches_the_real_df() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_type_column_matches_the_real_df() {
     if !real_df() {
@@ -115,6 +121,18 @@ fn the_type_column_matches_the_real_df() {
     // Filesystem, Type, 1K-blocks, Used, Available, Use%, Mounted on
     assert_eq!(a[0], b[0]);
     assert_eq!(a[1], b[1], "the filesystem type agrees with df -T");
+}
+
+/// What a Windows build can still prove without a Windows `df` to compare against: the type
+/// column exists, carries a value, and the row is the filesystem holding the working
+/// directory.
+#[cfg(windows)]
+#[test]
+fn the_type_column_is_filled_in() {
+    let out = stdout(&dusage(&["-T", &here()]));
+    let row = only_row(&out);
+    assert!(out.lines().next().unwrap().contains("Type"));
+    assert!(!row[1].is_empty() && row[1] != "-", "a type: {out}");
 }
 
 #[test]

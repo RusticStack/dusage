@@ -54,6 +54,14 @@ A fast disk-usage scanner, a content and path search, and a safe parallel pruner
 - **`dusage du` speaks du.** The same per-directory report GNU `du` prints, allocated
   blocks by default, with the totals byte-identical on the trees measured (see
   [Benchmarks](#benchmarks)).
+- **`dusage tree` is `tree` with the sizes tree cannot print.** The familiar connectors and
+  the same file/directory counts, plus two columns per row — bytes on disk and bytes
+  claimed — and a directory row that carries its whole subtree the way `tree --du` does. It
+  honours the same ignore rules as `find`, so a checkout lists what `find` would return.
+- **`dusage df` is `df`.** One row per mounted filesystem with size, used, available, use
+  percent and mount point, `-h`/`--si`, `-i` inodes, `-T` filesystem type, `--json`, and
+  the same row selection GNU `df` makes. It reads `statvfs` and `/proc/self/mounts` on Linux
+  and `GetDiskFreeSpaceExW` on Windows.
 - **Safe by design.** Volume roots, Windows, Program Files, ProgramData and your profile are
   refused in every spelling, and on Linux the filesystem root, the system directories, `/home`
   and `$HOME`. Junctions, symlinks and other reparse points are never followed, and a delete
@@ -99,6 +107,8 @@ dusage <root> [OPTIONS]
 dusage scan <root> [OPTIONS]                              (same thing, named)
 dusage big <root> [OPTIONS]                               largest files only
 dusage du [PATH...] [OPTIONS]                             du totals per directory
+dusage tree [PATH...] [OPTIONS]                           the tree, with on-disk and apparent sizes
+dusage df [PATH...] [OPTIONS]                             mounted filesystems and their usage
 dusage <root> [min_big] [threads] [top_n]      (positional form, still supported)
 ```
 
@@ -366,8 +376,8 @@ one big subtree, or one huge flat folder, across every worker.
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) holds the generated tables from `bash bench/run.sh`
 plus `bash bench/summary.sh` — warm and cold passes, peak RSS per row, `scan` against `du` and
 `find`, `search` against `rg` and `grep` across literal, regex, `-c`, `-o`, `-U`, `-l` and
-`-z` cases, `find` against `find -name`, `du` against GNU `du`, and the thread sweep that
-justifies the 4..16 default. `bash scripts/perf-guard.sh` is the 25% regression check.
+`-z` cases, `find` against `find -name`, `du` against GNU `du`, `tree` against `tree -s`,
+`df` against GNU `df`, and the thread sweep that justifies the 4..16 default. `bash scripts/perf-guard.sh` is the 25% regression check.
 
 As of the commit those tables were last generated at (`main`@`323bf88`, 2 vCPUs, warm cache):
 every content case is ahead of its reference — a general regex at 0.90× ripgrep, `-o` at

@@ -287,6 +287,14 @@ fn collect(o: &Options, paths: &[OsString]) -> (Vec<FsUsage>, usize) {
         }
     } else {
         for p in paths {
+            if !Path::new(p).exists() {
+                eprintln!(
+                    "dusage df: {}: no such file or directory",
+                    p.to_string_lossy()
+                );
+                failures += 1;
+                continue;
+            }
             match usage_of(Path::new(p)) {
                 Ok(f) => {
                     if !picked
