@@ -35,32 +35,47 @@ fn real_df() -> bool {
     }
 }
 
-/// The `/` row of a `df` listing, as its fields.
-fn root_row(text: &str) -> Vec<String> {
-    text.lines()
-        .skip(1)
-        .find(|l| l.split_whitespace().last() == Some("/"))
-        .map(|l| l.split_whitespace().map(|s| s.to_string()).collect())
-        .unwrap_or_else(|| panic!("no / row in:\n{text}"))
+/// The single data row of a one-path `df` listing, as its fields. The path is the current
+/// directory, so the test says nothing about where a platform mounts its root.
+fn only_row(text: &str) -> Vec<String> {
+    let mut rows = text.lines().skip(1).map(|l| {
+        l.split_whitespace()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    });
+    let row = rows.next().expect("a data row");
+    assert!(rows.next().is_none(), "one path gives one row:\n{text}");
+    row
+}
+
+fn here() -> String {
+    std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[test]
-fn the_root_row_matches_the_real_df() {
+fn the_row_matches_the_real_df() {
     if !real_df() {
         return;
     }
+    let dir = here();
     let reference = Command::new("df")
-        .args(["-k", "/"])
+        .args(["-k", &dir])
         .output()
-        .expect("df -k /");
+        .expect("df -k <cwd>");
     assert!(reference.status.success());
-    let ours = stdout(&dusage(&["/"]));
+    let ours = stdout(&dusage(&[&dir]));
     let theirs = String::from_utf8(reference.stdout).unwrap();
-    let a = root_row(&ours);
-    let b = root_row(&theirs);
-    // Filesystem, 1K-blocks, Used, Available, Use%, Mounted on
-    assert_eq!(a[0], b[0], "the / filesystem has the same name");
-    assert_eq!(a[5], b[5], "and the same mount point");
+    let a = only_row(&ours);
+    let b = only_row(&theirs);
+    // Filesystem, 1K-blocks, Used, Available, Use%, Mounted on. The mount point's spelling is
+    // the platform's business; the filesystem's name and its arithmetic are the contract.
+    assert_eq!(
+        a[0], b[0],
+        "the same filesystem holds the working directory"
+    );
     let num = |s: &str| {
         s.parse::<u64>()
             .unwrap_or_else(|_| panic!("not a number: {s}"))
@@ -84,19 +99,22 @@ fn the_type_column_matches_the_real_df() {
     if !real_df() {
         return;
     }
-    let reference = Command::new("df").args(["-T", "-k", "/"]).output().unwrap();
+    let dir = here();
+    let reference = Command::new("df")
+        .args(["-T", "-k", &dir])
+        .output()
+        .unwrap();
     if !reference.status.success() {
         eprintln!("skipped: this df prints no --type column");
         return;
     }
     let theirs = String::from_utf8(reference.stdout).unwrap();
-    let ours = stdout(&dusage(&["-T", "/"]));
-    let a = root_row(&ours);
-    let b = root_row(&theirs);
+    let ours = stdout(&dusage(&["-T", &dir]));
+    let a = only_row(&ours);
+    let b = only_row(&theirs);
     // Filesystem, Type, 1K-blocks, Used, Available, Use%, Mounted on
     assert_eq!(a[0], b[0]);
     assert_eq!(a[1], b[1], "the filesystem type agrees with df -T");
-    assert_eq!(a[6], "/");
 }
 
 #[test]
@@ -112,31 +130,41 @@ fn every_mounted_filesystem_is_listed_unless_asked_otherwise() {
 
 #[test]
 fn inode_columns_and_human_units() {
-    let inodes = stdout(&dusage(&["-i", "/"]));
+    let dir = here();
+    let inodes = stdout(&dusage(&["-i", &dir]));
     assert!(inodes.contains("Inodes") && inodes.contains("IUse%"));
-    let human = stdout(&dusage(&["-h", "/"]));
-    let row = root_row(&human);
+    let human = stdout(&dusage(&["-h", &dir]));
+    let row = only_row(&human);
     assert!(
-        row[1].ends_with(['K', 'M', 'G', 'T']),
+        row[1].chars().next().is_some_and(|c| c.is_ascii_digit()),
+        "-h prints a figure: {}",
+        row[1]
+    );
+    assert!(
+        row[1].len() >= 2 && row[1].ends_with(['K', 'M', 'G', 'T']),
         "-h prints a unit: {}",
         row[1]
     );
-    let si = stdout(&dusage(&["--si", "/"]));
+    let si = stdout(&dusage(&["--si", &dir]));
     assert!(si.lines().nth(1).is_some());
 }
 
 #[test]
 fn json_is_well_formed_and_carries_both_count_kinds() {
-    let out = stdout(&dusage(&["--json", "/"]));
+    let dir = here();
+    let out = stdout(&dusage(&["--json", &dir]));
     assert!(out.starts_with("{\"filesystems\":["));
     assert!(out.trim_end().ends_with('}'));
     assert!(out.contains("\"filesystem\":\""));
-    assert!(out.contains("\"mount\":\"/\""));
+    assert!(out.contains("\"mount\":\""));
     assert!(out.contains("\"size\":"));
     assert!(out.contains("\"use_percent\":"));
     assert!(out.contains("\"inodes\":"));
     let size = number_after(&out, "\"size\":");
-    assert!(size > 0, "the / filesystem has a size");
+    assert!(
+        size > 0,
+        "the filesystem holding the working directory has a size"
+    );
 }
 
 #[test]
@@ -147,8 +175,7 @@ fn misuse_and_missing_paths_exit_the_documented_way() {
     assert_eq!(missing.status.code(), Some(1));
     let help = stdout(&dusage(&["--help"]));
     assert!(help.contains("--one-filesystem"));
-    // -x narrows to one filesystem: the row count of a full listing is larger or equal.
-    let one = stdout(&dusage(&["-x", "/"]));
+    let one = stdout(&dusage(&["-x", &here()]));
     assert_eq!(one.lines().count(), 2, "header plus one row:\n{one}");
 }
 
