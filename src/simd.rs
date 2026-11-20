@@ -377,6 +377,127 @@ fn portable(hay: &[u8], needle: u8, from: usize) -> Option<usize> {
         .map(|i| from + i)
 }
 
+/// True when the loops here run on vector registers on this machine. The portable fallbacks
+/// answer the same questions a byte at a time, which for a scan that is only a filter is slower
+/// than the word-at-a-time loop the caller already has, so a caller asks before choosing.
+pub fn vectorized() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return level() != Level::Portable;
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
+/// The first position at or after `from` where `hay[p + a_off] == a` and `hay[p + b_off] == b`.
+///
+/// This is the candidate filter of a literal search: one vector load answers both compares, so
+/// a position that survives it is one where two needle bytes already line up. Only positions
+/// whose bytes both lie inside `hay` are reported, in increasing order and with none skipped,
+/// so the caller can compare the window each one implies and reject it without losing a match.
+pub fn find_pair(
+    hay: &[u8],
+    a: u8,
+    a_off: usize,
+    b: u8,
+    b_off: usize,
+    from: usize,
+) -> Option<usize> {
+    let wide = a_off.max(b_off);
+    // The last start whose two bytes both lie inside the haystack.
+    if from > hay.len().checked_sub(wide + 1)? {
+        return None;
+    }
+    #[cfg(target_arch = "x86_64")]
+    match level() {
+        // SAFETY: both take the haystack length and check every load against it before issuing
+        // it, and the feature they need was detected at startup.
+        Level::Avx2 => return unsafe { find_pair_avx2(hay, a, a_off, b, b_off, from) },
+        Level::Sse2 => return unsafe { find_pair_sse2(hay, a, a_off, b, b_off, from) },
+        Level::Portable => {}
+    }
+    pair_from(hay, a, a_off, b, b_off, from)
+}
+
+/// The pair scan a byte at a time, for a machine with no vector unit and for the block a vector
+/// loop leaves at the end of a haystack.
+fn pair_from(hay: &[u8], a: u8, a_off: usize, b: u8, b_off: usize, from: usize) -> Option<usize> {
+    let end = hay.len().checked_sub(a_off.max(b_off) + 1)?;
+    (from..=end).find(|&at| hay[at + a_off] == a && hay[at + b_off] == b)
+}
+
+/// The pair scan over 32-byte blocks. Each block loads at the two offsets rather than at the
+/// window start, so lane `L` of the block is window start `i + L` for both compares and the
+/// block advances by its full width:
+///
+/// ```text
+///   hay:   ... | i + a_off .. i + a_off + 31 |        compare with `a`
+///              | i + b_off .. i + b_off + 31 |        compare with `b`
+///   lanes:       0 ......... 31                  = window starts i ..= i + 31
+/// ```
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_pair_avx2(
+    hay: &[u8],
+    a: u8,
+    a_off: usize,
+    b: u8,
+    b_off: usize,
+    from: usize,
+) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let len = hay.len();
+    let ptr = hay.as_ptr();
+    let wa = _mm256_set1_epi8(a as i8);
+    let wb = _mm256_set1_epi8(b as i8);
+    let wide = a_off.max(b_off);
+    let mut i = from;
+    // SAFETY: `i + wide + 32 <= len`, so both 32-byte loads, the later one ending at
+    // `i + wide + 32`, stay inside the slice.
+    while i + wide + 32 <= len {
+        let pa = unsafe { _mm256_loadu_si256(ptr.add(i + a_off) as *const __m256i) };
+        let pb = unsafe { _mm256_loadu_si256(ptr.add(i + b_off) as *const __m256i) };
+        let cand = _mm256_movemask_epi8(_mm256_and_si256(
+            _mm256_cmpeq_epi8(pa, wa),
+            _mm256_cmpeq_epi8(pb, wb),
+        )) as u32;
+        if cand != 0 {
+            return Some(i + cand.trailing_zeros() as usize);
+        }
+        i += 32;
+    }
+    pair_from(hay, a, a_off, b, b_off, i)
+}
+
+/// The pair scan over 16-byte blocks, for the same machine that has no AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn find_pair_sse2(
+    hay: &[u8],
+    a: u8,
+    a_off: usize,
+    b: u8,
+    b_off: usize,
+    from: usize,
+) -> Option<usize> {
+    use std::arch::x86_64::*;
+    let len = hay.len();
+    let ptr = hay.as_ptr();
+    let wa = _mm_set1_epi8(a as i8);
+    let wb = _mm_set1_epi8(b as i8);
+    let wide = a_off.max(b_off);
+    let mut i = from;
+    // SAFETY: `i + wide + 16 <= len`, so both 16-byte loads stay inside the slice.
+    while i + wide + 16 <= len {
+        let pa = unsafe { _mm_loadu_si128(ptr.add(i + a_off) as *const __m128i) };
+        let pb = unsafe { _mm_loadu_si128(ptr.add(i + b_off) as *const __m128i) };
+        let cand = _mm_movemask_epi8(_mm_and_si128(_mm_cmpeq_epi8(pa, wa), _mm_cmpeq_epi8(pb, wb))) as u32;
+        if cand != 0 {
+            return Some(i + cand.trailing_zeros() as usize);
+        }
+        i += 16;
+    }
+    pair_from(hay, a, a_off, b, b_off, i)
+}
+
 fn portable2(hay: &[u8], a: u8, b: u8, from: usize) -> Option<(usize, u8)> {
     hay.get(from..)?
         .iter()
