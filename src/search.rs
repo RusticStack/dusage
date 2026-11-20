@@ -1585,6 +1585,549 @@ pub fn search(o: &SearchOptions) -> io::Result<SearchReport> {
     Ok(report)
 }
 
+/// How many files are handed to a worker at once. The batch is the unit the queue, the printer
+/// and the walk's own turn at the scan all work in, so what it costs per file is a fraction of
+/// what the same step costs one file at a time — which on a tree of fifteen thousand files is
+/// the difference between the scan overlapping the walk and the two taking turns.
+const BATCH: usize = 128;
+
+/// How many times a waiter looks again before it parks. A batch is scanned in tens of
+/// microseconds, so a wait this short usually ends without a context switch.
+const SPIN: usize = 256;
+
+/// The most result bytes a stream will hold between the scan and the printer. This is the bound
+/// that matters: a search of a large tree keeps a buffer rather than the whole answer.
+const BUFFER_MAX: usize = 4 * 1024 * 1024;
+
+/// How many files may be waiting for a worker at once: the walk runs a little ahead of the
+/// scan, and a deep queue is what keeps the workers fed — a queue that empties wakes a worker
+/// for every batch it hands over, and on a machine with no idle core a wake costs more than the
+/// batch.
+fn scan_window(o: &SearchOptions) -> usize {
+    (o.threads.max(1) * 1024).max(2048)
+}
+
+/// One open directory in a streamed content search, ordered by the whole path of its next
+/// entry. A result list is one flat order over the whole paths, unlike a path listing's tree
+/// order: a directory takes its place in that order by its own path, and everything under it
+/// sorts where that path does.
+///
+/// The node carries the key of the entry it offers, built once when the entry is reached: the
+/// merge runs a comparison per level of the heap for every result, and reading a path back to
+/// text inside one costs several times what the comparison itself does.
+struct Flat {
+    cursor: Cursor,
+    /// The path of the cursor's next entry, as it prints.
+    key: String,
+}
+
+impl Flat {
+    fn new(cursor: Cursor) -> Flat {
+        let key = cursor
+            .head()
+            .map(|c| c.path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Flat { cursor, key }
+    }
+
+    /// The entry this cursor offers next, leaving it on the key of the one after.
+    fn next(&mut self) -> Option<Candidate> {
+        let cand = self.cursor.items.pop_front();
+        if let Some(head) = self.cursor.head() {
+            self.key.clear();
+            self.key.push_str(&head.path.to_string_lossy());
+        }
+        cand
+    }
+}
+
+impl Ord for Flat {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key
+            .cmp(&other.key)
+            .then_with(|| self.cursor.seq.cmp(&other.cursor.seq))
+    }
+}
+
+impl PartialOrd for Flat {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Flat {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Flat {}
+
+/// The scan half of a streamed search: the walk hands files to the workers in print order and
+/// the printer takes their results back in the same order, so a file that is slow to scan holds
+/// the results behind it rather than the whole answer.
+struct Scans {
+    state: Mutex<ScanState>,
+    /// Workers asleep waiting for work.
+    jobs_cv: std::sync::Condvar,
+    /// The printer asleep waiting for the batch it prints next.
+    done_cv: std::sync::Condvar,
+    /// The walk asleep waiting for the printer to make room.
+    room_cv: std::sync::Condvar,
+}
+
+/// Why a batch was not accepted by the queue.
+enum Push {
+    Full(Vec<PathBuf>),
+    Stopped,
+}
+
+/// What one worker found in the files of one batch, in the order the writer handed them over.
+type Scanned = Vec<(Option<FileHits>, Stats)>;
+
+struct ScanState {
+    jobs: VecDeque<(u64, Vec<PathBuf>)>,
+    /// Results the printer has not taken, by the batch number the walk gave them.
+    done: std::collections::BTreeMap<u64, Scanned>,
+    /// Batches handed out, and the next one the printer will take.
+    handed: u64,
+    next: u64,
+    /// Files waiting for a worker, so the walk cannot run away with the tree.
+    queued: usize,
+    /// Result bytes the printer has not taken yet: the stream's actual cost in memory.
+    buffered: usize,
+    closed: bool,
+    /// The printer gave up: a write failed, so nobody should scan or walk any further.
+    aborted: bool,
+    job_waiters: usize,
+    done_waiters: usize,
+    room_waiters: usize,
+}
+
+impl Scans {
+    fn new() -> Scans {
+        Scans {
+            state: Mutex::new(ScanState {
+                jobs: VecDeque::new(),
+                done: std::collections::BTreeMap::new(),
+                handed: 0,
+                next: 0,
+                queued: 0,
+                buffered: 0,
+                closed: false,
+                aborted: false,
+                job_waiters: 0,
+                done_waiters: 0,
+                room_waiters: 0,
+            }),
+            jobs_cv: std::sync::Condvar::new(),
+            done_cv: std::sync::Condvar::new(),
+            room_cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ScanState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hand one batch over, in print order, or give it back when the queue already holds
+    /// `window` files: how far the walk may run ahead of the scan is what bounds the paths in
+    /// memory, and the walk has better things to do with the wait than sleep (see [`claim`]).
+    ///
+    /// `Stopped` means the print failed — a broken pipe — so the walk should stop too.
+    ///
+    /// [`claim`]: Scans::claim
+    fn push(&self, files: Vec<PathBuf>, window: usize) -> Result<(), Push> {
+        let mut g = self.lock();
+        if g.aborted || g.closed {
+            return Err(Push::Stopped);
+        }
+        if g.queued >= window {
+            return Err(Push::Full(files));
+        }
+        let seq = g.handed;
+        g.handed += 1;
+        g.queued += files.len();
+        g.jobs.push_back((seq, files));
+        let wake = g.job_waiters;
+        drop(g);
+        if wake > 0 {
+            self.jobs_cv.notify_one();
+        }
+        Ok(())
+    }
+
+    /// Sleep until a worker takes a batch, which is what makes room again.
+    fn wait_for_room(&self) {
+        let mut g = self.lock();
+        if g.aborted || g.closed || g.queued == 0 {
+            return;
+        }
+        g.room_waiters += 1;
+        let mut g = self.room_cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        g.room_waiters -= 1;
+    }
+
+    /// Take a batch over when one is waiting: the walk thread spends the wait for room on the
+    /// work it is waiting for, so the walk costs the scan no parallelism on a machine with no
+    /// core to spare.
+    fn claim(&self) -> Option<(u64, Vec<PathBuf>)> {
+        let mut g = self.lock();
+        if g.buffered >= BUFFER_MAX {
+            return None;
+        }
+        let (seq, files) = g.jobs.pop_front()?;
+        g.queued -= files.len();
+        Some((seq, files))
+    }
+
+    /// The next batch to scan, or `None` when the search is over. A worker waits here both for
+    /// work and for the printer to make room: the results waiting to be printed are what bounds
+    /// the stream's memory, so a worker stops taking batches while they hold the buffer.
+    fn next_job(&self) -> Option<(u64, Vec<PathBuf>)> {
+        let mut g = self.lock();
+        let mut spins = 0;
+        loop {
+            if g.aborted {
+                return None;
+            }
+            // Past the end of the walk the queue is drained whatever the buffer holds: a batch
+            // left unscanned is one the printer would wait for forever.
+            if g.jobs.front().is_some() && (g.buffered < BUFFER_MAX || g.closed) {
+                let (seq, files) = g.jobs.pop_front().expect("checked above");
+                g.queued -= files.len();
+                let wake = g.room_waiters;
+                drop(g);
+                if wake > 0 {
+                    self.room_cv.notify_one();
+                }
+                return Some((seq, files));
+            }
+            if g.closed {
+                return None;
+            }
+            if spins < SPIN {
+                spins += 1;
+                drop(g);
+                std::hint::spin_loop();
+                g = self.lock();
+                continue;
+            }
+            g.job_waiters += 1;
+            g = self.jobs_cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            g.job_waiters -= 1;
+        }
+    }
+
+    /// The next batch of results, waiting for the worker that has it. `None` means the walk is
+    /// finished and everything it handed over has been printed.
+    fn take(&self) -> Option<Scanned> {
+        let mut g = self.lock();
+        let mut spins = 0;
+        loop {
+            let next = g.next;
+            if let Some(out) = g.done.remove(&next) {
+                g.next += 1;
+                g.buffered -= batch_bytes(&out);
+                let wake = g.job_waiters;
+                drop(g);
+                if wake > 0 {
+                    self.jobs_cv.notify_all();
+                }
+                return Some(out);
+            }
+            if g.closed && next >= g.handed {
+                return None;
+            }
+            if g.aborted {
+                return None;
+            }
+            if spins < SPIN {
+                spins += 1;
+                drop(g);
+                std::hint::spin_loop();
+                g = self.lock();
+                continue;
+            }
+            g.done_waiters += 1;
+            g = self.done_cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            g.done_waiters -= 1;
+        }
+    }
+
+    /// Hand a scanned batch back under its number.
+    fn finish(&self, seq: u64, done: Scanned) {
+        let wake = {
+            let mut g = self.lock();
+            g.buffered += batch_bytes(&done);
+            g.done.insert(seq, done);
+            g.done_waiters
+        };
+        if wake > 0 {
+            self.done_cv.notify_all();
+        }
+    }
+
+    /// No more batches are coming: the workers drain what is queued, and the printer stops once
+    /// it has printed everything handed over.
+    fn close(&self) {
+        let mut g = self.lock();
+        g.closed = true;
+        drop(g);
+        self.jobs_cv.notify_all();
+        self.done_cv.notify_all();
+    }
+
+    /// Stop everything, results outstanding or not: the printer failed, so no batch it hands
+    /// over will ever be read.
+    fn abort(&self) {
+        let mut g = self.lock();
+        g.closed = true;
+        g.aborted = true;
+        drop(g);
+        self.jobs_cv.notify_all();
+        self.done_cv.notify_all();
+        self.room_cv.notify_all();
+    }
+}
+
+/// What one batch of results costs in memory while it waits for the printer.
+fn batch_bytes(batch: &Scanned) -> usize {
+    batch
+        .iter()
+        .map(|(got, _)| match got {
+            Some(f) => f.hits.len() * std::mem::size_of::<LineHit>() + f.pool.len() + f.path.len(),
+            None => 0,
+        })
+        .sum()
+}
+
+/// One scan worker: take the next batch in print order, scan its files in order, hand the
+/// results back together.
+fn scan_worker(scans: &Scans, o: &SearchOptions) {
+    loop {
+        let Some((seq, files)) = scans.next_job() else {
+            return;
+        };
+        let done = scan_batch_of(&files, o);
+        scans.finish(seq, done);
+    }
+}
+
+/// Scan the files of one batch, in the order the walk handed them over.
+fn scan_batch_of(files: &[PathBuf], o: &SearchOptions) -> Scanned {
+    let mut done: Scanned = Vec::with_capacity(files.len());
+    for path in files {
+        let mut stats = Stats::default();
+        let got = match scan_file(path, o, &mut stats) {
+            Ok(got) => got,
+            Err(e) => {
+                if e.kind() != io::ErrorKind::NotFound {
+                    stats.errors.record(&e);
+                }
+                None
+            }
+        };
+        done.push((got, stats));
+    }
+    done
+}
+
+/// Search `o.roots`, printing each file's result as the walk reaches its turn instead of
+/// holding the whole answer.
+///
+/// Three stages, one thread each for the two that are not the scan: the walk lists the tree in
+/// result order and hands files over a batch at a time, the scan workers search them, and this
+/// thread prints them in that same order. Only one of them may be busy at a time on a small
+/// machine — a printer that stalls the walk, or a walk that stalls the scan, costs more than the
+/// batching saves — so the walk is not the printer's thread.
+///
+/// Only `--sort path` without `--sortr` has an order a stream can reach, so the caller keeps
+/// [`search`] for a reversed or time-keyed sort.
+pub fn search_stream<F>(o: &SearchOptions, sink: &mut F) -> io::Result<SearchReport>
+where
+    F: FnMut(&FileHits) -> io::Result<()>,
+{
+    let t0 = Instant::now();
+    let mut report = SearchReport {
+        paths: Vec::new(),
+        files: Vec::new(),
+        stats: Stats::default(),
+        any_match: false,
+    };
+    let scans = Scans::new();
+    let window = scan_window(o);
+    let mut walk_stats = Stats::default();
+    let mut write_err: Option<io::Error> = None;
+    std::thread::scope(|scope| {
+        // One worker fewer than the machine has threads: the walk is the other one, and it
+        // scans whatever the queue holds while it waits for room.
+        for _ in 0..o.threads.saturating_sub(1).max(1) {
+            let (scans, o) = (&scans, &*o);
+            scope.spawn(move || scan_worker(scans, o));
+        }
+        let walker = {
+            let (scans, o) = (&scans, &*o);
+            scope.spawn(move || walk_stream(scans, o, window))
+        };
+        while let Some(batch) = scans.take() {
+            if let Err(e) = print_batch(batch, o, &mut report, sink) {
+                write_err = Some(e);
+                break;
+            }
+        }
+        // A broken pipe stops the walk where it is; nothing it hands over can be printed.
+        scans.abort();
+        walk_stats = walker.join().unwrap_or_default();
+    });
+    merge_stats(&mut report.stats, &walk_stats);
+    report.stats.elapsed = t0.elapsed();
+    match write_err {
+        Some(e) => Err(e),
+        None => Ok(report),
+    }
+}
+
+/// The walk half of a streamed search: list the tree in the order a result list prints, and
+/// hand its files to the scan in batches, waiting whenever the printer has fallen a window
+/// behind.
+fn walk_stream(scans: &Scans, o: &SearchOptions, window: usize) -> Stats {
+    let root_dev = root_device(o);
+    let (direct, jobs, mut stats) = root_jobs(o, root_dev);
+    let mut heap: BinaryHeap<Reverse<Flat>> = BinaryHeap::new();
+    let mut pending: Vec<PathBuf> = Vec::with_capacity(BATCH);
+    let mut seq = 0u64;
+    // A file named on the command line is a result of its own, as in a path listing.
+    for cand in direct {
+        let mut items = VecDeque::with_capacity(1);
+        items.push_back(cand);
+        heap.push(Reverse(Flat::new(Cursor {
+            items,
+            kids: VecDeque::new(),
+            seq,
+        })));
+        seq += 1;
+    }
+    // Directories are read here, in the order their entries print: a content search is bound
+    // by the files, so reading listings ahead of the scan only bought wakeups.
+    for job in jobs {
+        let cursor = open_cursor(read_job(&job, o, true), &mut stats, seq);
+        seq += 1;
+        if cursor.head().is_some() {
+            heap.push(Reverse(Flat::new(cursor)));
+        }
+    }
+    while let Some(Reverse(mut top)) = heap.pop() {
+        let Some(cand) = top.next() else {
+            continue;
+        };
+        let kid = if cand.is_dir {
+            top.cursor.take_kid(&cand.rel)
+        } else {
+            None
+        };
+        if top.cursor.head().is_some() {
+            heap.push(Reverse(top));
+        }
+        if cand.is_dir {
+            // Nothing prints for a directory: opening it is what puts the entries below it in
+            // their place in the order.
+            let Some(job) = kid else { continue };
+            let child = open_cursor(read_job(&job, o, true), &mut stats, seq);
+            seq += 1;
+            if child.head().is_some() {
+                heap.push(Reverse(Flat::new(child)));
+            }
+            continue;
+        }
+        pending.push(cand.path);
+        if pending.len() >= BATCH {
+            let mut files = std::mem::replace(&mut pending, Vec::with_capacity(BATCH));
+            loop {
+                match scans.push(files, window) {
+                    Ok(()) => break,
+                    Err(Push::Stopped) => return stats,
+                    // The scan has more queued than it needs: take one over rather than sleep,
+                    // and sleep only when there is nothing queued to take.
+                    Err(Push::Full(back)) => {
+                        files = back;
+                        match scans.claim() {
+                            Some((seq, ready)) => scans.finish(seq, scan_batch_of(&ready, o)),
+                            None => scans.wait_for_room(),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !pending.is_empty() {
+        while let Err(Push::Full(back)) = scans.push(pending, window) {
+            pending = back;
+            match scans.claim() {
+                Some((seq, files)) => scans.finish(seq, scan_batch_of(&files, o)),
+                None => scans.wait_for_room(),
+            }
+        }
+    }
+    scans.close();
+    stats
+}
+
+/// Print one scanned batch in the order the walk handed its files over.
+fn print_batch<F>(
+    got: Scanned,
+    o: &SearchOptions,
+    report: &mut SearchReport,
+    sink: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut(&FileHits) -> io::Result<()>,
+{
+    for (hit, stats) in got {
+        merge_stats(&mut report.stats, &stats);
+        emit_file(hit, o, report, sink)?;
+    }
+    Ok(())
+}
+
+/// Print one finished file, under the rules [`search`] applies to its collected results:
+/// `-L` prints the files that did not match, `--passthru` and `-c --include-zero` keep a file
+/// the walk found nothing in, and the modes that print no lines drop them first.
+fn emit_file<F>(
+    got: Option<FileHits>,
+    o: &SearchOptions,
+    report: &mut SearchReport,
+    sink: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut(&FileHits) -> io::Result<()>,
+{
+    let Some(got) = got else { return Ok(()) };
+    if o.files_without_matches {
+        if got.matches == 0 {
+            sink(&got)?;
+            report.any_match = true;
+        }
+        return Ok(());
+    }
+    if got.matches == 0 {
+        if (o.passthru && !got.hits.is_empty()) || (o.include_zero && o.count) {
+            sink(&got)?;
+        }
+        return Ok(());
+    }
+    report.stats.files_matched += 1;
+    report.any_match = true;
+    if o.count || o.count_matches || o.files_with_matches {
+        sink(&FileHits {
+            hits: Vec::new(),
+            ..got
+        })
+    } else {
+        sink(&got)
+    }
+}
+
 thread_local! {
     /// The scan buffer, allocated once per worker thread and handed back after every file.
     static SCAN_BUF: std::cell::RefCell<Vec<u8>> =
@@ -1908,7 +2451,7 @@ fn scan_multiline(
     } else {
         hits.iter().filter(|h| h.matched).count() as u64
     };
-    present(&mut hits, o);
+    present(&mut hits, o, &[]);
     let out = FileHits {
         path: name(),
         hits,
@@ -2025,7 +2568,7 @@ fn scan_records(path: &Path, o: &SearchOptions, stats: &mut Stats) -> io::Result
     let keep =
         o.count || o.count_matches || o.files_with_matches || o.files_without_matches || o.quiet;
     if !keep {
-        present(&mut hits, o);
+        present(&mut hits, o, &[]);
     }
     Ok(Some(FileHits {
         path: path.to_string_lossy().into_owned(),
@@ -2455,25 +2998,25 @@ impl<'a> Scanner<'a> {
                 }
             }
             if self.want_lines {
-                let text = line.to_vec();
                 let offset = self.pos + ls as u64;
                 let mut spans: Vec<(usize, usize)> = Vec::new();
                 if self.o.paint {
                     let mut at = 0;
-                    while let Some(cm) = self.o.pattern.block_match(&text, at) {
+                    while let Some(cm) = self.o.pattern.block_match(line, at) {
                         spans.push((cm.start, cm.end));
                         at = cm.end.max(cm.start + 1);
                     }
                 }
-                self.hits.push(LineHit {
-                    number: line_no,
+                push_pooled(
+                    &mut self.hits,
+                    &mut self.pool,
+                    line_no,
                     offset,
-                    text,
-                    pooled: (0, 0),
-                    matched: true,
+                    line,
+                    true,
                     spans,
-                    text_start: 0,
-                });
+                    0,
+                );
             }
             // One line is reported once however many matches it holds.
             pos = le + 1;
@@ -2629,6 +3172,7 @@ impl<'a> Scanner<'a> {
             self.o,
             &mut self.history,
             &mut self.hits,
+            &mut self.pool,
             &mut self.matches,
             &mut self.total,
             &mut self.remaining_after,
@@ -2649,17 +3193,7 @@ fn finished(
     binary: bool,
 ) -> io::Result<Option<FileHits>> {
     sc.flush();
-    // `--trim` and `--max-columns` rewrite a record's text, which a pooled one cannot do in
-    // place; those two modes give the file's matches texts of their own.
-    if o.trim || o.max_columns > 0 {
-        for h in &mut sc.hits {
-            if h.pooled != (0, 0) {
-                h.text = h.text(&sc.pool).to_vec();
-                h.pooled = (0, 0);
-            }
-        }
-    }
-    present(&mut sc.hits, o);
+    present(&mut sc.hits, o, &sc.pool);
     if sc.matches == 0 {
         // `--passthru` prints the file anyway, so its lines are kept even with no match.
         let wants_zero = o.files_without_matches || (o.include_zero && o.count) || (o.passthru);
@@ -2694,23 +3228,38 @@ fn finished(
 
 /// The lines as they print: `--trim` drops the leading whitespace and `--max-columns` cuts
 /// what is left, with the spans shifted so colouring and the columns still line up.
-fn present(hits: &mut [LineHit], o: &SearchOptions) {
+///
+/// A record whose text it shares with its file's `pool` is only materialised when one of the
+/// two actually changes it, so a file's matches cost one buffer rather than one each.
+fn present(hits: &mut [LineHit], o: &SearchOptions, pool: &[u8]) {
+    if !o.trim && o.max_columns == 0 {
+        return;
+    }
     for h in hits {
-        if o.trim {
-            let cut = h
-                .text
+        let cut = if o.trim {
+            h.text(pool)
                 .iter()
                 .take_while(|b| b.is_ascii_whitespace())
-                .count();
-            if cut > 0 {
-                h.text.drain(..cut);
-                h.text_start += cut;
-                h.spans.retain_mut(|(s, e)| {
-                    *s = s.saturating_sub(cut);
-                    *e = e.saturating_sub(cut);
-                    *e > *s
-                });
+                .count()
+        } else {
+            0
+        };
+        if cut > 0 || (o.max_columns > 0 && h.text(pool).len() > o.max_columns) {
+            if h.pooled != (0, 0) {
+                h.text = h.text(pool).to_vec();
+                h.pooled = (0, 0);
             }
+        } else {
+            continue;
+        }
+        if cut > 0 {
+            h.text.drain(..cut);
+            h.text_start += cut;
+            h.spans.retain_mut(|(s, e)| {
+                *s = s.saturating_sub(cut);
+                *e = e.saturating_sub(cut);
+                *e > *s
+            });
         }
         if o.max_columns > 0 && h.text.len() > o.max_columns {
             // Columns are characters, as in ripgrep, so a cut never lands inside a code
@@ -2754,6 +3303,7 @@ fn handle_line(
     o: &SearchOptions,
     history: &mut VecDeque<(u64, Vec<u8>)>,
     hits: &mut Vec<LineHit>,
+    pool: &mut Vec<u8>,
     matches: &mut u64,
     total: &mut u64,
     remaining_after: &mut usize,
@@ -2767,29 +3317,13 @@ fn handle_line(
         // `--passthru` prints the whole file, so a line the pattern did not select still goes
         // out, as plain context rather than a hit.
         if want_lines && o.passthru {
-            hits.push(LineHit {
-                number: no,
-                offset,
-                text: text.to_vec(),
-                pooled: (0, 0),
-                matched: false,
-                spans: Vec::new(),
-                text_start: 0,
-            });
+            push_pooled(hits, pool, no, offset, text, false, Vec::new(), 0);
             *last_emitted = no;
             return false;
         }
         // A context line after a match, while the window lasts.
         if want_lines && *remaining_after > 0 {
-            hits.push(LineHit {
-                number: no,
-                offset,
-                text: text.to_vec(),
-                pooled: (0, 0),
-                matched: false,
-                spans: Vec::new(),
-                text_start: 0,
-            });
+            push_pooled(hits, pool, no, offset, text, false, Vec::new(), 0);
             *last_emitted = no;
             *remaining_after -= 1;
         } else if want_lines && o.before > 0 {
@@ -2874,31 +3408,57 @@ fn handle_line(
     let spans: Vec<(usize, usize)> = found.iter().map(|m| (m.start, m.end)).collect();
     if o.only_matching && !spans.is_empty() {
         for (s, e) in spans {
-            hits.push(LineHit {
-                number: no,
-                offset: offset + s as u64,
-                text: text[s..e].to_vec(),
-                pooled: (0, 0),
-                matched: true,
-                spans: Vec::new(),
-                text_start: s,
-            });
+            push_pooled(
+                hits,
+                pool,
+                no,
+                offset + s as u64,
+                &text[s..e],
+                true,
+                Vec::new(),
+                s,
+            );
             *last_emitted = no;
         }
     } else {
-        hits.push(LineHit {
-            number: no,
-            offset,
-            text: text.to_vec(),
-            pooled: (0, 0),
-            matched: true,
-            spans,
-            text_start: 0,
-        });
-        *last_emitted = no;
+        push_pooled(hits, pool, no, offset, text, true, spans, 0);
     }
     *remaining_after = o.after;
     *matches >= limit
+}
+
+/// Append the replacement for the match at `start` of `text`, group references resolved
+/// Push one record whose text joins the file's `pool` instead of owning a buffer: a line of
+/// a file that matches often then costs one allocation rather than one each, and a `u32`
+/// offset addresses the pool while it still fits.
+#[allow(clippy::too_many_arguments)]
+fn push_pooled(
+    hits: &mut Vec<LineHit>,
+    pool: &mut Vec<u8>,
+    number: u64,
+    offset: u64,
+    text: &[u8],
+    matched: bool,
+    spans: Vec<(usize, usize)>,
+    text_start: usize,
+) {
+    let mut hit = LineHit {
+        number,
+        offset,
+        text: Vec::new(),
+        pooled: (0, 0),
+        matched,
+        spans,
+        text_start,
+    };
+    if pool.len() + text.len() <= POOL_MAX {
+        let from = pool.len() as u32;
+        pool.extend_from_slice(text);
+        hit.pooled = (from, pool.len() as u32);
+    } else {
+        hit.text = text.to_vec();
+    }
+    hits.push(hit);
 }
 
 /// Append the replacement for the match at `start` of `text`, group references resolved
@@ -3441,7 +4001,8 @@ mod tests {
         f.file("a.txt", "one\r\nneedle\r\nthree\r\n");
         let r = search(&opts(&f, "^needle$")).unwrap();
         assert_eq!(r.stats.matches, 1);
-        assert_eq!(r.files[0].hits[0].text, b"needle");
+        let f = &r.files[0];
+        assert_eq!(f.hits[0].text(&f.pool), b"needle");
     }
 
     #[test]

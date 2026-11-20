@@ -3,7 +3,7 @@
 //! Formatting helpers here are deliberately independent of `cli.rs`.
 
 use crate::model::{ScanResult, Totals};
-use crate::search::{Candidate, LineHit, SearchOptions, SearchReport};
+use crate::search::{Candidate, FileHits, LineHit, SearchOptions, SearchReport};
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -420,22 +420,59 @@ pub fn render_search(
     // The CLI decides from the roots (several paths, or a directory walk); a bare
     // `dusage search needle file.txt` prints lines without a file name.
     let many = o.with_filename.unwrap_or(r.files.len() > 1);
-    // `--null-data` ends every printed record with NUL, which is what makes the output safe
-    // to pipe into `xargs -0`.
-    let end: &[u8] = if o.term == b'\n' { b"\n" } else { &[o.term] };
-    let row = Row {
-        o,
-        color,
-        named: many && !o.heading,
-        end,
-    };
-    let mut printed = false;
-    let mut printed_heading = false;
+    let mut stream = SearchStream::new(o, color, many);
     for f in &r.files {
+        stream.file(out, f)?;
+    }
+    Ok(())
+}
+
+/// Text output for a search that prints each file as the walk reaches its turn, in the order
+/// [`render_search`] would have printed the whole set. Everything that spans files — the
+/// name field, `--heading`'s blank line between files, the context separator between groups —
+/// lives here, so a stream and a held report print the same bytes.
+pub struct SearchStream<'a> {
+    o: &'a SearchOptions,
+    many: bool,
+    row: Row<'a>,
+    /// A line has printed: the context separator goes between groups, not before the first.
+    printed: bool,
+    printed_heading: bool,
+}
+
+impl<'a> SearchStream<'a> {
+    pub fn new(o: &'a SearchOptions, color: bool, many: bool) -> Self {
+        // `--null-data` ends every printed record with NUL, which is what makes the output safe
+        // to pipe into `xargs -0`.
+        let end: &'a [u8] = if o.term == b'\n' {
+            b"\n"
+        } else {
+            std::slice::from_ref(&o.term)
+        };
+        SearchStream {
+            o,
+            many,
+            row: Row {
+                o,
+                color,
+                named: many && !o.heading,
+                end,
+            },
+            printed: false,
+            printed_heading: false,
+        }
+    }
+
+    /// Print one file's share of the results.
+    pub fn file(&mut self, out: &mut dyn Write, f: &FileHits) -> io::Result<()> {
+        let o = self.o;
+        let many = self.many;
+        let end = self.row.end;
+        let color = self.row.color;
         if o.files_with_matches || o.files_without_matches {
             write_path(out, &f.path, o)?;
             out.write_all(if o.null { b"\0" } else { end })?;
-            continue;
+            return Ok(());
         }
         if o.count || o.count_matches {
             let n = if o.count_matches { f.total } else { f.matches };
@@ -445,20 +482,20 @@ pub fn render_search(
             }
             write!(out, "{n}")?;
             out.write_all(end)?;
-            continue;
+            return Ok(());
         }
         if f.binary && !o.text {
             out.write_all(b"Binary file ")?;
             write_path(out, &f.path, o)?;
             out.write_all(b" matches")?;
             out.write_all(end)?;
-            continue;
+            return Ok(());
         }
         // `--heading` puts the file name on its own line and drops it from the lines below.
         // Without a name to print — one file, no `-H` — it is the same as no heading at all,
         // and `--vimgrep` carries the path on every row instead.
         if o.heading && many && !o.vimgrep {
-            if printed_heading {
+            if self.printed_heading {
                 writeln!(out)?;
             }
             if color {
@@ -469,7 +506,7 @@ pub fn render_search(
                 out.write_all(color::RESET.as_bytes())?;
             }
             out.write_all(end)?;
-            printed_heading = true;
+            self.printed_heading = true;
         }
         // grep and ripgrep separate context groups and nothing else; a plain match list has no
         // separator at all, and `--no-context-separator` prints none between groups either.
@@ -477,13 +514,13 @@ pub fn render_search(
         let mut last: Option<u64> = None;
         for h in &f.hits {
             let consecutive = last.is_some_and(|l| h.number == l + 1);
-            if grouped && printed && (last.is_none() || !consecutive) {
+            if grouped && self.printed && (last.is_none() || !consecutive) {
                 if let Some(sep) = &o.context_sep {
                     out.write_all(sep)?;
                     out.write_all(end)?;
                 }
             }
-            printed = true;
+            self.printed = true;
             last = Some(h.number);
             let sep: &[u8] = if h.matched {
                 &o.field_match_sep
@@ -500,6 +537,7 @@ pub fn render_search(
             } else {
                 &h.spans
             };
+            let row = &self.row;
             if o.vimgrep && !spans.is_empty() {
                 for span in spans {
                     row.write(
@@ -516,8 +554,8 @@ pub fn render_search(
                 row.write(out, &f.path, h, sep, spans.first().copied(), spans, text)?;
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 /// One JSON document for `dusage search --json`, with the report's stats appended.
