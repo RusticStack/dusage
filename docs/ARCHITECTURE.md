@@ -309,7 +309,10 @@ what proves it against libSystem, and the mount-record test is the one that catc
 `struct statfs` bound at the wrong offset. The `$INODE64` link names are
 what Darwin's headers resolve `readdir`, `stat`, `lstat` and `fstatat` to; `open` is
 variadic, as in C, because rustc rejects a fixed-arity declaration of it on Darwin.
-`struct statfs` (2168 bytes) is declared there too, and `getmntinfo` is the mount table:
+`struct statfs` is declared there too — `__DARWIN_STRUCT_STATFS64` from Apple's
+`bsd/sys/mount.h`, 2168 bytes, `f_fstypename` at 72 — and `getmntinfo$INODE64` is the mount
+table, the alias that header's `__DARWIN_INODE64(getmntinfo)` resolves onto (the plain symbol
+fills the legacy struct of the same name):
 `filesystem_types` keys it by the device `stat` reports for each `f_mntonname`, because
 Darwin's `struct statfs` has no `st_dev` (`f_fsid` is a filesystem id, not a `dev_t`), and
 `mount_roots` hands the same list to the guard so a filesystem mounted outside `/Volumes`

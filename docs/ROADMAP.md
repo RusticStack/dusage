@@ -416,12 +416,15 @@ the same mount table, keyed by the device `stat` reports for each mount point.
 **Learned by running.** Four facts that no amount of cross-checking produced, each with the
 consequence it has for the next change here.
 
-- **`fdopendir` needs the `$INODE64` alias, and `cargo check` cannot know it.** Binding the
-  plain symbol allocates the directory stream in the legacy 32-bit record format while
-  `readdir$INODE64` reads 64-bit records, so *every* listing comes back empty or malformed —
-  52 of 629 tests on the first macOS run, from one missing alias. Symbols resolve at link
-  time and nowhere earlier, so a change to any `extern "C"` name here is verified by the
-  CI leg or not at all.
+- **A 64-bit caller must bind `$INODE64`, and `cargo check` cannot know it.** Darwin's
+  headers resolve `readdir`, `stat`, `lstat`, `fdopendir`, `fstatat` and `getmntinfo` onto
+  suffixed symbols, and the suffixed and plain versions are not interchangeable: the plain
+  `fdopendir` allocates the stream in the legacy 32-bit record format, so *every* listing
+  came back empty — 52 of 629 tests on the first macOS run — and the plain `getmntinfo`
+  fills the legacy `struct statfs` instead of `__DARWIN_STRUCT_STATFS64`, so the record count
+  is right and every mount point and type name reads as zeroes. Two failures, one rule:
+  symbols resolve at link time and nowhere earlier, so a new `extern "C"` name here is
+  verified by the CI leg or not at all.
 - **Refusing `/private` subtree-wide makes `$TMPDIR` unprunable.** macOS's `/var` and `/tmp`
   are `/private/var` and `/private/tmp`, and `$TMPDIR` lives at
   `/private/var/folders/<xx>/<hash>/T`, so a whole-subtree rule there produces a `prune`
@@ -450,8 +453,10 @@ consequence it has for the next change here.
 - **arm64 is unverified, on a clock.** Nothing in this repository has run it: the
   `macos-15-intel` label is Intel-only and GitHub retires x86_64 macOS runners in August
   2027, so an arm64 answer is needed before then.
-- **`struct statfs` rests on one known-good source.** `f_fstypename` is pinned at offset 72
-  and `f_mntonname` at 88 from the layout Go and gopsutil bind for darwin, not from a header
-  this repository can read. The macOS leg is the oracle that checks it: a mount record whose
-  "mount point" is not an absolute path, or whose type name is not an alphanumeric word,
-  fails `the_mount_records_are_read_at_the_right_offsets` rather than being trusted.
+- **`struct statfs` is the header's layout, and the leg re-proves it.** The 2168-byte shape,
+  with `f_fstypename` at 72 and `f_mntonname` at 88, is `__DARWIN_STRUCT_STATFS64` from
+  Apple's `bsd/sys/mount.h`, which also declares `getmntinfo` as
+  `__DARWIN_INODE64(getmntinfo)`. The layout is therefore read rather than remembered, but
+  it is still re-checked on every macOS run: a record whose "mount point" is not an absolute
+  path, whose type name is not an alphanumeric word, or whose block size is not a power of
+  two dumps the record and fails `the_mount_records_are_read_at_the_right_offsets`.

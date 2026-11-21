@@ -1250,9 +1250,35 @@ mod tests {
         );
     }
 
+    /// One record spelled out, so a failure names where the fields actually start instead
+    /// of costing another run to find out.
+    fn record_dump(rec: &sys::StatFs) -> String {
+        let hex = |b: &[u8]| {
+            b.iter()
+                .map(|x| format!("{x:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        // SAFETY: the first 96 bytes of a live `struct statfs`, which is 2168 bytes long.
+        let head =
+            unsafe { std::slice::from_raw_parts(rec as *const sys::StatFs as *const u8, 96) };
+        let type_field: Vec<u8> = rec.f_fstypename.iter().map(|&c| c as u8).collect();
+        let mount_field: Vec<u8> = rec.f_mntonname[..32].iter().map(|&c| c as u8).collect();
+        format!(
+            "bsize {} iosize {}\nfirst 96 bytes: {}\nf_fstypename: {}\nf_mntonname[0..32]: {}",
+            rec.f_bsize,
+            rec.f_iosize,
+            hex(head),
+            hex(&type_field),
+            hex(&mount_field)
+        )
+    }
+
     /// The mount table is the only source for volume roots and `-fstype`, and this is the
-    /// assertion that fails if `struct statfs` is bound at the wrong offsets: a field read
-    /// four bytes early yields a mount point that is not a path at all.
+    /// assertion that fails if `struct statfs` is bound at the wrong offsets — or if the
+    /// plain `getmntinfo` was bound instead of `$INODE64`, which fills a different struct.
+    /// A field read out of the wrong record yields a mount point that is not a path at all.
+    /// Every failure prints the record, so the log says where the fields are.
     #[test]
     fn the_mount_records_are_read_at_the_right_offsets() {
         let mut buf: *mut sys::StatFs = std::ptr::null_mut();
@@ -1263,29 +1289,30 @@ mod tests {
         // SAFETY: `n` consecutive records at `buf`, as above.
         let records = unsafe { std::slice::from_raw_parts(buf, n as usize) };
         for fs in records {
-            let point = c_field(&fs.f_mntonname).expect("a mount point with no terminator");
+            let dump = record_dump(fs);
+            let point =
+                c_field(&fs.f_mntonname).unwrap_or_else(|| panic!("no mount point\n{dump}"));
             assert!(
                 point.starts_with(b"/"),
-                "mount point {:?} is not absolute",
+                "mount point {:?} is not absolute\n{dump}",
                 String::from_utf8_lossy(point)
             );
-            let kind = c_field(&fs.f_fstypename).expect("a type name with no terminator");
+            let kind = c_field(&fs.f_fstypename).unwrap_or_else(|| panic!("no type name\n{dump}"));
             assert!(
                 !kind.is_empty(),
-                "{:?} has no type name",
+                "{:?} has no type name\n{dump}",
                 String::from_utf8_lossy(point)
             );
             assert!(
                 kind.iter().all(u8::is_ascii_alphanumeric),
-                "type name {:?} is not a filesystem name",
+                "type name {:?} is not a filesystem name\n{dump}",
                 String::from_utf8_lossy(kind)
             );
             // A block size is a power of two of at least 512 bytes on every filesystem
-            // this tool could meet; the field is the first in the struct, so a wrong
-            // offset shows up here rather than as a plausible-looking path.
+            // this tool could meet, and the field is the first in the struct.
             assert!(
                 fs.f_bsize >= 512 && fs.f_bsize.is_power_of_two(),
-                "block size {} for {:?}",
+                "block size {} for {:?}\n{dump}",
                 fs.f_bsize,
                 String::from_utf8_lossy(point)
             );

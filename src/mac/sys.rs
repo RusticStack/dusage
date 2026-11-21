@@ -107,11 +107,17 @@ pub const MAXPATHLEN: usize = 1024;
 /// that only wanted to know what is mounted.
 pub const MNT_NOWAIT: c_int = 2;
 
-/// `struct statfs` (mount.h), the 64-bit Darwin layout.
+/// `struct statfs` (mount.h), the 64-bit Darwin layout — `__DARWIN_STRUCT_STATFS64`, the
+/// one `getmntinfo$INODE64` fills.
 ///
 /// This is how macOS answers "what is mounted, and of what type": there is no `/proc` to
 /// read. It is also why a device-keyed table needs a `stat` per mount — see
 /// [`StatFs::f_fsid`].
+///
+/// The legacy struct of the same name in that header is a different shape entirely
+/// (`short`/`long` counters, `f_fstypename` at 104, `MNAMELEN` 90 on the 32-bit-inode
+/// path), so a reader bound to the plain `getmntinfo` gets a plausible record count and no
+/// names at all.
 #[repr(C)]
 pub struct StatFs {
     pub f_bsize: u32,
@@ -219,9 +225,14 @@ extern "C" {
     /// `int getmntinfo(struct statfs **, int)`: fills `*mntbufp` with a pointer to an array
     /// the kernel owns, and returns how many records it holds.
     ///
-    /// No `$INODE64` alias: nothing in `struct statfs` is inode-sized, so unlike `stat`,
-    /// `lstat` and `readdir` the plain symbol is what a 64-bit caller binds on both
-    /// architectures.
+    /// The alias is not optional and not decorative. `mount.h` declares this
+    /// `__DARWIN_INODE64(getmntinfo)`, and the two symbols fill *different structs*: the
+    /// plain one fills the legacy `struct statfs` whose `long` block counters push
+    /// `f_fstypename` to 104, while `$INODE64` fills `__DARWIN_STRUCT_STATFS64`, the layout
+    /// declared above. Binding the plain name compiles, links and returns a record count,
+    /// and every string field then reads as zeroes — the same trap `fdopendir` set on the
+    /// first macOS run, one layer over.
+    #[cfg_attr(not(target_arch = "aarch64"), link_name = "getmntinfo$INODE64")]
     pub fn getmntinfo(mntbufp: *mut *mut StatFs, flags: c_int) -> c_int;
 }
 
