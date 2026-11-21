@@ -2759,6 +2759,21 @@ fn every_flag_the_find_help_names_is_accepted() {
             .unwrap();
         assert_eq!(code(&o), 2, "{gone} should be refused by find, not ignored");
     }
+    // The prose above OPTIONS has to say what the parser does with them: `-d` is not an
+    // unknown option, it is find's deprecated `-depth`.
+    assert!(
+        !help.contains("-d/--directories"),
+        "the find help still calls -d an unknown option"
+    );
+    assert!(
+        help.contains("deprecated spelling of\n-depth"),
+        "the find help does not say what -d means"
+    );
+    let (_f, dir) = expr_tree("find_dash_d");
+    let o = find_at(&dir, &["-d", "-name", "a.rs"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(stdout(&o).contains("a.rs"), "{}", stdout(&o));
+    assert!(stderr(&o).contains("use -depth instead"), "{}", stderr(&o));
     // The glob-narrowing spellings the help names do narrow a path search.
     let (_f, dir) = expr_tree("find_glob_flags");
     let o = run(&["find", "--include", "*.rs", "*"], &dir);

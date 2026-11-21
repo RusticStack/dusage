@@ -13,6 +13,12 @@
   `change journal reset (<reason>); full rescan`, or `change feed restored; full rescan` when a
   journal appears while the watch is running.
 
+- **`find --help` and the docs agree with the parser about the search-only flags.** The help
+  called `-d` an unknown option when it is find's deprecated `-depth`, and `docs/SEARCH.md` and
+  `docs/ROADMAP.md` still said the help listed `--pre`, `--pre-glob`, `--binary-files`, `-I` and
+  `-d`, which it stopped doing in 0.5.0. Those five stay out of `find`: they describe how file
+  contents are read.
+
 ### Added
 
 - **`DUSAGE_WATCH_TRACE=1`** logs one stderr line per `--watch` poll with the number of journal

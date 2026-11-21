@@ -518,10 +518,12 @@ smaller than that; `docs/BENCHMARKS.md` says so in its noise bullet and the
   was measured slower on `/usr` (6.4–7.5 s against 3.7–4.8 s), and the profile of
   the parity rows names no page faults, so ripgrep's advantage there is not
   mapping but asking the kernel fewer questions per file.
-- **`find --help` still lists five flags the parser rejects** (`--pre`,
-  `--pre-glob`, `--binary-files`, `-I`, `-d`), documented in the appendix of
-  `docs/SEARCH.md`. The other four it once carried (`--include`, `--exclude`,
-  `--exclude-dir`, `--iglob`) are now walk filters `find` honours.
+- **`find` has no content-search flags.** `--pre`, `--pre-glob`,
+  `--binary-files`, `-I` and `--directories` are refused (exit 2) and
+  `find --help` lists none of them as options; `-d` is find's deprecated
+  `-depth`, not `search`'s `-d ACTION`. `--include`, `--exclude`,
+  `--exclude-dir` and `--iglob` are walk filters `find` honours. A test reads
+  the flags out of the help text, so the two cannot drift apart again.
 
 **Open questions worth measuring later.**
 
