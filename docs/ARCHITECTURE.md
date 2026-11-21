@@ -302,13 +302,20 @@ against `dirfd(DIR *)` with `fstatat$INODE64` and `AT_SYMLINK_NOFOLLOW`, which i
 the batch-restart logic the Linux enumerator needs has no counterpart: a directory that
 mutates mid-read is reported as the kernel streamed it.
 
-`struct stat` (144 bytes), `struct dirent` and `struct kevent` are declared in
-`src/mac/sys.rs` and pinned by `const` `size_of`/`offset_of` assertions, which execute in a
-cross-check but cannot prove the layout against libSystem. The `$INODE64` link names are
+`struct stat` (144 bytes), `struct dirent`, `struct kevent` and `struct statfs` are declared
+in `src/mac/sys.rs` and pinned by `const` `size_of`/`offset_of` assertions. Those execute in
+a cross-check and prove only that the declaration is self-consistent; the macOS CI leg is
+what proves it against libSystem, and the mount-record test is the one that catches a
+`struct statfs` bound at the wrong offset. The `$INODE64` link names are
 what Darwin's headers resolve `readdir`, `stat`, `lstat` and `fstatat` to; `open` is
 variadic, as in C, because rustc rejects a fixed-arity declaration of it on Darwin.
-`filesystem_types` returns an empty map: `getmntinfo` and `struct statfs` are unbound, so
-`-fstype` matches nothing rather than lying.
+`struct statfs` (2168 bytes) is declared there too, and `getmntinfo` is the mount table:
+`filesystem_types` keys it by the device `stat` reports for each `f_mntonname`, because
+Darwin's `struct statfs` has no `st_dev` (`f_fsid` is a filesystem id, not a `dev_t`), and
+`mount_roots` hands the same list to the guard so a filesystem mounted outside `/Volumes`
+is still refused as a volume root. `getmntinfo` is queried with `MNT_NOWAIT`, so a dead
+network mount cannot hang the walk. `filesystem_types` returns an empty map when the kernel
+answers nothing, which is "no names" rather than a wrong name.
 
 ### mac::delete (`src/mac/delete.rs`)
 

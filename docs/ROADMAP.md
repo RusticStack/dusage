@@ -14,9 +14,10 @@ the numbers and the limits that are still open.
 
 **Status (macOS, x86_64).** The crate compiles for `x86_64-apple-darwin` and has a third
 platform module, `src/mac/`: enumeration over `readdir$INODE64`/`fstatat`, deletion over
-`unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed and a macOS guard. Everything is
-cross-checked from Linux; nothing has been built or run on a Mac yet, and arm64 is
-untested. The limits that come with it are in the macOS section at the end.
+`unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed, a macOS guard, and mount points and
+`-fstype` names from the kernel's own mount table. CI runs a `macos-15-intel` leg on a real
+Mac and it is green (796 tests, 0 failures); arm64 is untested. The limits that come with it
+are in the macOS section at the end.
 
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
@@ -232,7 +233,7 @@ directory-entry noise.
   container on overlayfs, so delete timings are not comparable to ext4 or btrfs).
 - `--watch` under `max_user_watches` pressure: the fallback is implemented (full rescans)
   but has only been tested by construction, not by lowering the limit.
-- macOS build numbers, arm64, FSEvents and `getmntinfo` — see the macOS section at the end.
+- macOS build numbers, arm64 and FSEvents — see the macOS section at the end.
 
 ## Search suite, find and du (0.5.0, as shipped)
 
@@ -392,46 +393,65 @@ at 0.58–0.60x with identical totals. The content row still behind is
 - `--stats` is one line today; a per-directory breakdown would make "why is this
   slow" answerable without a profiler.
 
-## macOS (x86_64), as built
+## macOS (x86_64), as running
 
 **Status.** `lib.rs` accepts `target_os = "macos"` and aliases `src/mac/` as `crate::native`,
-the third arm beside `src/unix/` and `src/win/`. The crate cross-checks for
-`x86_64-apple-darwin` from Linux — `cargo check`, `cargo check --tests` and
-`cargo clippy --all-targets -D warnings` — and CI carries a `macos-15-intel` leg that runs
-the format, lint, test and release-build steps the other platforms run. **Nothing here has
-been built or run on a Mac.** Cross-checking proves the `cfg` wiring, the types and the FFI
-declarations compile; it cannot prove a symbol resolves or that a struct layout matches
-libSystem.
+the third arm beside `src/unix/` and `src/win/`. Two things prove it, in this order: a
+cross-check for `x86_64-apple-darwin` from Linux — `cargo check`, `cargo check --tests` and
+`cargo clippy --all-targets -D warnings` — and a `macos-15-intel` CI leg that runs the same
+format, lint, test and release-build steps as the other platforms on a real Mac. That leg is
+green: 796 tests pass, 0 fail (634 unit, 162 across the seven integration suites). The
+cross-check proves the `cfg` wiring, the types and that the FFI declarations compile, and
+nothing about symbols or layouts; the runner is what proves those. arm64 is still untested —
+`macos-15-intel` is x86_64 only and every `$INODE64` alias is `cfg`-gated off for arm64,
+whose exports are already 64-bit wide.
 
 **Done.** Enumeration is `open` + `fdopendir` + `readdir$INODE64`, with `fstatat$INODE64`
 per entry against the open directory descriptor, so `alloc` is `st_blocks * 512` and
 `file_id` is `dev << 64 | ino` exactly as on Linux. Deletion is `unlink`/`rmdir`, path-based
 and never following a symlink. `--watch` is kqueue. The guard refuses `/`, the system trees,
-`/Users`, `$HOME`, `/opt` and every volume root under `/Volumes`.
+`/Users`, `$HOME`, `/opt` and every mount root `getmntinfo` reports. `-fstype` answers from
+the same mount table, keyed by the device `stat` reports for each mount point.
+
+**Learned by running.** Four facts that no amount of cross-checking produced, each with the
+consequence it has for the next change here.
+
+- **`fdopendir` needs the `$INODE64` alias, and `cargo check` cannot know it.** Binding the
+  plain symbol allocates the directory stream in the legacy 32-bit record format while
+  `readdir$INODE64` reads 64-bit records, so *every* listing comes back empty or malformed —
+  52 of 629 tests on the first macOS run, from one missing alias. Symbols resolve at link
+  time and nowhere earlier, so a change to any `extern "C"` name here is verified by the
+  CI leg or not at all.
+- **Refusing `/private` subtree-wide makes `$TMPDIR` unprunable.** macOS's `/var` and `/tmp`
+  are `/private/var` and `/private/tmp`, and `$TMPDIR` lives at
+  `/private/var/folders/<xx>/<hash>/T`, so a whole-subtree rule there produces a `prune`
+  that cannot operate anywhere the system puts scratch space. The split that works is
+  `/private/etc` subtree-wide, with `/private/tmp` and `/private/var` as data roots whose
+  children stay prunable — the shape Linux already has with `/var` and `/var/tmp`.
+- **A change feed must report paths in the spelling the caller gave.** Returning
+  canonicalised absolute paths from `--watch` breaks the `ChangeSource` contract Linux keeps,
+  even though every value is correct once resolved: the caller matches what it gets back
+  against the root it passed in, and `/tmp/x` and `/private/tmp/x` are different strings.
+- **BSD `du` and GNU `du` disagree twice over.** macOS ships BSD `du`, which counts 512-byte
+  blocks where GNU counts 1024 — a factor of two in every row — so an oracle comparison
+  pins `-k` explicitly instead of trusting the default. They also round `-h` differently:
+  GNU rounds up to the next unit, BSD truncates, which is a one-step difference on
+  boundaries only and is why the `-h` oracle compares magnitudes within one display step
+  while numeric `-k` stays byte-exact.
 
 **Open, each with what it costs.**
 
-- **The Darwin struct layouts are asserted, not verified.** `struct stat` (144 bytes),
-  `struct dirent`, `struct kevent` and the `$INODE64` symbol aliases are pinned by
-  `size_of`/`offset_of` assertions that run during the cross-check, which proves the
-  declaration is self-consistent and nothing about libSystem. The first `cargo build` and
-  `cargo test` on a Mac is what confirms them.
 - **The kqueue feed has a directory budget.** A watch is per-descriptor, so the feed admits
   4096 directories; a tree past that gets no feed at all and every tick is a full rescan.
   That is a behaviour change from Linux, whose inotify feed covers every directory or gives
-  up as a whole.
+  up as a whole. No issue is filed for raising the budget.
 - **FSEvents is deferred.** It needs CoreFoundation, which zero dependencies rules out for
-  this port. kqueue is what shipped.
-- **The guard's two sets were split by evidence, not by taste.** Refusing `/private` as a
-  whole subtree, which the first version did, made every temp directory unprunable: macOS's
-  `$TMPDIR` is `/private/var/folders/...`, so a pruner could not touch the one place macOS
-  scratch actually collects. `/private/etc` is a refused subtree; `/private/tmp` and
-  `/private/var` are refused as data roots whose children stay prunable, the shape Linux
-  has with `/var` and `/var/tmp`. Matching runs on both the lexical and the canonical
-  spelling, so `/etc/passwd` and `/private/etc/passwd` both answer.
-- **A volume mounted outside `/Volumes` is not refused as a volume root.** `getmntinfo` and
-  `struct statfs` are not bound, so the guard only sees the mounts `/Volumes` lists; the
-  prune's device comparison is what stops a walk into any other one. `-fstype` answers
-  nothing for the same reason.
-- **CI is on a clock.** The `macos-15-intel` runner label is Intel-only and GitHub retires
-  x86_64 macOS runners in August 2027, so an arm64 answer is needed before then.
+  this port. kqueue is what shipped. No issue is filed for the FSEvents feed.
+- **arm64 is unverified, on a clock.** Nothing in this repository has run it: the
+  `macos-15-intel` label is Intel-only and GitHub retires x86_64 macOS runners in August
+  2027, so an arm64 answer is needed before then.
+- **`struct statfs` rests on one known-good source.** `f_fstypename` is pinned at offset 72
+  and `f_mntonname` at 88 from the layout Go and gopsutil bind for darwin, not from a header
+  this repository can read. The macOS leg is the oracle that checks it: a mount record whose
+  "mount point" is not an absolute path, or whose type name is not an alphanumeric word,
+  fails `the_mount_records_are_read_at_the_right_offsets` rather than being trusted.

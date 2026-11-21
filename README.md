@@ -150,10 +150,10 @@ you want for `dusage /`. Windows mount points are reparse points and are always 
 | `--watch` change feed | NTFS USN journal (elevated) | inotify (no privileges) | kqueue `EVFILT_VNODE`, up to 4096 directories |
 | `--mft` | raw NTFS `$MFT` | not applicable, refused with a reason | not applicable, refused with a reason |
 | `--streams` | named NTFS streams | no named streams, reports 0 | no named streams, reports 0 |
-| `-fstype` | no names | `/proc/self/mountinfo` | no names yet (`getmntinfo` unbound) |
+| `-fstype` | no names | `/proc/self/mountinfo` | `getmntinfo` + `struct statfs`, keyed by the device of each mount point |
 | Links never followed | reparse points of any kind | symlinks | symlinks |
 | `--one-filesystem` | no-op (mount points are links) | skips other devices | skips other devices |
-| Protected `fastdel` roots | volume roots, `Windows`, `Program Files`, `ProgramData`, profile | `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` | `/`, the `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/Applications`, `/cores` and `/dev` subtrees, `/Users`, `$HOME`, `/opt`, `/Volumes`, `/private/tmp`, `/private/var` and each volume root |
+| Protected `fastdel` roots | volume roots, `Windows`, `Program Files`, `ProgramData`, profile | `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` | `/`, the `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/Applications`, `/cores` and `/dev` subtrees, `/Users`, `$HOME`, `/opt`, `/Volumes`, `/private/tmp`, `/private/var` and every mount root `getmntinfo` reports |
 
 macOS is built and cross-checked for `x86_64-apple-darwin`. Apple-silicon `arm64` is a
 different target and is **unverified**: nothing in this repository has run it. The Darwin
