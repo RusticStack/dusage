@@ -141,11 +141,15 @@ public static class Mem {
 }
 '@
 
+# Returns whether the purge actually happened. Without SeProfileSingleProcess the calls are
+# refused and the cache is untouched, so the caller must not label the timing cold.
 function Purge-Cache {
-    [Mem]::EnableProfilePrivilege() | Out-Null
+    if (-not [Mem]::EnableProfilePrivilege()) { return $false }
     # 2 empty working sets, 3 flush the modified list, 4 purge the standby list.
-    foreach ($cmd in 2, 3, 4) { [Mem]::Purge($cmd) | Out-Null }
+    $codes = @()
+    foreach ($cmd in 2, 3, 4) { $codes += [Mem]::Purge($cmd) }
     Start-Sleep -Milliseconds 400
+    return (($codes | Where-Object { $_ -ne 0 }).Count -eq 0)
 }
 
 # Everything this run prints lands in a log beside the record, because an elevated window
@@ -154,7 +158,7 @@ function Purge-Cache {
 $logPath = Join-Path $repo 'bench\windows\admin.log'
 function Write-Log([string]$m) {
     $line = "{0} {1}" -f (Get-Date -Format 'HH:mm:ss'), $m
-    Write-Log $line
+    Write-Output $line
     try { [System.IO.File]::AppendAllText($logPath, $line + "`r`n", $utf8NoBom) } catch { }
 }
 try { Start-Transcript -Path (Join-Path $repo 'bench\windows\admin-transcript.log') -Force | Out-Null } catch { }
@@ -272,15 +276,23 @@ exit 0
         Native { & $bash (Join-Path $Root 'watch.sh') } | Out-Null
         $out = Get-Content -Raw -LiteralPath $log -ErrorAction SilentlyContinue
         $err = Get-Content -Raw -LiteralPath $errLog -ErrorAction SilentlyContinue
+        # A watch that wrote nothing is a result, not a null reference.
+        if (-not $out) { $out = '' }
+        if (-not $err) { $err = '' }
         $sawCreated = ($out -match 'created_b')
         $sawDeleted = ($out -match 'created_a')
         $updates = ([regex]::Matches($out, 'elapsed')).Count
+        # The watch prints a line per event; keep the count and a sample, not a megabyte.
+        $snippet = if ($out.Length -gt 1500) { $out.Substring(0, 1500) } else { $out }
+        $errSnippet = if ($err.Length -gt 1500) { $err.Substring(0, 1500) } else { $err }
         Add-Check ([ordered]@{
                 kind   = 'watch'
                 step   = 'scan --watch 2 over a 50-file directory; two files created and one deleted while it ran'
                 detail = "updates=$updates saw_created_b=$sawCreated saw_created_a=$sawDeleted full_rescan=$($out -match 'full')"
-                output = (($out -replace '\s+', ' ').Trim())
-                stderr = (($err -replace '\s+', ' ').Trim())
+                output = (($snippet -replace '\s+', ' ').Trim())
+                output_chars = $out.Length
+                stderr = (($errSnippet -replace '\s+', ' ').Trim())
+                stderr_chars = $err.Length
             })
         Write-Log ("admin: watch updates={0} created_seen={1} deleted_seen={2}" -f $updates, $sawCreated, $sawDeleted)
     }
@@ -291,12 +303,16 @@ exit 0
 if (-not $SkipCold) {
     Write-Log 'section 4: cold cache'
     try {
+        if (-not (Purge-Cache)) {
+            Add-Check ([ordered]@{ kind = 'cold'; case = 'unavailable'; warm_ms = $null; cold_ms = $null; runs = 0; detail = 'standby-list purge refused (no SeProfileSingleProcess), so no run here can be called cold' })
+            throw 'cold cache needs an elevated token; no row written rather than a warm row labelled cold'
+        }
         foreach ($target in @('tree1m', 'flat100k')) {
             $p = Join-Path $Root $target
             $warm = Measure-Median { & $Bin scan $p --threads 16 } $Runs
             $cold = @()
             for ($i = 0; $i -lt $Runs; $i++) {
-                Purge-Cache
+                if (-not (Purge-Cache)) { throw 'the standby-list purge stopped working mid-section' }
                 $sw = [Diagnostics.Stopwatch]::StartNew()
                 Native { & $Bin scan $p --threads 16 } | Out-Null
                 $sw.Stop()
