@@ -50,7 +50,7 @@ explanation. Numbers measured on this machine are in the last section.
 | 8 | Opt-in named-stream (ADS) accounting | Done: `--streams`, `enumerate::named_stream_bytes` | Accuracy for ADS-heavy trees | No | S-M | Low |
 | 9 | USN change journal for incremental `--watch` | Done: `win::usn` + `scan::watch`, validated on a real journal (elevated, 2026-11-21); the unelevated fallback was an unpaced rescan loop and is fixed | Incremental rescans; 4 update lines for 12 changes, totals equal to a full scan | Yes (measured) | L | Medium |
 | 10 | Elevated whole-volume fast path (USN enum plus MFT parsing) | Done: `win::mft` + `--mft`, validated against the batched backend on two real volumes | Whole-drive scan 6.2x faster (10.6 s vs 65.8 s) | Yes (measured) | L | High |
-| 11 | Dev Drive guidance for scratch trees (docs only) | Open: docs only, not written | Unmeasured | Setup only | S | None |
+| 11 | Dev Drive guidance for scratch trees (docs only) | Done: `docs/DEV_DRIVE.md`; nothing run on a Dev Drive or ReFS volume | Unmeasured | Setup only | S | None |
 
 ### 1. Skip reparse-point directories on the raw attribute (dusage and fastdel)
 
@@ -213,7 +213,7 @@ it: `bench/windows/admin.ps1` section 3, `bench/windows/usn_probe.py`, rows in
 
 ### 11. Dev Drive guidance for scratch trees (documentation only)
 
-**Status: Open.** Documentation only; nothing written yet.
+**Status: Done (documentation).** Written as `docs/DEV_DRIVE.md`: the requirements below, what each command does on such a volume as read from the code, and what is still unknown. No command has been run on a Dev Drive or a ReFS volume; the ReFS rows of `bench/windows/admin.ps1` are still owed.
 
 - **Requirements (verified).** Windows 11 build 10.0.22621.2338 or later, 50 GB minimum, designation only at format time, C: not eligible, `fsutil devdrv trust` needs an elevated shell, performance mode needs a trusted volume with real-time protection on (https://learn.microsoft.com/en-us/windows/dev-drive/).
 - **Causal claim refuted.** The WinDev issue reports a 119,954-file tree delete at 58 s with protection on, 57 s with the folder excluded, and 45 s with protection disabled (https://github.com/microsoft/WinDev/issues/27). Defender does not explain the delete time. The restic thread is a backup scan, not a delete timing.
@@ -277,7 +277,8 @@ record and the caveats. Re-run the harness rather than trusting this list if the
    8. Item 8's open question is closed, and `--streams` stays opt-in for that reason.
 6. **FileId semantics. Answered for NTFS.** Hardlinks share one 128-bit `FileId`, and
    `fsutil file queryFileID <path>` (no `=`) prints the same value the handle API returns.
-   ReFS, Dev Drive and FAT come from the VHDX fixtures in the elevated half.
+   FAT32 and ReFS come from the VHDX fixtures in the elevated half (`bench/windows/admin.ps1`,
+   section 5). Nothing attaches or formats a Dev Drive, so Dev Drive stays unanswered.
 7. **Reparse gap. Closed and confirmed closed.** `is_symlink()` is true for a junction on this
    build, and the tool no longer depends on it: it tests `FILE_ATTRIBUTE_REPARSE_POINT`, so
    the DFS and dedup tags `is_symlink()` misses fall under the same rule. A junction fixture
@@ -310,7 +311,8 @@ record and the caveats. Re-run the harness rather than trusting this list if the
   totals against a full scan) instead of counting a stdout stream.
 - Run the benchmark list in section 4 and record results: done 2026-11-21, and the thread
   sweep decided the default (8 workers on Windows, `native::MAX_WORKERS`).
-- Item 11: Dev Drive guidance in the docs.
+- Item 11: Dev Drive guidance is written (`docs/DEV_DRIVE.md`). Running the tools on a real
+  Dev Drive is not done; the guidance says so row by row.
 - Done in 0.5.0: the tools merged under subcommands in one binary (`dusage
   scan|big|search|find|prune|du`), with the `fastdel` binary and `dusage fastdel|del`
   running `prune`; and fastdel presets (`--preset`, `--print-presets`).
