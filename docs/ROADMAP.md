@@ -315,8 +315,10 @@ record and the caveats. Re-run the harness rather than trusting this list if the
   scan|big|search|find|prune|du`), with the `fastdel` binary and `dusage fastdel|del`
   running `prune`; and fastdel presets (`--preset`, `--print-presets`).
 - Done in 0.6.0: `dusage tree` and `dusage df` (`dusage scan|big|search|find|prune|du|tree|df`).
-- Open after 0.6.0: tree buffers one record per entry (measured side by side with `tree -s`
-  in `docs/BENCHMARKS.md`); the Windows `df` path is compiled but has never run on a Windows
+- Done after 0.6.0: tree keeps one record per directory instead of one per entry and lists
+  each directory a second time to print it (87 MiB to 4 MiB on a 1,001,000-entry tree on
+  Windows; the `tree -s` comparison in `docs/BENCHMARKS.md` predates it).
+- Open after 0.6.0: the Windows `df` path is compiled but has never run on a Windows
   box, so its volume enumeration and its folder-mounted volumes are unverified.
 
 ## Sources

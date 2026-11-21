@@ -603,14 +603,14 @@ Both are front ends over the same two surfaces every other command uses — the 
 
 **tree.** One deterministic depth-first walk through `native::enumerate::DirReader`, the
 same batched enumerator `du` uses, so each entry arrives with both its apparent and its
-allocated size from one syscall. The walk fills an arena rather than printing: one `Node`
-per entry holding a name range into a shared byte arena, `u32` child indexes, its own two
-sizes and its subtree's two, plus a `parent` index and a `depth`. Running the totals is one
-reverse pass over the arena (children always follow their parents); sorting is one pass over
-the directory nodes; rendering is two pre-order passes, the first measuring the two size
-columns and the second printing them. Nothing is printed during the walk, which is what
-makes `--sort size` and right-aligned columns possible; the cost is one record per entry
-against tree(1)'s streaming, and `docs/BENCHMARKS.md` records both numbers side by side.
+allocated size from one syscall. The first pass prints nothing and keeps one `Dir`
+per directory: a name range into a shared byte arena, its subtree's two sizes, and `u32`
+links to its first child and next sibling. Files and links are added to their directory's
+totals and to the two column widths as they go by, and dropped. The second pass lists each
+directory again, rebuilds its file and link rows with the same filters, sorts that one
+directory's rows and prints them. Totals and widths must be known before the first row,
+which is what makes `--sort size` and right-aligned columns possible; the cost is a second
+listing of every directory that has a file or link row, where tree(1) streams in one.
 
 The filters are `search`'s, not a second copy of them: `IgnoreRules` is built the way
 `search::walk_rules`/`root_rules` build it, pushed per directory as the walk descends and

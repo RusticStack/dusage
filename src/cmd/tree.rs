@@ -1,8 +1,8 @@
 //! `dusage tree`: the shape of tree(1), with the sizes tree cannot print.
 //!
-//! One deterministic depth-first walk, listed with the batched enumerator so each entry
-//! arrives with its apparent and allocated bytes from one syscall, then two pre-order passes
-//! over the collected records: one to measure the columns, one to print. Two size columns go
+//! Two deterministic depth-first passes, listed with the batched enumerator so each entry
+//! arrives with its apparent and allocated bytes from one syscall: the first sums the
+//! subtrees and measures the columns, the second lists again and prints. Two size columns go
 //! in front of every name — the bytes the entry occupies on disk (`st_blocks * 512` on Linux,
 //! the allocation size the Windows enumerator returns) and the length it claims (`st_size`).
 //! A directory's row carries its subtree, the way `tree --du` shows directory usage, so the
@@ -25,17 +25,23 @@
 //!
 //! # Memory
 //!
-//! One compact record per entry plus its name, so a quarter-million-entry tree costs a few
-//! tens of megabytes: a name is appended to one byte arena and referred to by offset,
-//! children are `u32` indexes into the record arena, and each record keeps four numbers (its
-//! own two sizes and its subtree's two). Nothing is printed during the walk, which is what
-//! makes `--sort size` and the aligned columns possible at all.
+//! One record per directory — its name in one byte arena, its subtree's two totals, and
+//! the links to its first child and next sibling — so memory follows the directory count,
+//! not the entry count. Files and links are summed and measured as the first pass meets
+//! them and then dropped; the second pass lists a directory again when it prints it and
+//! holds that one directory's rows while it sorts them. Totals and column widths have to be
+//! known before the first row, which is why nothing is printed during the first pass.
+//!
+//! The price is a second listing of every directory that has a file or link row (none under
+//! `-d`), and a tree that changes between the two passes: a row the second pass sees is
+//! printed with the sizes it has then, under totals and a footer from the first.
 
 use super::Fail;
 use crate::cli::Args;
 use crate::ignore::IgnoreRules;
 use crate::model::ErrorCounts;
 use crate::native::enumerate::{self, DirReader, Entry};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -131,37 +137,49 @@ struct Name {
     len: u32,
 }
 
-const IS_DIR: u8 = 1;
-const IS_LINK: u8 = 2;
+/// The walk listed this directory; one it only counted (a mount point under `-x`) is not set.
+const ENTERED: u8 = 1;
+/// Listing it yields at least one row that is not a directory, so printing must read it again.
+const HAS_ROWS: u8 = 2;
+/// Its ignore files contributed a layer, so printing must stack them again.
+const HAS_RULES: u8 = 4;
+/// It was read by the portable reader, which decides what its entries' on-disk size means.
+const PLAIN: u8 = 8;
+/// Its listing failed and was reported; the second read is not reported again.
+const FAILED: u8 = 16;
 
-struct Node {
+/// What the walk keeps: one record per directory. Files and links are folded into their
+/// directory's totals and the column widths as they go by, and read again when printed.
+struct Dir {
     name: Name,
-    /// The link's target, when the platform names it; links are rare, so the extra range
-    /// costs nothing on the entries that are files.
-    target: Option<Name>,
     total_disk: u64,
     total_apparent: u64,
-    kids: Vec<u32>,
-    parent: u32,
-    depth: u32,
+    /// The first child directory and the next sibling, in the order the walk met them;
+    /// 0 is "none", because the start point is record 0 and nothing's child or sibling.
+    first_kid: u32,
+    next: u32,
     flags: u8,
 }
 
-impl Node {
-    fn is_dir(&self) -> bool {
-        self.flags & IS_DIR != 0
-    }
-
-    fn is_link(&self) -> bool {
-        self.flags & IS_LINK != 0
-    }
+/// One printed row, alive only while its directory is being printed.
+struct Row {
+    name: String,
+    target: Option<String>,
+    disk: u64,
+    apparent: u64,
+    /// The directory record behind the row, or 0 for a file or a link.
+    dir: u32,
+    link: bool,
 }
 
 struct Tree<'a> {
     o: &'a Options,
     rules: IgnoreRules,
-    nodes: Vec<Node>,
+    nodes: Vec<Dir>,
     names: Vec<u8>,
+    /// The real names of the directories whose text is a lossy rendering, by record, in
+    /// record order: the second pass opens a directory by the name the filesystem gave.
+    raw: Vec<(u32, OsString)>,
     reader: DirReader,
     plain: bool,
     root_dev: u64,
@@ -171,6 +189,11 @@ struct Tree<'a> {
     files: u64,
     links: u64,
     skipped_mounts: u64,
+    /// A directory the walk read could not be read again to print its rows.
+    late_failure: bool,
+    /// Column widths over exactly the rows the listing prints.
+    wd: usize,
+    wa: usize,
 }
 
 impl<'a> Tree<'a> {
@@ -180,6 +203,7 @@ impl<'a> Tree<'a> {
             rules,
             nodes: Vec::new(),
             names: Vec::new(),
+            raw: Vec::new(),
             reader: DirReader::new(),
             plain: false,
             root_dev: 0,
@@ -189,6 +213,9 @@ impl<'a> Tree<'a> {
             files: 0,
             links: 0,
             skipped_mounts: 0,
+            late_failure: false,
+            wd: 1,
+            wa: 1,
         }
     }
 
@@ -223,229 +250,263 @@ impl<'a> Tree<'a> {
         }
     }
 
-    /// List `dir` into the arena under `node`, descending while the level limit allows.
-    fn list(&mut self, dir: &Path, rel: &str, depth: usize, node: usize) {
+    /// A row the listing prints: widen the columns to hold it.
+    fn measure(&mut self, disk: u64, apparent: u64) {
+        self.wd = self.wd.max(size_width(disk, self.o.human));
+        self.wa = self.wa.max(size_width(apparent, self.o.human));
+    }
+
+    /// The first pass: list `dir` under record `node`, descending while the level limit
+    /// allows. Directories get a record; everything else is counted, summed into `node` and
+    /// measured for the columns, and then forgotten.
+    fn walk(&mut self, dir: &Path, rel: &str, depth: usize, node: usize) {
         let mark = if self.o.no_ignore {
             self.rules.mark()
         } else {
             self.rules.push_dir(dir, rel)
         };
+        let mut flags = ENTERED;
+        if self.rules.mark() > mark {
+            flags |= HAS_RULES;
+        }
         let mut ents = Vec::new();
         if let Err(e) = self.read(dir, &mut ents) {
             self.messages.push(e.to_string());
+            flags |= FAILED;
+        }
+        let plain = self.plain;
+        if plain {
+            flags |= PLAIN;
         }
         let dir_hit = self.rules.builtin_under(rel);
+        let (mut disk, mut apparent) = (0u64, 0u64);
+        let mut last_kid = 0usize;
         for e in ents {
-            let text = e.name.to_string_lossy().into_owned();
+            let text = e.name.to_string_lossy();
             let child_rel = if rel.is_empty() {
-                text.clone()
+                text.to_string()
             } else {
                 format!("{rel}/{text}")
             };
             if !allow(&self.rules, self.o, &child_rel, &text, e.is_dir(), dir_hit) {
                 continue;
             }
+            let (own_disk, own_apparent) = own_sizes(&e, plain);
             if e.is_reparse() {
                 self.links += 1;
                 self.files += 1;
-                let name = self.intern(&text);
-                let link = dir.join(&e.name);
-                let target = fs::read_link(&link)
-                    .ok()
-                    .map(|t| t.to_string_lossy().into_owned())
-                    .map(|t| self.intern(&t));
-                let (own_disk, own_apparent) = own_sizes(&e, self.plain);
-                self.add(
-                    node,
-                    Node {
-                        name,
-                        target,
-                        total_disk: own_disk,
-                        total_apparent: own_apparent,
-                        kids: Vec::new(),
-                        parent: node as u32,
-                        depth: (depth + 1) as u32,
-                        flags: IS_LINK,
-                    },
-                );
+            } else if depth + 1 > self.o.level {
                 continue;
-            }
-            if depth + 1 > self.o.level {
-                continue;
-            }
-            let path = dir.join(&e.name);
-            let is_dir = e.is_dir();
-            let (own_disk, own_apparent) = own_sizes(&e, self.plain);
-            let name = self.intern(&text);
-            if is_dir {
+            } else if e.is_dir() {
                 self.dirs += 1;
+                let idx = self.nodes.len();
+                if let std::borrow::Cow::Owned(_) = text {
+                    self.raw.push((idx as u32, e.name.clone()));
+                }
+                let name = self.intern(&text);
+                self.nodes.push(Dir {
+                    name,
+                    total_disk: own_disk,
+                    total_apparent: own_apparent,
+                    first_kid: 0,
+                    next: 0,
+                    flags: 0,
+                });
+                if last_kid == 0 {
+                    self.nodes[node].first_kid = idx as u32;
+                } else {
+                    self.nodes[last_kid].next = idx as u32;
+                }
+                last_kid = idx;
+                if self.o.one_filesystem && enumerate::other_filesystem(&e, self.root_dev) {
+                    self.skipped_mounts += 1;
+                } else {
+                    self.walk(&dir.join(&e.name), &child_rel, depth + 1, idx);
+                }
+                let (d, a) = (self.nodes[idx].total_disk, self.nodes[idx].total_apparent);
+                disk += d;
+                apparent += a;
+                self.measure(d, a);
+                continue;
             } else {
                 self.files += 1;
             }
-            let idx = self.add(
-                node,
-                Node {
-                    name,
-                    target: None,
-                    total_disk: own_disk,
-                    total_apparent: own_apparent,
-                    kids: Vec::new(),
-                    parent: node as u32,
-                    depth: (depth + 1) as u32,
-                    flags: if is_dir { IS_DIR } else { 0 },
-                },
-            );
-            if !is_dir {
-                continue;
+            flags |= HAS_ROWS;
+            disk += own_disk;
+            apparent += own_apparent;
+            if !self.o.dirs_only {
+                self.measure(own_disk, own_apparent);
             }
-            if self.o.one_filesystem && enumerate::other_filesystem(&e, self.root_dev) {
-                self.skipped_mounts += 1;
-                continue;
-            }
-            self.list(&path, &child_rel, depth + 1, idx);
         }
+        let n = &mut self.nodes[node];
+        n.total_disk += disk;
+        n.total_apparent += apparent;
+        n.flags = flags;
         self.rules.pop_to(mark);
     }
 
-    fn add(&mut self, parent: usize, n: Node) -> usize {
-        let idx = self.nodes.len();
-        self.nodes.push(n);
-        self.nodes[parent].kids.push(idx as u32);
-        idx
-    }
-
-    /// Roll every child's subtree total into its parent, deepest first: records are pushed
-    /// parents-before-children, so one reverse pass leaves every total final.
-    fn totals(&mut self) {
-        for i in (1..self.nodes.len()).rev() {
-            let (disk, apparent, parent) = {
-                let n = &self.nodes[i];
-                (n.total_disk, n.total_apparent, n.parent as usize)
-            };
-            let p = &mut self.nodes[parent];
-            p.total_disk += disk;
-            p.total_apparent += apparent;
+    /// The rows under record `node`, in print order: its child directories from their
+    /// records, and — unless only directories are printed — its files and links from a
+    /// second listing of `dir`, filtered exactly as the walk filtered them.
+    fn rows(&mut self, dir: &Path, rel: &str, depth: usize, node: usize) -> Vec<Row> {
+        let mut rows = Vec::new();
+        let mut kid = self.nodes[node].first_kid;
+        while kid != 0 {
+            let n = &self.nodes[kid as usize];
+            rows.push(Row {
+                name: self.text(n.name).to_string(),
+                target: None,
+                disk: n.total_disk,
+                apparent: n.total_apparent,
+                dir: kid,
+                link: false,
+            });
+            kid = n.next;
         }
-    }
-
-    /// Order every directory's children once, so both render passes walk one sequence.
-    fn sort_kids(&mut self) {
-        for i in 0..self.nodes.len() {
-            if self.nodes[i].kids.len() < 2 {
-                continue;
-            }
-            let mut kids = std::mem::take(&mut self.nodes[i].kids);
-            if self.o.by_size {
-                kids.sort_by(|a, b| {
-                    let (x, y) = (&self.nodes[*a as usize], &self.nodes[*b as usize]);
-                    y.total_disk
-                        .cmp(&x.total_disk)
-                        .then_with(|| self.text(x.name).cmp(self.text(y.name)))
-                });
+        let flags = self.nodes[node].flags;
+        if !self.o.dirs_only && flags & HAS_ROWS != 0 {
+            let plain = flags & PLAIN != 0;
+            let mut ents = Vec::new();
+            let read = if plain {
+                enumerate::read_plain(dir, &mut ents, &mut self.errs)
             } else {
-                kids.sort_by(|a, b| {
-                    self.text(self.nodes[*a as usize].name)
-                        .cmp(self.text(self.nodes[*b as usize].name))
+                self.reader.read(dir, &mut ents, &mut self.errs)
+            };
+            if let Err(e) = read {
+                if flags & FAILED == 0 {
+                    eprintln!("dusage tree: {e}");
+                    self.late_failure = true;
+                }
+            }
+            let dir_hit = self.rules.builtin_under(rel);
+            for e in ents {
+                let link = e.is_reparse();
+                if !link && (e.is_dir() || depth + 1 > self.o.level) {
+                    continue;
+                }
+                let text = e.name.to_string_lossy();
+                let child_rel = if rel.is_empty() {
+                    text.to_string()
+                } else {
+                    format!("{rel}/{text}")
+                };
+                if !allow(&self.rules, self.o, &child_rel, &text, e.is_dir(), dir_hit) {
+                    continue;
+                }
+                let (disk, apparent) = own_sizes(&e, plain);
+                let target = if link {
+                    fs::read_link(dir.join(&e.name))
+                        .ok()
+                        .map(|t| t.to_string_lossy().into_owned())
+                } else {
+                    None
+                };
+                rows.push(Row {
+                    name: text.into_owned(),
+                    target,
+                    disk,
+                    apparent,
+                    dir: 0,
+                    link,
                 });
             }
-            self.nodes[i].kids = kids;
         }
-    }
-
-    fn visible(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        self.nodes[node]
-            .kids
-            .iter()
-            .map(|k| *k as usize)
-            .filter(|k| !self.o.dirs_only || self.nodes[*k].is_dir())
-    }
-
-    /// Column widths over exactly the rows the listing prints.
-    fn widths(&self, node: usize, wd: &mut usize, wa: &mut usize) {
-        for kid in self.visible(node) {
-            let n = &self.nodes[kid];
-            *wd = (*wd).max(size_text(n.total_disk, self.o.human).len());
-            *wa = (*wa).max(size_text(n.total_apparent, self.o.human).len());
-            self.widths(kid, wd, wa);
+        if self.o.by_size {
+            rows.sort_by(|a, b| b.disk.cmp(&a.disk).then_with(|| a.name.cmp(&b.name)));
+        } else {
+            rows.sort_by(|a, b| a.name.cmp(&b.name));
         }
+        rows
     }
 
-    fn print_rows(
-        &self,
+    /// The second pass: print everything under record `node`, one directory's rows in
+    /// memory at a time per level of depth. `prefix` is the text listing's indentation and
+    /// is unused by the JSON one.
+    fn print(
+        &mut self,
+        dir: &Path,
+        rel: &str,
+        depth: usize,
         node: usize,
         prefix: &mut String,
-        wd: usize,
-        wa: usize,
         out: &mut dyn Write,
     ) -> io::Result<()> {
-        let kids: Vec<usize> = self.visible(node).collect();
+        let flags = self.nodes[node].flags;
+        let mark = if flags & HAS_RULES != 0 {
+            self.rules.push_dir(dir, rel)
+        } else {
+            self.rules.mark()
+        };
+        let rows = self.rows(dir, rel, depth, node);
         let base = prefix.len();
-        for (i, kid) in kids.iter().enumerate() {
-            let last = i + 1 == kids.len();
-            prefix.push_str(if last { "└── " } else { "├── " });
-            let n = &self.nodes[*kid];
-            let disk = size_text(n.total_disk, self.o.human);
-            let apparent = size_text(n.total_apparent, self.o.human);
-            let mut line = format!(
-                "{prefix}[ {disk:>wd$} {apparent:>wa$}]  {}",
-                self.text(n.name)
-            );
-            if let Some(t) = n.target {
-                line.push_str(" -> ");
-                line.push_str(self.text(t));
+        let mut line = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            let child_rel = if rel.is_empty() {
+                row.name.clone()
+            } else {
+                format!("{rel}/{}", row.name)
+            };
+            let last = i + 1 == rows.len();
+            line.clear();
+            if self.o.json {
+                write!(line, ",{{\"depth\":{},\"name\":", depth + 1).ok();
+                push_json_str(&row.name, &mut line);
+                line.extend_from_slice(b",\"rel\":");
+                push_json_str(&child_rel, &mut line);
+                write!(
+                    line,
+                    ",\"is_dir\":{},\"is_link\":{}",
+                    row.dir != 0,
+                    row.link
+                )
+                .ok();
+                if let Some(t) = &row.target {
+                    line.extend_from_slice(b",\"target\":");
+                    push_json_str(t, &mut line);
+                }
+                write!(
+                    line,
+                    ",\"on_disk\":{},\"apparent\":{}}}",
+                    row.disk, row.apparent
+                )
+                .ok();
+            } else {
+                let disk = size_text(row.disk, self.o.human);
+                let apparent = size_text(row.apparent, self.o.human);
+                let (wd, wa) = (self.wd, self.wa);
+                let branch = if last { "└── " } else { "├── " };
+                write!(
+                    line,
+                    "{prefix}{branch}[ {disk:>wd$} {apparent:>wa$}]  {}",
+                    row.name
+                )
+                .ok();
+                if let Some(t) = &row.target {
+                    write!(line, " -> {t}").ok();
+                }
+                line.push(b'\n');
             }
-            line.push('\n');
-            out.write_all(line.as_bytes())?;
-            prefix.truncate(base);
+            out.write_all(&line)?;
+            let kid = row.dir as usize;
+            if kid == 0 || !self.descends(kid) {
+                continue;
+            }
+            let path = match self.raw.binary_search_by_key(&row.dir, |r| r.0) {
+                Ok(at) => dir.join(&self.raw[at].1),
+                Err(_) => dir.join(&row.name),
+            };
             prefix.push_str(if last { "    " } else { "│   " });
-            self.print_rows(*kid, prefix, wd, wa, out)?;
+            self.print(&path, &child_rel, depth + 1, kid, prefix, out)?;
             prefix.truncate(base);
         }
+        self.rules.pop_to(mark);
         Ok(())
     }
 
-    fn json_rows(&self, node: usize, rel: &mut String, first: &mut bool, out: &mut Vec<u8>) {
-        let kids: Vec<usize> = self.visible(node).collect();
-        let base = rel.len();
-        for kid in kids {
-            let n = &self.nodes[kid];
-            if !rel.is_empty() {
-                rel.push('/');
-            }
-            rel.push_str(self.text(n.name));
-            if !*first {
-                out.push(b',');
-            }
-            *first = false;
-            write!(out, "{{\"depth\":").ok();
-            write!(out, "{}", n.depth).ok();
-            out.extend_from_slice(b",\"name\":");
-            push_json_str(self.text(n.name), out);
-            out.extend_from_slice(b",\"rel\":");
-            push_json_str(rel, out);
-            out.extend_from_slice(if n.is_dir() {
-                b",\"is_dir\":true"
-            } else {
-                b",\"is_dir\":false"
-            });
-            out.extend_from_slice(if n.is_link() {
-                b",\"is_link\":true"
-            } else {
-                b",\"is_link\":false"
-            });
-            if let Some(t) = n.target {
-                out.extend_from_slice(b",\"target\":");
-                push_json_str(self.text(t), out);
-            }
-            write!(
-                out,
-                ",\"on_disk\":{},\"apparent\":{}}}",
-                n.total_disk, n.total_apparent
-            )
-            .ok();
-            self.json_rows(kid, rel, first, out);
-            rel.truncate(base);
-        }
+    /// Whether a directory has any row under it to print.
+    fn descends(&self, node: usize) -> bool {
+        let n = &self.nodes[node];
+        n.first_kid != 0 || (!self.o.dirs_only && n.flags & HAS_ROWS != 0)
     }
 }
 
@@ -554,6 +615,14 @@ fn push_json_str(v: &str, out: &mut Vec<u8>) {
     out.extend_from_slice(buf.as_bytes());
 }
 
+/// The printed width of a size, without building the text for a plain byte count.
+fn size_width(v: u64, human: Option<u64>) -> usize {
+    match human {
+        Some(base) => human_bytes(v, base).len(),
+        None => v.checked_ilog10().map_or(1, |d| d as usize + 1),
+    }
+}
+
 fn size_text(v: u64, human: Option<u64>) -> String {
     match human {
         Some(base) => human_bytes(v, base),
@@ -644,61 +713,51 @@ impl Run {
         let own_disk = path_alloc(&md).unwrap_or(0);
         let own_apparent = if root_dir { 0 } else { md.len() };
         let name = tree.intern(spec);
-        tree.nodes.push(Node {
+        tree.nodes.push(Dir {
             name,
-            target: None,
             total_disk: own_disk,
             total_apparent: own_apparent,
-            kids: Vec::new(),
-            parent: 0,
-            depth: 0,
-            flags: if root_dir { IS_DIR } else { 0 },
+            first_kid: 0,
+            next: 0,
+            flags: 0,
         });
         if root_dir && o.level > 0 {
-            tree.list(path, "", 0, 0);
+            tree.walk(path, "", 0, 0);
         }
-        tree.totals();
-        tree.sort_kids();
         for m in &tree.messages {
             eprintln!("dusage tree: {m}");
-        }
-        if tree.errs.total() > 0 {
-            self.failed = true;
         }
         if !root_dir {
             tree.files = 1;
         }
-        if o.level == 0 && root_dir {
-            return Ok(());
-        }
-        if o.json {
-            json_render(&tree, out)
+        let rendered = if o.level == 0 && root_dir {
+            Ok(())
+        } else if o.json {
+            json_render(&mut tree, path, root_dir, out)
         } else {
-            text_render(&tree, out)
+            text_render(&mut tree, path, out)
+        };
+        if tree.errs.total() > 0 || tree.late_failure {
+            self.failed = true;
         }
+        rendered
     }
 }
 
-fn text_render(tree: &Tree<'_>, out: &mut dyn Write) -> io::Result<()> {
+fn text_render(tree: &mut Tree<'_>, path: &Path, out: &mut dyn Write) -> io::Result<()> {
     let o = tree.o;
-    let root = &tree.nodes[0];
-    let mut prefix = String::new();
-    let disk = size_text(root.total_disk, o.human);
-    let apparent = size_text(root.total_apparent, o.human);
-    let line = format!("[ {disk} {apparent}]  {}", tree.text(root.name));
+    let disk = size_text(tree.nodes[0].total_disk, o.human);
+    let apparent = size_text(tree.nodes[0].total_apparent, o.human);
+    let line = format!("[ {disk} {apparent}]  {}", tree.text(tree.nodes[0].name));
     writeln!(out, "{line}")?;
-    let (mut wd, mut wa) = (1, 1);
-    tree.widths(0, &mut wd, &mut wa);
-    tree.print_rows(0, &mut prefix, wd, wa, out)?;
+    tree.print(path, "", 0, 0, &mut String::new(), out)?;
     let counts = if o.dirs_only {
         format!("{} directories", tree.dirs)
     } else {
         format!("{} directories, {} files", tree.dirs, tree.files)
     };
     let footer = format!(
-        "\n{counts} ({} on disk, {} apparent{})\n",
-        size_text(root.total_disk, o.human),
-        size_text(root.total_apparent, o.human),
+        "\n{counts} ({disk} on disk, {apparent} apparent{})\n",
         if tree.skipped_mounts > 0 {
             format!(", {} mount points not entered", tree.skipped_mounts)
         } else {
@@ -708,40 +767,27 @@ fn text_render(tree: &Tree<'_>, out: &mut dyn Write) -> io::Result<()> {
     out.write_all(footer.as_bytes())
 }
 
-fn json_render(tree: &Tree<'_>, out_stream: &mut dyn Write) -> io::Result<()> {
-    let root = &tree.nodes[0];
-    let name = tree.text(root.name).to_string();
-    let mut out = Vec::new();
-    out.extend_from_slice(b"{\"root\":");
-    push_json_str(&name, &mut out);
-    out.extend_from_slice(b",\"entries\":[");
+fn json_render(
+    tree: &mut Tree<'_>,
+    path: &Path,
+    root_dir: bool,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let (total_disk, total_apparent) = (tree.nodes[0].total_disk, tree.nodes[0].total_apparent);
+    let name = quote(tree.text(tree.nodes[0].name));
     write!(
         out,
-        "{{\"depth\":0,\"name\":{},\"rel\":\"\",\"is_dir\":{},\"is_link\":false,\
-             \"on_disk\":{},\"apparent\":{}}}",
-        quote(&name),
-        root.is_dir(),
-        root.total_disk,
-        root.total_apparent
-    )
-    .ok();
-    let mut first = false;
-    let mut rel = String::new();
-    tree.json_rows(0, &mut rel, &mut first, &mut out);
-    write!(
+        "{{\"root\":{name},\"entries\":[{{\"depth\":0,\"name\":{name},\"rel\":\"\",\
+             \"is_dir\":{root_dir},\"is_link\":false,\"on_disk\":{total_disk},\
+             \"apparent\":{total_apparent}}}"
+    )?;
+    tree.print(path, "", 0, 0, &mut String::new(), out)?;
+    writeln!(
         out,
-        "],\"dirs\":{},\"files\":{},\"links\":{},\"on_disk\":{},\"apparent\":{},\
-             \"skipped_mounts\":{}}}",
-        tree.dirs,
-        tree.files,
-        tree.links,
-        root.total_disk,
-        root.total_apparent,
-        tree.skipped_mounts
+        "],\"dirs\":{},\"files\":{},\"links\":{},\"on_disk\":{total_disk},\
+             \"apparent\":{total_apparent},\"skipped_mounts\":{}}}",
+        tree.dirs, tree.files, tree.links, tree.skipped_mounts
     )
-    .ok();
-    out.push(b'\n');
-    out_stream.write_all(&out)
 }
 
 fn quote(v: &str) -> String {
