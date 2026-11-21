@@ -467,6 +467,44 @@ fn encoding_auto_and_forced() {
 }
 
 #[test]
+fn encoding_takes_the_whatwg_labels() {
+    let f = Fixture::new("encodinglabels");
+    fs::write(
+        f.root.join("cp1251.txt"),
+        b"needle \xCF\xF0\xE8\xE2\xE5\xF2\n",
+    )
+    .unwrap();
+    fs::write(
+        f.root.join("cp1252.txt"),
+        b"needle \x80 5 \x93caf\xE9\x94\n",
+    )
+    .unwrap();
+    let hit = |label: &str, pattern: &str, file: &str| {
+        let o = run(&["search", "-l", "--encoding", label, pattern], &f.root);
+        assert!(stdout(&o).contains(file), "{label}: {}", stdout(&o));
+    };
+    // Every label of one encoding reaches the same decoder, in any case.
+    for label in ["windows-1251", "cp1251", "x-cp1251", "CP1251"] {
+        hit(label, "Привет", "cp1251.txt");
+    }
+    for label in ["windows-1252", "cp1252", "ascii", "l1"] {
+        hit(label, "€ 5 “café”", "cp1252.txt");
+    }
+    // The same bytes under another label are other letters.
+    hit("koi8-r", "оПХБЕР", "cp1251.txt");
+    // Without the flag the bytes are not UTF-8 and the word is not there.
+    let o = run(&["search", "-l", "Привет"], &f.root);
+    assert_eq!(code(&o), 1, "{}", stdout(&o));
+
+    // A multi-byte label is known, and refused by name rather than as a typo.
+    let o = run(&["search", "--encoding", "sjis", "x"], &f.root);
+    assert_eq!(code(&o), 2);
+    assert!(stderr(&o).contains("Shift_JIS"), "{}", stderr(&o));
+    let o = run(&["search", "--encoding", "klingon", "x"], &f.root);
+    assert!(stderr(&o).contains("unknown encoding"), "{}", stderr(&o));
+}
+
+#[test]
 fn presets_print_and_select() {
     let f = Fixture::new("preset");
     let conf = f.root.join("presets.conf");

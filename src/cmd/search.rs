@@ -2,7 +2,7 @@
 
 use super::Fail;
 use crate::cli::{self, parse_age, parse_size, Args};
-use crate::encodings::Encoding;
+use crate::encodings::{Encoding, LabelError};
 use crate::findexpr::{self, Ctx, ExecRequest, Ids, Sink};
 use crate::glob::Glob;
 use crate::pattern::Pattern;
@@ -104,7 +104,11 @@ OPTIONS:
     --max-filesize SIZE    skip files larger than SIZE (e.g. 10M)
     -M, --max-columns N    truncate printed lines at N bytes
         --max-columns-preview  say so when a line was cut
-    --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
+    --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1, or a
+                           label of the WHATWG Encoding Standard as rg takes them
+                           (windows-1252, cp1251, iso-8859-15, koi8-r, ibm866, ...);
+                           its multi-byte encodings (gbk, big5, shift_jis, euc-kr,
+                           ...) are named in the error and not decoded
     --crlf                 read \r\n as the line terminator: '$' matches before the \r
                            and the \r is not printed (already the behaviour here)
     --files                with no pattern, list the files a search would read
@@ -1301,14 +1305,20 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             o.max_columns = unsigned("-M")?.or(unsigned("--max-columns")?).unwrap_or(0);
             if let Some(name) = a.value("--encoding") {
                 if !name.eq_ignore_ascii_case("auto") {
-                    let e = Encoding::from_name(name).ok_or_else(|| {
-                        Fail(
-                            2,
-                            format!(
-                                "unknown encoding {name:?} (auto, utf-8, utf-16le, utf-16be, latin1)"
-                            ),
-                        )
-                    })?;
+                    let e = Encoding::lookup(name).map_err(|e| {
+                Fail(
+                    2,
+                    match e {
+                        LabelError::Unsupported(enc) => format!(
+                            "encoding {name:?} is {enc}, a multi-byte encoding with no decoder here"
+                        ),
+                        LabelError::Unknown => format!(
+                            "unknown encoding {name:?} (auto, utf-8, utf-16le, utf-16be, latin1, or a single-byte \
+                             label of the WHATWG Encoding Standard such as windows-1252, iso-8859-15, koi8-r)"
+                        ),
+                    },
+                )
+            })?;
                     o.encoding = Some(e);
                 }
             }
