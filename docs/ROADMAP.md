@@ -514,3 +514,14 @@ and never following a symlink. `--watch` is kqueue. The guard refuses `/`, the s
 - **CI is on a clock, and the schedule lives in MRI-14.** The `macos-15-intel` runner label
   is Intel-only and GitHub retires x86_64 macOS images; MRI-14 carries the date and the arm64
   answer that outlives them, so this file does not restate either.
+
+**What the legs are for.** Four times now, a change has landed on `main` that no macOS build
+could see, and three of those came *after* the port existed: `tree` gated its own
+`path_alloc` to `target_os = "linux"` with only a Windows sibling, `tree_cli`'s `link_dir`
+had the same two-armed shape and left the function's body empty where a `bool` was required,
+`df` shipped with a native module for Windows and Linux and none for macOS so the platform
+did not compile at all, and the arm64 lint surfaced dead code that had never been reachable
+there. Each was written by someone who could not have known macOS was a target, because
+nothing on `main` built for it. That is the argument for the macOS legs, and it is the reason
+a change that cannot be built for them is not finished: the port was the first code written
+against this platform, not the last.

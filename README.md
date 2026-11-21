@@ -162,6 +162,14 @@ compile-time `size_of`/`offset_of` assertions pin. Apple-silicon `arm64` is a di
 target with different bindings and is **unverified**: nothing in this repository has run it.
 MRI-14 carries that work and the runner schedule.
 
+The macOS legs are not there to re-prove the port; they are there so that a change cannot
+land without being built for this platform. The port was the first code written against
+macOS, not the last: `tree`'s Linux-only `path_alloc`, `tree_cli`'s two-armed `link_dir` and
+`df`'s missing macOS module all landed afterwards, each written by someone with no way to
+learn macOS was a target, because nothing on `main` built for it. A change that cannot be
+built for the platform it names is not finished, and these legs are the only thing that says
+so before a release does.
+
 ## fastdel
 
 ```text
