@@ -2,6 +2,7 @@
 //! crate lives under this module; callers outside `win` see only safe APIs.
 
 pub mod delete;
+pub mod df;
 pub mod enumerate;
 pub mod mft;
 pub mod sys;
