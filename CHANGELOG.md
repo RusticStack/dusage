@@ -15,6 +15,9 @@
 
 ### Added
 
+- **`dusage search --stats` breaks the scan down by directory.** Under the summary line, stderr
+  lists the ten directories whose files took longest to scan (time, files, bytes, matches),
+  slowest first, and one row for the rest. Without `--stats` nothing is timed.
 - **`DUSAGE_WATCH_TRACE=1`** logs one stderr line per `--watch` poll with the number of journal
   records read and the USN span they covered.
 

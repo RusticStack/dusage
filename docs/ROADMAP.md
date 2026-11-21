@@ -538,8 +538,9 @@ smaller than that; `docs/BENCHMARKS.md` says so in its noise bullet and the
   search for needles longer than a couple of bytes.
 - Whether the expression walk can be parallelised per directory without losing
   `-prune`/`-depth` semantics.
-- `--stats` is one line today; a per-directory breakdown would make "why is this
-  slow" answerable without a profiler.
+- `search --stats` lists scan cost per directory (the ten slowest and a row for the
+  rest). It times the content scan only: time spent walking a directory, and
+  `du --stats`, still have no breakdown.
 
 ## macOS (x86_64 and arm64), as running
 

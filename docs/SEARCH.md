@@ -91,7 +91,7 @@ not a warning, and so is a flag that `find` does not take.
 | `--line-regexp` | `grep -x` / `rg -x` | Wraps the pattern in `^(?:...)$`. There is no short form because `-x` here means `--one-filesystem`. |
 | `--json` | `rg --json` | Different shape: one JSON document for the whole run, not JSON Lines. See §4.2. |
 | `--color[=WHEN]` | `grep --color`, `rg --color` | `always`/`yes`/`true`, `never`/`no`/`false`, `auto`. Only the `--color=WHEN` spelling is parsed; `auto` — and an unrecognised WHEN, which is not an error — consults `is_terminal()` on stdout, so a pipe stays plain. |
-| `--stats` | `rg --stats` | One summary line on **stderr**, not stdout: `dusage: 1 files scanned (1 binary), 1 matched, 1 matches, 0 errors, 712.99µs` (measured). |
+| `--stats` | `rg --stats` | One summary line on **stderr**, not stdout: `dusage: 1 files scanned (1 binary), 1 matched, 1 matches, 0 errors, 712.99µs` (measured). Under it, also on stderr, what the scan cost per directory: a `by directory, slowest first (N of M; ...)` header, then one row per directory for the ten whose files took longest to open, read and match (`7.06ms      27 files    1.61 MB    1694 matches  src`, measured), and one `(K more directories)` row for the rest. A file counts under its own parent, not under an ancestor; the times are summed over the worker threads, so they can exceed the wall clock; a search of stdin has no rows. |
 | `--no-messages` | `rg --no-messages` | Drops the "path(s) could not be read" line. |
 | `--help`, `-V`, `--version` | — | `--help` prints the help text (`-h` does not; it is `--no-filename`). `-V` prints `dusage <version>`. |
 

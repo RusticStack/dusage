@@ -138,7 +138,8 @@ A path of `-` is standard input, and with no paths a piped stdin is searched ins
                            stay on the starting filesystem
     --json                 machine-readable output
     --color[=WHEN]         WHEN is always, never or auto (default auto)
-    --stats                print a summary line on stderr
+    --stats                print a summary line on stderr, then what the scan cost per
+                           directory (the ten slowest and a line for the rest)
         --no-messages      do not report paths that could not be read
     -h, --help             this text (note: -h alone means --no-filename)
     -V, --version          print the version
@@ -1297,6 +1298,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
             o.count = a.flag("-c") || a.flag("--count");
             o.count_matches = a.flag("--count-matches");
             o.quiet = a.flag("-q") || a.flag("--quiet");
+            o.dir_stats = a.flag("--stats");
             o.text = a.flag("-a") || a.flag("--text");
             o.max_columns = unsigned("-M")?.or(unsigned("--max-columns")?).unwrap_or(0);
             if let Some(name) = a.value("--encoding") {
@@ -1591,6 +1593,9 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     }
     if stats {
         eprintln!("dusage: {}", report::stats_line(&report));
+        for line in report::stats_dirs(&report) {
+            eprintln!("dusage: {line}");
+        }
     }
     // A path that could not be read makes the whole run an error, whatever else matched:
     // exit 2 is grep's answer for "something went wrong", and sets it apart from "nothing

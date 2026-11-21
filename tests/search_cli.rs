@@ -3035,3 +3035,78 @@ fn macos_fstype_selects_by_the_type_the_kernel_reports() {
         saw(&o)
     );
 }
+
+/// The `(files, matches, directory)` of every per-directory row `--stats` printed.
+fn stats_rows(stderr: &str) -> Vec<(u64, u64, String)> {
+    let mut rows = Vec::new();
+    for line in stderr.lines() {
+        let (Some(f), Some(m)) = (line.find(" files "), line.find(" matches  ")) else {
+            continue;
+        };
+        let last = |s: &str| s.split_whitespace().last().unwrap().parse::<u64>().unwrap();
+        rows.push((
+            last(&line[..f]),
+            last(&line[..m]),
+            line[m + " matches  ".len()..].to_string(),
+        ));
+    }
+    rows
+}
+
+#[test]
+fn stats_breaks_the_scan_down_by_directory() {
+    let fx = Fixture::new("stats_dirs");
+    let plain = run(&["search", "-j1", "needle"], &fx.root);
+    let o = run(&["search", "-j1", "--stats", "needle"], &fx.root);
+    assert_eq!(o.stdout, plain.stdout, "--stats changed stdout");
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(!String::from_utf8_lossy(&plain.stderr).contains("by directory"));
+
+    let summary = err.lines().find(|l| l.contains("files scanned")).unwrap();
+    let num = |after: &str| -> u64 {
+        let head = &summary[..summary.find(after).unwrap()];
+        let word = head.split(|c: char| !c.is_ascii_digit()).next_back();
+        word.unwrap().parse().unwrap()
+    };
+    let rows = stats_rows(&err);
+    assert!(err.contains("by directory, slowest first"), "{err}");
+    assert_eq!(
+        rows.iter().map(|r| r.0).sum::<u64>(),
+        num(" files scanned"),
+        "{err}"
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.1).sum::<u64>(),
+        num(" matches,"),
+        "{err}"
+    );
+    // A file counts under its own directory, not under an ancestor.
+    let of = |dir: &Path| {
+        let name = dir.to_string_lossy();
+        rows.iter().find(|r| r.2 == name).map(|r| (r.0, r.1))
+    };
+    assert_eq!(of(&fx.root.join("tests")), Some((1, 2)), "{err}");
+    assert_eq!(of(&fx.root.join("src")), Some((1, 2)), "{err}");
+    assert_eq!(of(&fx.root.join("src").join("deep")), Some((1, 0)), "{err}");
+    assert_eq!(of(&fx.root.join("node_modules").join("pkg")), None, "{err}");
+}
+
+#[test]
+fn stats_folds_directories_past_the_tenth_into_one_row() {
+    let fx = Fixture::new("stats_fold");
+    for i in 0..12 {
+        let d = fx.root.join(format!("many/d{i:02}"));
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("f.txt"), "needle\n").unwrap();
+    }
+    let o = run(&["search", "--stats", "needle"], &fx.root.join("many"));
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    let rows = stats_rows(&err);
+    assert!(err.contains("(10 of 12;"), "{err}");
+    assert_eq!(rows.len(), 11, "{err}");
+    assert_eq!(
+        rows[10],
+        (2, 2, "(2 more directories)".to_string()),
+        "{err}"
+    );
+}

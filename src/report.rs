@@ -858,6 +858,55 @@ pub fn stats_line(r: &SearchReport) -> String {
     )
 }
 
+/// How many directories `--stats` lists before it folds the rest into one line.
+const STATS_DIRS: usize = 10;
+
+/// The per-directory lines under [`stats_line`]: the directories whose files took longest to
+/// scan, slowest first, and one line for the rest. Empty when nothing was scanned.
+pub fn stats_dirs(r: &SearchReport) -> Vec<String> {
+    let mut dirs: Vec<_> = r.stats.dirs.iter().collect();
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+    dirs.sort_by(|a, b| b.1.scan.cmp(&a.1.scan).then_with(|| a.0.cmp(b.0)));
+    let row = |d: &crate::search::DirStats, name: &str| {
+        format!(
+            "{:>10.2?} {:>7} files {:>10} {:>7} matches  {name}",
+            d.scan,
+            d.files,
+            crate::cli::fmt_bytes(d.bytes),
+            d.matches
+        )
+    };
+    let shown = dirs.len().min(STATS_DIRS);
+    let mut out = vec![format!(
+        "by directory, slowest first ({shown} of {}; scan time is summed over threads):",
+        dirs.len()
+    )];
+    for (path, d) in &dirs[..shown] {
+        let name = if path.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            path.to_string_lossy().into_owned()
+        };
+        out.push(row(d, &name));
+    }
+    if dirs.len() > shown {
+        let mut rest = crate::search::DirStats::default();
+        for (_, d) in &dirs[shown..] {
+            rest.files += d.files;
+            rest.bytes += d.bytes;
+            rest.matches += d.matches;
+            rest.scan += d.scan;
+        }
+        out.push(row(
+            &rest,
+            &format!("({} more directories)", dirs.len() - shown),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1346,5 +1395,49 @@ mod tests {
         let json = String::from_utf8(v).unwrap();
         assert!(json.contains("\"count\":1"), "{json}");
         assert!(json.contains("\"rel\":\"x.rs\""), "{json}");
+    }
+
+    #[test]
+    fn stats_dirs_lists_the_slowest_first_and_folds_the_rest() {
+        use crate::search::DirStats;
+        use std::path::PathBuf;
+        use std::time::Duration;
+        let mut r = SearchReport::default();
+        assert!(stats_dirs(&r).is_empty());
+        for i in 0..12u64 {
+            r.stats.dirs.insert(
+                PathBuf::from(format!("d{i:02}")),
+                DirStats {
+                    files: 1,
+                    bytes: 1000,
+                    matches: i,
+                    // d00 and d01 tie; every later directory is slower.
+                    scan: Duration::from_millis(i.max(1)),
+                },
+            );
+        }
+        r.stats.dirs.insert(PathBuf::new(), DirStats::default());
+        let lines = stats_dirs(&r);
+        assert_eq!(lines.len(), 12);
+        assert!(lines[0].contains("(10 of 13;"), "{}", lines[0]);
+        assert!(lines[1].ends_with("  d11"), "{}", lines[1]);
+        assert!(lines[1].contains("11.00ms"), "{}", lines[1]);
+        assert!(lines[1].contains("1.00 KB"), "{}", lines[1]);
+        assert!(lines[10].ends_with("  d02"), "{}", lines[10]);
+        let rest = &lines[11];
+        assert!(rest.ends_with("  (3 more directories)"), "{rest}");
+        assert!(
+            rest.contains("2 files") && rest.contains("1 matches"),
+            "{rest}"
+        );
+        assert!(rest.contains("2.00ms"), "{rest}");
+
+        // Equal times order by path, and the current directory is spelled out.
+        r.stats
+            .dirs
+            .retain(|p, _| p.as_os_str().len() < 3 || p.ends_with("d00"));
+        let lines = stats_dirs(&r);
+        assert!(lines[1].ends_with("  d00"), "{}", lines[1]);
+        assert!(lines[2].ends_with("  ."), "{}", lines[2]);
     }
 }
