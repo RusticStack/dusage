@@ -25,7 +25,7 @@ fn stdout(o: &Output) -> String {
     String::from_utf8(o.stdout.clone()).unwrap()
 }
 
-#[cfg_attr(windows, allow(dead_code))] // Windows has no df worth comparing against
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux rows compare against a real df
 fn real_df() -> bool {
     match Command::new("df").arg("--version").output() {
         Ok(o) if o.status.success() => true,

@@ -9,8 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Create `link` as a directory link to `target`: a junction on Windows, a symlink on
-/// Linux. Either is what the walk must print and never follow.
+/// Create `link` as a directory link to `target`: a junction on Windows, a symlink on Unix
+/// (Linux and macOS). Either is what the walk must print and never follow.
 fn link_dir(link: &Path, target: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -22,7 +22,7 @@ fn link_dir(link: &Path, target: &Path) -> bool {
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link).is_ok()
     }

@@ -13,6 +13,13 @@ with a memory pass, a cold-cache pass and a regression guard now lives in
 `bench/` and `docs/BENCHMARKS.md`; the section at the end lists what shipped,
 the numbers and the limits that are still open.
 
+**Status (macOS, x86_64).** The crate compiles for `x86_64-apple-darwin` and has a third
+platform module, `src/mac/`: enumeration over `readdir$INODE64`/`fstatat`, deletion over
+`unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed and a macOS guard. It is cross-checked
+from Linux and has run in CI on a real x86_64 Mac; arm64 has not been run yet. The limits
+that come with it are in the macOS section at the end, and MRI-14 carries the runner
+schedule.
+
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
 tested; the NTFS-only read paths (`--mft`, `--streams`) are refused or report zero with an
@@ -288,8 +295,7 @@ directory-entry noise.
   container on overlayfs, so delete timings are not comparable to ext4 or btrfs).
 - `--watch` under `max_user_watches` pressure: the fallback is implemented (full rescans)
   but has only been tested by construction, not by lowering the limit.
-- macOS would need a kqueue/FSEvents change feed and its own guard list; the crate refuses
-  to compile there today, on purpose.
+- macOS build numbers, arm64, FSEvents and `getmntinfo` — see the macOS section at the end.
 
 ## Search suite, find and du (0.5.0, as shipped)
 
@@ -457,3 +463,65 @@ smaller than that; `docs/BENCHMARKS.md` says so in its noise bullet and the
   `-prune`/`-depth` semantics.
 - `--stats` is one line today; a per-directory breakdown would make "why is this
   slow" answerable without a profiler.
+
+## macOS (x86_64), as built
+
+**Status.** `lib.rs` accepts `target_os = "macos"` and aliases `src/mac/` as `crate::native`,
+the third arm beside `src/unix/` and `src/win/`. The crate cross-checks for
+`x86_64-apple-darwin` from Linux — `cargo check`, `cargo check --tests` and
+`cargo clippy --all-targets -D warnings` — and CI carries a `macos-15-intel` leg that runs
+the format, lint, test and release-build steps the other platforms run. That leg is green on
+a real Mac, so the symbols resolve and the layouts hold on x86_64: everything the
+cross-check could not prove, the runner proved. Cross-checking remains the fast gate — it
+proves the `cfg` wiring, the types and that the FFI declarations compile — and arm64 is
+still unrun, with its own bindings, so nothing here speaks for it.
+
+**Done.** Enumeration is `open` + `fdopendir` + `readdir$INODE64`, with `fstatat$INODE64`
+per entry against the open directory descriptor, so `alloc` is `st_blocks * 512` and
+`file_id` is `dev << 64 | ino` exactly as on Linux. Deletion is `unlink`/`rmdir`, path-based
+and never following a symlink. `--watch` is kqueue. The guard refuses `/`, the system trees,
+`/Users`, `$HOME`, `/opt` and every volume root under `/Volumes`.
+
+**Open, each with what it costs.**
+
+- **The Darwin struct layouts are asserted on Linux and confirmed by the runner.**
+  `struct stat` (144 bytes), `struct dirent`, `struct kevent` and the `$INODE64` symbol
+  aliases are pinned by `size_of`/`offset_of` assertions that run during the cross-check,
+  which proves the declaration is self-consistent and nothing about libSystem; the macOS leg
+  is what confirms them, and the first run of it is what caught the missing
+  `fdopendir$INODE64` alias. Those assertions stay: they are the guard against the layout
+  drifting silently.
+- **The kqueue feed has a directory budget.** A watch is per-descriptor, so the feed admits
+  4096 directories; a tree past that gets no feed at all and every tick is a full rescan.
+  That is a behaviour change from Linux, whose inotify feed covers every directory or gives
+  up as a whole. Removing the ceiling is what MRI-13 exists to do.
+- **FSEvents is deferred, and MRI-13 carries it.** kqueue is what shipped for this port.
+  The reason recorded at the time was CoreFoundation against zero dependencies; the binding
+  turns out to be reachable — `#[link(name = "CoreFoundation", kind = "framework")]` is what
+  `core-foundation-sys` does with no build script — so the open question is the change feed's
+  session behaviour and its dropped-event path, not the dependency rule.
+- **The guard's two sets were split by evidence, not by taste.** Refusing `/private` as a
+  whole subtree, which the first version did, made every temp directory unprunable: macOS's
+  `$TMPDIR` is `/private/var/folders/...`, so a pruner could not touch the one place macOS
+  scratch actually collects. `/private/etc` is a refused subtree; `/private/tmp` and
+  `/private/var` are refused as data roots whose children stay prunable, the shape Linux
+  has with `/var` and `/var/tmp`. Matching runs on both the lexical and the canonical
+  spelling, so `/etc/passwd` and `/private/etc/passwd` both answer.
+- **A volume mounted outside `/Volumes` is not refused as a volume root.** `getmntinfo` and
+  `struct statfs` are not bound, so the guard only sees the mounts `/Volumes` lists; the
+  prune's device comparison is what stops a walk into any other one. `-fstype` answers
+  nothing for the same reason.
+- **CI is on a clock, and the schedule lives in MRI-14.** The `macos-15-intel` runner label
+  is Intel-only and GitHub retires x86_64 macOS images; MRI-14 carries the date and the arm64
+  answer that outlives them, so this file does not restate either.
+
+**What the legs are for.** Four times now, a change has landed on `main` that no macOS build
+could see, and three of those came *after* the port existed: `tree` gated its own
+`path_alloc` to `target_os = "linux"` with only a Windows sibling, `tree_cli`'s `link_dir`
+had the same two-armed shape and left the function's body empty where a `bool` was required,
+`df` shipped with a native module for Windows and Linux and none for macOS so the platform
+did not compile at all, and the arm64 lint surfaced dead code that had never been reachable
+there. Each was written by someone who could not have known macOS was a target, because
+nothing on `main` built for it. That is the argument for the macOS legs, and it is the reason
+a change that cannot be built for them is not finished: the port was the first code written
+against this platform, not the last.

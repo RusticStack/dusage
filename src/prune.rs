@@ -455,7 +455,7 @@ mod tests {
     /// The platform's "access denied" code, so the fake deleters classify the same.
     #[cfg(windows)]
     const DENIED: i32 = 5;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const DENIED: i32 = 13;
 
     static LOG: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());

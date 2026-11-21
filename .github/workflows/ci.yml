@@ -32,6 +32,27 @@ jobs:
             target/release/fastdel.exe
           if-no-files-found: error
 
+  # Intel macOS. The label is the Intel-specific image: `macos-15-intel` runs on x86_64,
+  # which is the target the crate is cross-checked against from Linux, and Apple-silicon
+  # arm64 is a different target that nothing here exercises. The label itself is on a
+  # clock — GitHub retires x86_64 macOS runners in August 2027 — so this leg stops being
+  # available then and the port needs an arm64 answer before it does.
+  macos:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Build release
+        run: cargo build --release
+
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -59,7 +80,7 @@ jobs:
           # repository itself so the case is deterministic on any runner.
           rm -rf /tmp/guard && mkdir -p /tmp/guard
           for i in $(seq 1 30); do
-            cat src/*.rs src/cmd/*.rs src/unix/*.rs src/win/*.rs > "/tmp/guard/f$i.rs"
+            cat src/*.rs src/cmd/*.rs src/mac/*.rs src/unix/*.rs src/win/*.rs > "/tmp/guard/f$i.rs"
           done
           DUSAGE_BENCH_SEARCH_ROOT=/tmp/guard DUSAGE_PERF_TOL=60 \
             DUSAGE_SKIP_BUILD=1 bash scripts/perf-guard.sh
