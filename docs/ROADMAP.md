@@ -219,9 +219,19 @@ directory-entry noise.
 
 **Open.**
 
-- A raw `getdents64` enumerator (own syscall, no `read_dir` allocation per entry) and
-  `statx` with `STATX_MNT_ID` batching are unexplored; the current backend is one syscall
-  per entry, the same as `du`'s, and wins only on parallelism and on doing less per entry.
+- The raw `getdents64` enumerator and the per-entry `statx` this list used to call
+  unexplored are the backend as shipped (`src/unix/enumerate.rs`, since #45): one
+  `getdents64` per directory into a reused buffer and one `statx` per entry. Measured at
+  48a92f6 on the 4-vCPU container: `scan /usr` costs 267,507 `statx`, 35,572 `getdents64`,
+  17,774 `openat` and 35,536 `close` for 180,451 entries, i.e. exactly one stat per entry,
+  and 34% of its instructions are in `malloc`/`free` from the per-entry name allocation.
+  Four candidate changes were measured and rejected: a 256 KiB batch and a SWAR scan for
+  each record's NUL are inside the run-to-run spread (the SWAR scan is 2.4% more
+  instructions on 12-byte names), the `statx` mask cannot be trimmed because
+  `--newerat`/`--newerct` and the ownership tests read every field `STATX_BASIC_STATS`
+  fills, and `STATX_MNT_ID` adds nothing because the same call already returns the device.
+  What is left is `io_uring`-style batching, which the zero-dependency rule and the
+  read-only contract both argue against.
 - Thread sweep and cold-cache numbers on a real machine (2 vCPUs here, and the machine is a
   container on overlayfs, so delete timings are not comparable to ext4 or btrfs).
 - `--watch` under `max_user_watches` pressure: the fallback is implemented (full rescans)
@@ -321,18 +331,19 @@ output. Read the case ids there — `search-rare`, `search-common`, `search-ci`,
 `search-multiline`, `search-gzip`, `search-files-with-matches`, `find-name`,
 `find-path`, `find-type`, `find-expr`, `du-s`, `du`, `threads-scan-*`,
 `threads-search-*` — rather than a table copied here, because a copy goes stale
-at the next merge. At the commit the tables were last generated at (323bf88,
-2 vCPUs, warm cache) every content row is ahead: the output-heavy ones at
-`search-count` 0.69x, `search-files-with-matches` 0.69x,
-`search-only-matching` 0.84x, `search-multiline` 0.88x and `search-common`
-0.76x, the plain ones at `search-rare` 0.94x, `search-regex` 0.90x,
-`search-regex-nomatch` 0.94x and `search-ci` 0.91x (they were 1.02–1.10x two
-rounds ago, and callgrind counts the literal scan 25-28% cheaper and the regex
-candidate scan 29% cheaper rather than that being drift alone). `find` meets its
-reference on every row but one — `find-name` 0.71x, `find-path` 0.98x,
-`find-expr` 0.99x, `find-type` 1.03x — and both `du` rows are ahead of GNU `du`
-at 0.58–0.60x with identical totals. The content row still behind is
-`search-multiline-unicode` at 1.15x.
+at the next merge. The ratio there is dusage over the fastest reference, so **below
+1.00x is dusage ahead** — an earlier revision of this paragraph read that backwards and
+called 0.94x "behind". At the commit the tables were last generated at (2cdb809, a
+4-vCPU container, warm cache) the metadata rows win outright (`scan` 0.27x, `du`
+0.28-0.35x, `find-name` 0.59x, `find-path` 0.70x, `find-type` 0.71x, `find-expr` 0.99x),
+the output-heavy content rows are well ahead (`search-files-with-matches` 0.69x,
+`search-count` 0.70x, `search-multiline` 0.75x, `search-common` 0.80x,
+`search-only-matching` 0.84x), and the plain content rows are level with `ripgrep`
+(`search-rare` 1.04x, `search-regex` 1.05x, `search-regex-nomatch` 1.01x, `search-ci`
+0.97x) — inside the ±10% that a shared container moves those rows between passes, and
+behind on one row, `search-multiline-unicode` at 1.15x. The suite cannot resolve anything
+smaller than that; `docs/BENCHMARKS.md` says so in its noise bullet and the
+`bench/records/` pair is what a before/after claim has to cite.
 
 **Known limits, each an open item.**
 
@@ -379,7 +390,15 @@ at 0.58–0.60x with identical totals. The content row still behind is
 
 **Open questions worth measuring later.**
 
-- Where the time goes in `-o`: the match loop or the retained output.
+- **Answered: where the time goes in `-o`.** Not in the printer. Callgrind over
+  `/usr/local/go` at 48a92f6, one thread: `-o` costs 367.9M instructions against 333.5M
+  for the same query printed as lines and 299.6M for `-c`; inside the `-o` run the
+  per-match loop (`block_matches`, 202.6M, most of it the SIMD literal scan) is 55%, the
+  allocations of the per-match records and their pooled text are ~16%, and
+  `SearchStream::file` is 5.8% (21.4M). So the lever is the match loop and what it
+  allocates per file, not how the records are written: the 0.6 round floors those buffers
+  and counts `-o` 367.9M -> 363.3M and the plain mode 333.5M -> 321.7M, where a rewritten
+  printer would chase 6%.
 - Whether the literal fast path is worth a multi-byte (Two-Way or memchr-style)
   search for needles longer than a couple of bytes.
 - Whether the expression walk can be parallelised per directory without losing
