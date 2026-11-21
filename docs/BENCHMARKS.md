@@ -610,7 +610,27 @@ POSIX disposition:
 | --- | --- |
 | FILE_DISPOSITION_INFO_EX accepted | true |
 | a second open while the first handle is still open | open failed 5 |
-| name gone after the last close | true |```
+| name gone after the last close | true |
+
+USN change feed (elevated): scan --watch 1 over a 38-file tree; 12 changes in 4 groups while it ran.
+
+| changes made | update lines | journal records | fallback rescans | totals equal a full scan | truthful |
+| ---: | ---: | ---: | ---: | --- | --- |
+| 12 in 4 groups | 4 | 28 | 0 | true | true |
+
+The journal account of those changes, from bench/windows/usn_probe.py:
+
+| records | reasons |
+| ---: | --- |
+| 5 | FILE_CREATE |
+| 5 | DATA_EXTEND+FILE_CREATE |
+| 5 | DATA_EXTEND+FILE_CREATE+CLOSE |
+| 3 | FILE_DELETE+CLOSE |
+| 2 | DATA_EXTEND |
+| 2 | DATA_EXTEND+CLOSE |
+| 2 | RENAME_OLD_NAME |
+| 2 | RENAME_NEW_NAME |
+| 2 | RENAME_NEW_NAME+CLOSE |```
 
 ### What the twelve questions came to
 
@@ -681,9 +701,14 @@ delete it here, because this build has `LongPathsEnabled=1`; dusage uses the ver
 unconditionally, so it does not depend on that policy. `dusage prune` deleted the whole
 393-character fixture in 973 us.
 
-**11. `--mft` and the USN watch.** Both come from the elevated half: `--mft` totals for a
-volume against the batched backend and `robocopy /L /E /XJ`, and a watch with files created
-and deleted under it, whose printed update is compared with what a full rescan would cost.
+**11. `--mft` and the USN watch.** `--mft` comes from the elevated half: totals for a
+volume against the batched backend and `robocopy /L /E /XJ`. The watch row above is the
+ground-truth version of that check: twelve known changes in four groups produce **four** update
+lines and **28** journal records that the probe accounts for reason by reason (three per
+create, two per extend, three per rename, one per delete), and the last update's totals equal a
+full scan of the same tree exactly. A watch that re-emitted records would show more update
+lines than groups; one that lost a change would show fewer, or totals that differ. Both
+counters are in the row so either failure is visible without reading the output.
 
 ### Caveats for this section
 

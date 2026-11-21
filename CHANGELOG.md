@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`--watch` no longer spins when the change feed is unavailable.** Both fallback arms of
+  `scan::watch` did a full rescan and printed it without sleeping, so a `--watch` whose journal
+  never opened (any non-elevated Windows run: the volume device fails with error 5) ran at the
+  speed of its own rescans — measured as 142,929 stdout lines from 5,063 rescans in 14 s over a
+  38-file directory, against 370 lines from 12 rescans after the fix. Every tick is now paced by
+  the interval, and the tick says why: `no change feed (<reason>); full rescan`,
+  `change journal reset (<reason>); full rescan`, or `change feed restored; full rescan` when a
+  journal appears while the watch is running.
+
+### Added
+
+- **`DUSAGE_WATCH_TRACE=1`** logs one stderr line per `--watch` poll with the number of journal
+  records read and the USN span they covered.
+
+### Changed
+
+- **USN reason mask** leaves `USN_REASON_CLOSE` out, so a close-only record cannot trigger a
+  rescan. Records that carry CLOSE beside a real reason still arrive.
+- **`bench/windows/admin.ps1` section 3** records the watch as an experiment rather than a
+  stdout stream: 12 known changes in 4 groups must produce 4 update lines, the journal's own
+  record count and reason histogram come from `bench/windows/usn_probe.py` as an independent
+  oracle, and the last update's totals must equal a full scan of the same tree. Validated on
+  DOOMBRINGER with the journal open: 4 changed lines, 28 journal records, totals equal.
+
 ## [0.5.0] - 2026-11-18
 
 `dusage` is a search tool as well as a disk tool: `search` reads file contents, `find` lists

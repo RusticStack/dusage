@@ -131,9 +131,11 @@ files (`$MFT`, `$LogFile`, `$Extend`) that a directory walk cannot see.
 
 **Watch.** `--watch` asks the platform's change feed which top-level entries moved and
 rescans only those: the NTFS change journal in an elevated shell on Windows, inotify on Linux.
-When the feed is unavailable (`--watch` without admin rights on Windows, or an exceeded
-inotify watch limit) every tick is a full rescan. An update is printed only when something
-changed.
+When the feed is unavailable (`--watch` without admin rights on Windows, or an exceeded inotify
+watch limit) every tick is a full rescan, paced by the interval and labelled with the reason.
+An update is printed only when something changed. `DUSAGE_WATCH_TRACE=1` adds one stderr line
+per poll with the record count and USN span. Validated on a real journal 2026-11-21: twelve
+changes in four groups printed four updates, and the incremental totals matched a full scan.
 
 **Mount points.** A scan follows them by default, like `du`. `-x`/`--one-filesystem` stops at
 a directory on another device and counts it in the "skipped mount points" note, which is what

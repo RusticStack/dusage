@@ -48,7 +48,8 @@ enumerate::{Entry, DirReader::read(dir, out, errs), read_plain, is_skipped,
             refuse_reparse_root, file_id_of, named_stream_bytes, dev_of,
             other_filesystem, same_filesystem, is_unsupported, is_denied}
 delete::delete_entry
-watch::{resolve_root, ChangeSource::open(root), ChangeSource::poll(interval) -> Vec<PathBuf>}
+watch::{resolve_root, ChangeSource::open(root), ChangeSource::open_err(root),
+            ChangeSource::poll(interval) -> Vec<PathBuf>}
 ```
 
 All `unsafe` and FFI lives under `src/win/`, `src/unix/` or `src/simd.rs`; code
@@ -141,6 +142,15 @@ enqueued via `push`. It stops when the queue is empty and nothing is active.
   counts each FileId once. The 5-10% the user reported was an underestimate.
 - Tool and agent temp dirs can regenerate at
   ~100 GB/day — that's why fastdel exists.
+- The USN journal needs an administrator token for `CreateFileW` on the volume device
+  (`\\.\X:` with `GENERIC_READ`);
+  a non-elevated `--watch` has no feed at all and every tick is a full rescan (paced by the
+  interval since 2026-11-21). `fsutil usn queryjournal` works unelevated, so it is not a test
+  of whether a watch has a feed.
+- Twelve real changes produced 28 journal records on both a busy system volume and a clean
+  VHD: 3 per create (create, data write, close), 2 per data extend, 3 per rename (old name,
+  new name, close), 1 per delete. `USN_REASON_CLOSE` is in nearly every one of them, so
+  `--watch` masks it out and only a close-only record is dropped.
 
 ## Roadmap status (details in `docs/ROADMAP.md`)
 
@@ -158,8 +168,9 @@ walk plus a parallel content scanner) and the single binary with subcommands
 presets for the pruner). Search limits are listed in `docs/ROADMAP.md`.
 
 Open:
-- Validate the USN `--watch` path on a real volume in an elevated shell (the
-  MFT backend is validated and benchmarked; see README).
+- Validate the USN `--watch` path on a real volume in an elevated shell — done 2026-11-21 on
+  DOOMBRINGER: 12 changes gave 4 update lines and 28 journal records, and the incremental
+  totals equalled a full scan. Journal purging under write pressure is still unmeasured.
 - Run the benchmark questions in `docs/ROADMAP.md` (no speedup is measured yet).
 - Measure the Linux backends properly: the cold-cache numbers in README were taken on a
   2-vCPU container. The raw `getdents64` enumerator is shipped (#45) and the thread sweep
