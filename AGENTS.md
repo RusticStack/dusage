@@ -67,7 +67,8 @@ enqueued via `push`. It stops when the queue is empty and nothing is active.
 
 - Format: `cargo fmt --check`
 - Lint: `cargo clippy --all-targets -- -D warnings`
-- Test: `cargo test` (tests needing admin skip themselves)
+- Test: `cargo test` (tests needing admin skip themselves, and so do the link cases
+  without Developer Mode or an elevated shell)
 - Build: `cargo build --release`
 - CI (`.github/workflows/ci.yml`): the same four steps on `windows-latest` and
   `ubuntu-latest`, plus a Linux smoke test that compares a `/usr` scan with
