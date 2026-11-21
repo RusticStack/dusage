@@ -165,18 +165,20 @@ Open:
 - Validate the USN `--watch` path on a real volume in an elevated shell (the
   MFT backend is validated and benchmarked; see README).
 - Run the benchmark questions in `docs/ROADMAP.md` (no speedup is measured yet).
-- Measure the Linux backends properly: the thread sweep and the cold-cache numbers in
-  README were taken on a 2-vCPU container, and a `getdents64`-level enumerator (raw
-  syscall, no `read_dir` allocation) is unexplored.
+- Measure the Linux backends properly: the cold-cache numbers in README were taken on a
+  2-vCPU container. The raw `getdents64` enumerator is shipped (#45) and the thread sweep
+  is measured at 13 interleaved rounds on a 4-vCPU container (one thread per core is
+  fastest for `scan` and `search`; 4x cores costs 35-58%), so what remains is `io_uring`
+  batching, which the zero-dependency and read-only rules both argue against.
 - Verify the rest of the macOS port on a real Mac. x86_64 has now built and run there
   (the `macos-15-intel` leg), which confirms the `$INODE64` bindings and the `struct`
   layouts; arm64 has not, and it binds the plain symbols instead because Apple exports them
   at 64-bit width there. FSEvents is deferred (CoreFoundation against zero dependencies);
   the kqueue feed stops at 4096 watched directories and gives up wholesale past that;
-  `getmntinfo` is unbound, so only the mounts `/Volumes` lists are refused as volume roots
-  and `-fstype` answers nothing. The guard matches both the lexical and the canonical
-  spelling of a path, because `/etc`, `/tmp`, `/bin`, `/sbin` and `/var` are symlinks into
-  `/private` there. Details in `docs/ROADMAP.md`.
+  `getmntinfo` is unbound on this branch, so only the mounts `/Volumes` lists are refused as
+  volume roots and `-fstype` answers nothing. The guard matches both the lexical and the
+  canonical spelling of a path, because `/etc`, `/tmp`, `/bin`, `/sbin` and `/var` are
+  symlinks into `/private` there. Details in `docs/ROADMAP.md`.
 
 ## Style
 

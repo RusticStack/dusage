@@ -14,9 +14,10 @@ the numbers and the limits that are still open.
 
 **Status (macOS, x86_64).** The crate compiles for `x86_64-apple-darwin` and has a third
 platform module, `src/mac/`: enumeration over `readdir$INODE64`/`fstatat`, deletion over
-`unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed and a macOS guard. Everything is
-cross-checked from Linux; nothing has been built or run on a Mac yet, and arm64 is
-untested. The limits that come with it are in the macOS section at the end.
+`unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed and a macOS guard. It is cross-checked
+from Linux and has run in CI on a real x86_64 Mac; arm64 has not been run yet. The limits
+that come with it are in the macOS section at the end, and MRI-14 carries the runner
+schedule.
 
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
@@ -225,9 +226,19 @@ directory-entry noise.
 
 **Open.**
 
-- A raw `getdents64` enumerator (own syscall, no `read_dir` allocation per entry) and
-  `statx` with `STATX_MNT_ID` batching are unexplored; the current backend is one syscall
-  per entry, the same as `du`'s, and wins only on parallelism and on doing less per entry.
+- The raw `getdents64` enumerator and the per-entry `statx` this list used to call
+  unexplored are the backend as shipped (`src/unix/enumerate.rs`, since #45): one
+  `getdents64` per directory into a reused buffer and one `statx` per entry. Measured at
+  48a92f6 on the 4-vCPU container: `scan /usr` costs 267,507 `statx`, 35,572 `getdents64`,
+  17,774 `openat` and 35,536 `close` for 180,451 entries, i.e. exactly one stat per entry,
+  and 34% of its instructions are in `malloc`/`free` from the per-entry name allocation.
+  Four candidate changes were measured and rejected: a 256 KiB batch and a SWAR scan for
+  each record's NUL are inside the run-to-run spread (the SWAR scan is 2.4% more
+  instructions on 12-byte names), the `statx` mask cannot be trimmed because
+  `--newerat`/`--newerct` and the ownership tests read every field `STATX_BASIC_STATS`
+  fills, and `STATX_MNT_ID` adds nothing because the same call already returns the device.
+  What is left is `io_uring`-style batching, which the zero-dependency rule and the
+  read-only contract both argue against.
 - Thread sweep and cold-cache numbers on a real machine (2 vCPUs here, and the machine is a
   container on overlayfs, so delete timings are not comparable to ext4 or btrfs).
 - `--watch` under `max_user_watches` pressure: the fallback is implemented (full rescans)
@@ -326,18 +337,19 @@ output. Read the case ids there — `search-rare`, `search-common`, `search-ci`,
 `search-multiline`, `search-gzip`, `search-files-with-matches`, `find-name`,
 `find-path`, `find-type`, `find-expr`, `du-s`, `du`, `threads-scan-*`,
 `threads-search-*` — rather than a table copied here, because a copy goes stale
-at the next merge. At the commit the tables were last generated at (323bf88,
-2 vCPUs, warm cache) every content row is ahead: the output-heavy ones at
-`search-count` 0.69x, `search-files-with-matches` 0.69x,
-`search-only-matching` 0.84x, `search-multiline` 0.88x and `search-common`
-0.76x, the plain ones at `search-rare` 0.94x, `search-regex` 0.90x,
-`search-regex-nomatch` 0.94x and `search-ci` 0.91x (they were 1.02–1.10x two
-rounds ago, and callgrind counts the literal scan 25-28% cheaper and the regex
-candidate scan 29% cheaper rather than that being drift alone). `find` meets its
-reference on every row but one — `find-name` 0.71x, `find-path` 0.98x,
-`find-expr` 0.99x, `find-type` 1.03x — and both `du` rows are ahead of GNU `du`
-at 0.58–0.60x with identical totals. The content row still behind is
-`search-multiline-unicode` at 1.15x.
+at the next merge. The ratio there is dusage over the fastest reference, so **below
+1.00x is dusage ahead** — an earlier revision of this paragraph read that backwards and
+called 0.94x "behind". At the commit the tables were last generated at (2cdb809, a
+4-vCPU container, warm cache) the metadata rows win outright (`scan` 0.27x, `du`
+0.28-0.35x, `find-name` 0.59x, `find-path` 0.70x, `find-type` 0.71x, `find-expr` 0.99x),
+the output-heavy content rows are well ahead (`search-files-with-matches` 0.69x,
+`search-count` 0.70x, `search-multiline` 0.75x, `search-common` 0.80x,
+`search-only-matching` 0.84x), and the plain content rows are level with `ripgrep`
+(`search-rare` 1.04x, `search-regex` 1.05x, `search-regex-nomatch` 1.01x, `search-ci`
+0.97x) — inside the ±10% that a shared container moves those rows between passes, and
+behind on one row, `search-multiline-unicode` at 1.15x. The suite cannot resolve anything
+smaller than that; `docs/BENCHMARKS.md` says so in its noise bullet and the
+`bench/records/` pair is what a before/after claim has to cite.
 
 **Known limits, each an open item.**
 
@@ -384,7 +396,15 @@ at 0.58–0.60x with identical totals. The content row still behind is
 
 **Open questions worth measuring later.**
 
-- Where the time goes in `-o`: the match loop or the retained output.
+- **Answered: where the time goes in `-o`.** Not in the printer. Callgrind over
+  `/usr/local/go` at 48a92f6, one thread: `-o` costs 367.9M instructions against 333.5M
+  for the same query printed as lines and 299.6M for `-c`; inside the `-o` run the
+  per-match loop (`block_matches`, 202.6M, most of it the SIMD literal scan) is 55%, the
+  allocations of the per-match records and their pooled text are ~16%, and
+  `SearchStream::file` is 5.8% (21.4M). So the lever is the match loop and what it
+  allocates per file, not how the records are written: the 0.6 round floors those buffers
+  and counts `-o` 367.9M -> 363.3M and the plain mode 333.5M -> 321.7M, where a rewritten
+  printer would chase 6%.
 - Whether the literal fast path is worth a multi-byte (Two-Way or memchr-style)
   search for needles longer than a couple of bytes.
 - Whether the expression walk can be parallelised per directory without losing
@@ -398,10 +418,11 @@ at 0.58–0.60x with identical totals. The content row still behind is
 the third arm beside `src/unix/` and `src/win/`. The crate cross-checks for
 `x86_64-apple-darwin` from Linux — `cargo check`, `cargo check --tests` and
 `cargo clippy --all-targets -D warnings` — and CI carries a `macos-15-intel` leg that runs
-the format, lint, test and release-build steps the other platforms run. **Nothing here has
-been built or run on a Mac.** Cross-checking proves the `cfg` wiring, the types and the FFI
-declarations compile; it cannot prove a symbol resolves or that a struct layout matches
-libSystem.
+the format, lint, test and release-build steps the other platforms run. That leg is green on
+a real Mac, so the symbols resolve and the layouts hold on x86_64: everything the
+cross-check could not prove, the runner proved. Cross-checking remains the fast gate — it
+proves the `cfg` wiring, the types and that the FFI declarations compile — and arm64 is
+still unrun, with its own bindings, so nothing here speaks for it.
 
 **Done.** Enumeration is `open` + `fdopendir` + `readdir$INODE64`, with `fstatat$INODE64`
 per entry against the open directory descriptor, so `alloc` is `st_blocks * 512` and
@@ -411,17 +432,22 @@ and never following a symlink. `--watch` is kqueue. The guard refuses `/`, the s
 
 **Open, each with what it costs.**
 
-- **The Darwin struct layouts are asserted, not verified.** `struct stat` (144 bytes),
-  `struct dirent`, `struct kevent` and the `$INODE64` symbol aliases are pinned by
-  `size_of`/`offset_of` assertions that run during the cross-check, which proves the
-  declaration is self-consistent and nothing about libSystem. The first `cargo build` and
-  `cargo test` on a Mac is what confirms them.
+- **The Darwin struct layouts are asserted on Linux and confirmed by the runner.**
+  `struct stat` (144 bytes), `struct dirent`, `struct kevent` and the `$INODE64` symbol
+  aliases are pinned by `size_of`/`offset_of` assertions that run during the cross-check,
+  which proves the declaration is self-consistent and nothing about libSystem; the macOS leg
+  is what confirms them, and the first run of it is what caught the missing
+  `fdopendir$INODE64` alias. Those assertions stay: they are the guard against the layout
+  drifting silently.
 - **The kqueue feed has a directory budget.** A watch is per-descriptor, so the feed admits
   4096 directories; a tree past that gets no feed at all and every tick is a full rescan.
   That is a behaviour change from Linux, whose inotify feed covers every directory or gives
-  up as a whole.
-- **FSEvents is deferred.** It needs CoreFoundation, which zero dependencies rules out for
-  this port. kqueue is what shipped.
+  up as a whole. Removing the ceiling is what MRI-13 exists to do.
+- **FSEvents is deferred, and MRI-13 carries it.** kqueue is what shipped for this port.
+  The reason recorded at the time was CoreFoundation against zero dependencies; the binding
+  turns out to be reachable — `#[link(name = "CoreFoundation", kind = "framework")]` is what
+  `core-foundation-sys` does with no build script — so the open question is the change feed's
+  session behaviour and its dropped-event path, not the dependency rule.
 - **The guard's two sets were split by evidence, not by taste.** Refusing `/private` as a
   whole subtree, which the first version did, made every temp directory unprunable: macOS's
   `$TMPDIR` is `/private/var/folders/...`, so a pruner could not touch the one place macOS
@@ -433,5 +459,6 @@ and never following a symlink. `--watch` is kqueue. The guard refuses `/`, the s
   `struct statfs` are not bound, so the guard only sees the mounts `/Volumes` lists; the
   prune's device comparison is what stops a walk into any other one. `-fstype` answers
   nothing for the same reason.
-- **CI is on a clock.** The `macos-15-intel` runner label is Intel-only and GitHub retires
-  x86_64 macOS runners in August 2027, so an arm64 answer is needed before then.
+- **CI is on a clock, and the schedule lives in MRI-14.** The `macos-15-intel` runner label
+  is Intel-only and GitHub retires x86_64 macOS images; MRI-14 carries the date and the arm64
+  answer that outlives them, so this file does not restate either.
