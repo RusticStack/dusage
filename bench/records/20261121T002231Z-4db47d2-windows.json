@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "generated": "2026-11-21T00:22:31Z",
+  "machine": {
+    "uname": "Windows 10.0.26300.9974 x86_64 (DOOMBRINGER, i7-13700KF)",
+    "cpus": 24,
+    "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+    "volume": "D:",
+    "filesystem": "NTFS"
+  },
+  "runs": {"warm": 5, "cold": 3},
+  "delete_runs": 3,
+  "rss_method": "not measured: Windows peak working set needs a per-process sampler this harness does not have",
+  "cold_method": "standby-list purge (NtSetSystemInformation SystemMemoryListInformation 2/3/4), elevated; bench/windows/admin.ps1",
+  "trees": [
+    {"root": "D:\\dusage-bench\\tree1m", "files": 1000000, "dirs": 1000, "note": "zero-length files, generated"},
+    {"root": "D:\\dusage-bench\\flat100k", "files": 100000, "dirs": 1, "note": "zero-length files, one directory"},
+    {"root": "D:\\dusage-bench\\tree1k_d100", "files": 100000, "dirs": 1000, "note": "zero-length files"},
+    {"root": "D:\\dusage-bench\\srcA", "files": 20000, "dirs": 500, "note": "delete fixture, regenerated per run"},
+    {"root": "D:\\dusage-bench\\srcB", "files": 5000, "dirs": 100, "note": "delete fixture, 128 KiB files, regenerated per run"},
+    {"root": "C:\\Windows", "files": null, "dirs": null, "note": "real system tree"}
+  ],
+  "rows": [
+    {"case": "scan-t1-tree1m", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan D:\\dusage-bench\\tree1m --threads 1", "median_ms": 328.0, "min_ms": 326.0, "max_ms": 338.0, "runs": 5, "files": 1000000, "files_per_s": 3048780}
+,
+    {"case": "scan-t2-tree1m", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan D:\\dusage-bench\\tree1m --threads 2", "median_ms": 235.0, "min_ms": 233.0, "max_ms": 260.0, "runs": 5, "files": 1000000, "files_per_s": 4255319}
+,
+    {"case": "scan-t4-tree1m", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan D:\\dusage-bench\\tree1m --threads 4", "median_ms": 188.0, "min_ms": 186.0, "max_ms": 198.0, "runs": 5, "files": 1000000, "files_per_s": 5319148}
+,
+    {"case": "scan-t8-tree1m", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan D:\\dusage-bench\\tree1m --threads 8", "median_ms": 141.0, "min_ms": 139.0, "max_ms": 189.0, "runs": 5, "files": 1000000, "files_per_s": 7092198}
+,
+    {"case": "scan-t16-tree1m", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan D:\\dusage-bench\\tree1m --threads 16", "median_ms": 142.0, "min_ms": 136.0, "max_ms": 189.0, "runs": 5, "files": 1000000, "files_per_s": 7042253}
+,
+    {"case": "scan-t24-tree1m", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan D:\\dusage-bench\\tree1m --threads 24", "median_ms": 141.0, "min_ms": 141.0, "max_ms": 149.0, "runs": 5, "files": 1000000, "files_per_s": 7092198}
+,
+    {"case": "scan-t32-tree1m", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan D:\\dusage-bench\\tree1m --threads 32", "median_ms": 145.0, "min_ms": 137.0, "max_ms": 168.0, "runs": 5, "files": 1000000, "files_per_s": 6896551}
+,
+    {"case": "scan-t1-Windows", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan C:\\Windows --threads 1", "median_ms": 2448.0, "min_ms": 2401.0, "max_ms": 2463.0, "runs": 5, "files": 195381, "files_per_s": 79812}
+,
+    {"case": "scan-t2-Windows", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan C:\\Windows --threads 2", "median_ms": 1518.0, "min_ms": 1505.0, "max_ms": 1536.0, "runs": 5, "files": 195381, "files_per_s": 128709}
+,
+    {"case": "scan-t4-Windows", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan C:\\Windows --threads 4", "median_ms": 899.0, "min_ms": 887.0, "max_ms": 988.0, "runs": 5, "files": 195381, "files_per_s": 217331}
+,
+    {"case": "scan-t8-Windows", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan C:\\Windows --threads 8", "median_ms": 752.0, "min_ms": 708.0, "max_ms": 754.0, "runs": 5, "files": 195381, "files_per_s": 259815}
+,
+    {"case": "scan-t16-Windows", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan C:\\Windows --threads 16", "median_ms": 755.0, "min_ms": 712.0, "max_ms": 849.0, "runs": 5, "files": 195381, "files_per_s": 258782}
+,
+    {"case": "scan-t24-Windows", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan C:\\Windows --threads 24", "median_ms": 795.0, "min_ms": 749.0, "max_ms": 803.0, "runs": 5, "files": 195381, "files_per_s": 245762}
+,
+    {"case": "scan-t32-Windows", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage scan C:\\Windows --threads 32", "median_ms": 850.0, "min_ms": 798.0, "max_ms": 896.0, "runs": 5, "files": 195381, "files_per_s": 229860}
+,
+    {"case": "search-t1", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage search asyncpreemptoff D:\\dusage-bench\\text --threads 1", "median_ms": 376.0, "min_ms": 373.0, "max_ms": 425.0, "runs": 5}
+,
+    {"case": "search-t2", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage search asyncpreemptoff D:\\dusage-bench\\text --threads 2", "median_ms": 378.0, "min_ms": 376.0, "max_ms": 388.0, "runs": 5}
+,
+    {"case": "search-t4", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage search asyncpreemptoff D:\\dusage-bench\\text --threads 4", "median_ms": 276.0, "min_ms": 235.0, "max_ms": 292.0, "runs": 5}
+,
+    {"case": "search-t8", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage search asyncpreemptoff D:\\dusage-bench\\text --threads 8", "median_ms": 208.0, "min_ms": 186.0, "max_ms": 237.0, "runs": 5}
+,
+    {"case": "search-t16", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage search asyncpreemptoff D:\\dusage-bench\\text --threads 16", "median_ms": 233.0, "min_ms": 186.0, "max_ms": 235.0, "runs": 5}
+,
+    {"case": "search-t24", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage search asyncpreemptoff D:\\dusage-bench\\text --threads 24", "median_ms": 233.0, "min_ms": 189.0, "max_ms": 282.0, "runs": 5}
+,
+    {"case": "search-t32", "section": "threads", "cache": "warm", "role": "primary", "tool": "dusage", "command": "dusage search asyncpreemptoff D:\\dusage-bench\\text --threads 32", "median_ms": 199.0, "min_ms": 189.0, "max_ms": 236.0, "runs": 5}
+,
+    {"case": "enum-walk-tree1m", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1m 5 walk", "median_ms": 265.7, "min_ms": 265.7, "max_ms": 265.7, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-walk-large-fetch-tree1m", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1m 5 walk-large-fetch", "median_ms": 198.7, "min_ms": 198.7, "max_ms": 198.7, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-batch-64k-tree1m", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1m 5 batch-64k", "median_ms": 206.8, "min_ms": 206.8, "max_ms": 206.8, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-batch-256k-tree1m", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1m 5 batch-256k", "median_ms": 210.5, "min_ms": 210.5, "max_ms": 210.5, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-batch-1m-tree1m", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1m 5 batch-1m", "median_ms": 213.2, "min_ms": 213.2, "max_ms": 213.2, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-walk-flat100k", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\flat100k 5 walk", "median_ms": 26.0, "min_ms": 26.0, "max_ms": 26.0, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-walk-large-fetch-flat100k", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\flat100k 5 walk-large-fetch", "median_ms": 19.7, "min_ms": 19.7, "max_ms": 19.7, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-batch-64k-flat100k", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\flat100k 5 batch-64k", "median_ms": 22.2, "min_ms": 22.2, "max_ms": 22.2, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-batch-256k-flat100k", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\flat100k 5 batch-256k", "median_ms": 21.2, "min_ms": 21.2, "max_ms": 21.2, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-batch-1m-flat100k", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\flat100k 5 batch-1m", "median_ms": 20.6, "min_ms": 20.6, "max_ms": 20.6, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-walk-tree1k_d100", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1k_d100 5 walk", "median_ms": 60.2, "min_ms": 60.2, "max_ms": 60.2, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-walk-large-fetch-tree1k_d100", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1k_d100 5 walk-large-fetch", "median_ms": 54.4, "min_ms": 54.4, "max_ms": 54.4, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-batch-64k-tree1k_d100", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1k_d100 5 batch-64k", "median_ms": 52.9, "min_ms": 52.9, "max_ms": 52.9, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-batch-256k-tree1k_d100", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1k_d100 5 batch-256k", "median_ms": 58.2, "min_ms": 58.2, "max_ms": 58.2, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-batch-1m-tree1k_d100", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe D:\\dusage-bench\\tree1k_d100 5 batch-1m", "median_ms": 55.2, "min_ms": 55.2, "max_ms": 55.2, "runs": 5, "note": "one sequential walk, in-process clock, whole tree"}
+,
+    {"case": "enum-walk-real", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe C:\\Windows 5 walk", "median_ms": 6428.7, "min_ms": 6428.7, "max_ms": 6428.7, "runs": 5, "note": "one sequential walk, in-process clock, real system tree"}
+,
+    {"case": "enum-walk-large-fetch-real", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe C:\\Windows 5 walk-large-fetch", "median_ms": 6942.4, "min_ms": 6942.4, "max_ms": 6942.4, "runs": 5, "note": "one sequential walk, in-process clock, real system tree"}
+,
+    {"case": "enum-batch-64k-real", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe C:\\Windows 5 batch-64k", "median_ms": 5334.1, "min_ms": 5334.1, "max_ms": 5334.1, "runs": 5, "note": "one sequential walk, in-process clock, real system tree"}
+,
+    {"case": "enum-batch-256k-real", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe C:\\Windows 5 batch-256k", "median_ms": 5544.8, "min_ms": 5544.8, "max_ms": 5544.8, "runs": 5, "note": "one sequential walk, in-process clock, real system tree"}
+,
+    {"case": "enum-batch-1m-real", "section": "enumeration", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_enum_perf.exe C:\\Windows 5 batch-1m", "median_ms": 5324.7, "min_ms": 5324.7, "max_ms": 5324.7, "runs": 5, "note": "one sequential walk, in-process clock, real system tree"}
+,
+    {"case": "delete-std-A", "section": "delete", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_del_perf.exe D:\\dusage-bench\\run\\payload std", "median_ms": 1231.0, "min_ms": 1229.0, "max_ms": 1233.0, "runs": 3, "errors": {"access_denied": 0, "sharing_violation": 0, "not_found": 0, "dir_not_empty": 0, "other": 0}}
+,
+    {"case": "delete-serial-posix-A", "section": "delete", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_del_perf.exe D:\\dusage-bench\\run\\payload serial-posix", "median_ms": 1225.0, "min_ms": 1223.0, "max_ms": 1230.0, "runs": 3, "errors": {"access_denied": 0, "sharing_violation": 0, "not_found": 0, "dir_not_empty": 0, "other": 0}}
+,
+    {"case": "delete-serial-classic-A", "section": "delete", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_del_perf.exe D:\\dusage-bench\\run\\payload serial-classic", "median_ms": 1279.0, "min_ms": 1277.0, "max_ms": 1312.0, "runs": 3, "errors": {"access_denied": 0, "sharing_violation": 0, "not_found": 0, "dir_not_empty": 0, "other": 0}}
+,
+    {"case": "delete-parallel-A", "section": "delete", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/fastdel.exe D:\\dusage-bench\\run --age -1 --threads 16", "median_ms": 514.0, "min_ms": 511.0, "max_ms": 515.0, "runs": 3, "note": "fastdel plans the root and deletes its children; the copy is outside the clock"}
+,
+    {"case": "delete-std-B", "section": "delete", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_del_perf.exe D:\\dusage-bench\\run\\payload std", "median_ms": 431.0, "min_ms": 423.0, "max_ms": 479.0, "runs": 3, "errors": {"access_denied": 0, "sharing_violation": 0, "not_found": 0, "dir_not_empty": 0, "other": 0}}
+,
+    {"case": "delete-serial-posix-B", "section": "delete", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_del_perf.exe D:\\dusage-bench\\run\\payload serial-posix", "median_ms": 419.0, "min_ms": 377.0, "max_ms": 422.0, "runs": 3, "errors": {"access_denied": 0, "sharing_violation": 0, "not_found": 0, "dir_not_empty": 0, "other": 0}}
+,
+    {"case": "delete-serial-classic-B", "section": "delete", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/examples/win_del_perf.exe D:\\dusage-bench\\run\\payload serial-classic", "median_ms": 424.0, "min_ms": 378.0, "max_ms": 424.0, "runs": 3, "errors": {"access_denied": 0, "sharing_violation": 0, "not_found": 0, "dir_not_empty": 0, "other": 0}}
+,
+    {"case": "delete-parallel-B", "section": "delete", "cache": "warm", "role": "primary", "tool": "dusage", "command": "/c/Users/KellHect/.capy/worktrees/jam_01M7XJYET7ZZBG79A9NF8EJFCR/dusage/target/release/fastdel.exe D:\\dusage-bench\\run --age -1 --threads 16", "median_ms": 189.0, "min_ms": 185.0, "max_ms": 236.0, "runs": 3, "note": "fastdel plans the root and deletes its children; the copy is outside the clock"}
+
+  ]
+}

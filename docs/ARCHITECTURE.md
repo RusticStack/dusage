@@ -1,8 +1,8 @@
 # Architecture and module contracts
 
-Windows and Linux, std-only (zero crates). All `unsafe`/FFI lives under `src/win/`
-or `src/unix/`; every module above them is safe Rust. `src/lib.rs` aliases the
-platform module as `crate::native`, so the engines name one surface on both systems.
+Windows, Linux and macOS, std-only (zero crates). All `unsafe`/FFI lives under
+`src/win/`, `src/unix/` or `src/mac/`; every module above them is safe Rust. `src/lib.rs` aliases the
+platform module as `crate::native`, so the engines name one surface on all three.
 Research behind these choices: `docs/ROADMAP.md`.
 
 ```text
@@ -43,6 +43,10 @@ src/unix/sys.rs       errno table + inotify/poll declarations
 src/unix/enumerate.rs getdents64 enumeration, statx fields, symlink and mount helpers
 src/unix/delete.rs    unlink/rmdir delete, never follows symlinks
 src/unix/watch.rs     change feed for --watch (inotify)
+src/mac/sys.rs        Darwin struct layouts, kqueue/stat/unlink declarations
+src/mac/enumerate.rs  readdir$INODE64 + fstatat enumeration, symlink and mount helpers
+src/mac/delete.rs     unlink/rmdir delete, never follows symlinks
+src/mac/watch.rs      change feed for --watch (kqueue EVFILT_VNODE)
 src/bin/dusage.rs     thin CLI: cmd::dispatch + cmd::finish
 src/bin/fastdel.rs    thin CLI over cmd::prune
 tests/                dusage_cli.rs, fastdel_cli.rs, search_cli.rs (run the built binaries)
@@ -130,6 +134,16 @@ Their children stay prunable (`/var/tmp`, `/opt/app/cache`), the way `C:\Windows
 Windows. Mount points are deliberately not special-cased: a prune never descends into one, so
 only a path the user typed can be a mount.
 
+**macOS:** the same three layers, and both spellings. Whole subtrees: `/System`, `/Library`,
+`/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/Applications`, `/cores`, `/dev`. Refused with
+their ancestors but not their children: `/Users`, `$HOME`, `/opt`, `/Volumes`, `/private/tmp`,
+`/private/var`, and every volume root listed under `/Volumes`. `/` is always protected. The
+canonical form is not enough on its own and the lexical one is not either — `/etc` and `/tmp`
+and `/var` are symlinks into `/private`, so a path is protected when **either** spelling
+matches, which is why `/etc/passwd` and `/private/etc/passwd` both answer and why `/private/var`
+is refused while `/private/var/folders/x/y` is not. That last pair is deliberate: `$TMPDIR`
+lives under `/private/var/folders`, and a pruner that cannot work there cannot do its job.
+
 ### report (`src/report.rs`)
 
 ```rust
@@ -151,11 +165,16 @@ path (control chars, quotes, backslashes, non-BMP).
 Both platforms implement exactly this, and nothing above the platform layer knows which
 one is present:
 
+This is the whole surface — every item below is called from above the platform layer, so a
+new platform must supply all of it. The eager half (`Entry`/`DirReader`) is what `scan`,
+`prune`, `du` and `watch` use; the lazy half (`list`/`Lite`) is what `search` and `find`
+walk, because a walk that only needs names and types must not pay a stat per entry.
+
 ```rust
 pub struct Entry { /* platform fields */ }
 impl Entry {
     pub fn is_dir(&self) -> bool;
-    pub fn is_reparse(&self) -> bool;               // Windows: any reparse point; Linux: symlink
+    pub fn is_reparse(&self) -> bool;               // Windows: any reparse point; POSIX: symlink
     pub fn modified(&self) -> std::time::SystemTime;
 }
 pub fn is_skipped(e: &Entry) -> bool;              // "count as a link, never follow"
@@ -170,12 +189,31 @@ impl DirReader {
 pub fn read_plain(dir: &Path, out: &mut Vec<Entry>, errs: &mut ErrorCounts) -> io::Result<()>;
 pub fn refuse_reparse_root(path: &Path) -> io::Result<()>;
 pub fn file_id_of(path: &Path) -> io::Result<u128>;
-pub fn named_stream_bytes(path: &Path) -> io::Result<u64>;   // Linux: always 0
+pub fn named_stream_bytes(path: &Path) -> io::Result<u64>;   // POSIX: always 0
 pub fn dev_of(path: &Path) -> io::Result<u64>;               // 0 on Windows
 pub fn other_filesystem(e: &Entry, root_dev: u64) -> bool;   // --one-filesystem boundary
 pub fn same_filesystem(e: &Entry, parent_dev: u64) -> bool;  // prune must not cross mounts
 pub fn is_unsupported(e: &io::Error) -> bool;                // backend fallback trigger
 pub fn is_denied(e: &io::Error) -> bool;
+
+// The lazy half, for the path walks.
+pub struct Name;                                   // a name range in its directory's arena
+impl Deref for Name { type Target = OsStr; }
+// Ord + AsRef<OsStr> + AsRef<Path>, so a walker sorts and joins it like an OsStr.
+pub struct Lite;                                   // name + kind + its directory + a stat slot
+impl Lite {
+    pub fn is_dir(&self) -> bool;
+    pub fn is_reparse(&self) -> bool;
+    pub fn kind(&self) -> Kind;                    // from the directory record, free
+    pub fn stat(&self) -> io::Result<Stat>;        // deferred and cached, one lstat
+}
+pub fn list(dir: &Path, out: &mut Vec<Lite>, errs: &mut ErrorCounts) -> io::Result<()>;
+pub fn lstat(path: &Path) -> io::Result<Stat>;      // never follows
+pub fn stat(path: &Path) -> io::Result<Stat>;       // the --follow/-L exception
+pub fn filesystem_types() -> HashMap<u64, String>;  // for -fstype; empty where unknown
+pub const POSIX_FIELDS: bool;                       // mode/uid/gid/links are real
+pub fn path_bytes(p: &Path) -> &[u8];               // change-feed helpers
+pub fn os_from_bytes(b: &[u8]) -> OsString;
 
 pub mod delete { pub fn delete_entry(path: &Path) -> io::Result<()>;
                  pub fn remove_tree(path: &Path) -> (u64, ErrorCounts); }
@@ -193,11 +231,19 @@ pub mod watch {
 ```
 
 `ChangeSource` is the NTFS USN journal on Windows (elevated; returns Err when the journal
-was truncated, which forces a full rescan) and inotify on Linux (an unprivileged watch tree
-with `IN_Q_OVERFLOW` mapped to Err). Both return paths, and `scan::top_for` decides which
-top-level entry each one belongs to. `open_err` exists so the reason can be printed: on
-Windows the whole difference between a feed and no feed is whether the process holds an
-administrator token, and "no change feed (Access is denied)" says so.
+was truncated, which forces a full rescan), inotify on Linux (an unprivileged watch tree
+with `IN_Q_OVERFLOW` mapped to Err) and kqueue `EVFILT_VNODE` on macOS (one watch per
+directory, up to `MAX_WATCHED_DIRS`; a tree past that gets `None`, and `EV_ERROR` or
+`NOTE_REVOKE` becomes Err mid-stream). All three return paths, and `scan::top_for` decides
+which top-level entry each one belongs to. In every case `Err` and `None` mean the same
+thing to the caller: reopen the feed and rescan everything, paced by the interval. `open_err`
+exists so the reason can be printed: on Windows the whole difference between a feed and no
+feed is whether the process holds an administrator token, and
+"no change feed (Access is denied)" says so.
+
+`Stat`, `Kind` and `POSIX_FIELDS`'s consumer live above the platform layer in
+`src/model.rs`; `POSIX_FIELDS` is how a caller tells "no mode bits" from "mode 0", which is
+what `find -perm` refuses on.
 
 ### win::enumerate (`src/win/enumerate.rs`)
 
@@ -247,6 +293,40 @@ The tests build directory batches by hand for every malformed-record case above,
 compare against a real fixture for names, sizes and dir flags, confirming that a
 symlink is reported as one and is never followed. Windows bounds-check
 `NextEntryOffset`/`FileNameLength` (bytes) against the returned buffer the same way.
+
+### mac::enumerate (`src/mac/enumerate.rs`)
+
+The same shapes as `unix::`, over different calls. `Entry` carries `name`, `is_dir`,
+`is_link`, `size`, `alloc` (`st_blocks * 512`), `file_id` (`dev << 64 | ino`) and `dev`.
+`Dir` opens with `open` (`O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NONBLOCK`), hands the descriptor
+to `fdopendir`, and `readdir$INODE64` returns one `struct dirent` at a time; the entry type
+comes free from `d_type` and the name is bounded by `d_namlen`. `fstat_at` resolves a name
+against `dirfd(DIR *)` with `fstatat$INODE64` and `AT_SYMLINK_NOFOLLOW`, which is both the
+`lstat` the eager path takes and the deferred `Lite::stat`. Darwin has no `getdents64`, so
+the batch-restart logic the Linux enumerator needs has no counterpart: a directory that
+mutates mid-read is reported as the kernel streamed it.
+
+`struct stat` (144 bytes), `struct dirent` and `struct kevent` are declared in
+`src/mac/sys.rs` and pinned by `const` `size_of`/`offset_of` assertions, which execute in a
+cross-check but cannot prove the layout against libSystem. The `$INODE64` link names are
+what Darwin's headers resolve `readdir`, `stat`, `lstat` and `fstatat` to; `open` is
+variadic, as in C, because rustc rejects a fixed-arity declaration of it on Darwin.
+`filesystem_types` returns an empty map: `getmntinfo` and `struct statfs` are unbound, so
+`-fstype` matches nothing rather than lying.
+
+### mac::delete (`src/mac/delete.rs`)
+
+`unlink`/`rmdir`, path-based, chosen over `unlinkat` because `delete_entry` is handed a full
+path and no directory descriptor. Neither follows a symlink. `remove_tree` is the same
+explicit-stack walk as Linux's.
+
+### mac::watch (`src/mac/watch.rs`)
+
+One `kqueue()`, one `EVFILT_VNODE` registration per directory with `EV_CLEAR`, `NOTE_WRITE`
+and the rest. `poll` blocks for the first event then drains until nothing is ready. kqueue
+names the directory, never the entry, so the reported path is the changed directory, which
+`top_for` attributes to the top-level entry containing it; for the root itself the children
+are reported instead.
 
 ### win::delete (`src/win/delete.rs`)
 

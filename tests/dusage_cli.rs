@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// Create `link` as a directory link to `target`: a junction on Windows, a symlink on
-/// Linux. Both are what the scanner calls a reparse point and refuses to follow.
+/// Linux and macOS. Both are what the scanner calls a reparse point and refuses to follow.
 fn link_dir(link: &Path, target: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -17,7 +17,7 @@ fn link_dir(link: &Path, target: &Path) -> bool {
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link).is_ok()
     }
@@ -272,7 +272,7 @@ fn version_flag_prints_package_version() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(windows))]
 #[test]
 fn one_filesystem_is_accepted() {
     let f = Fixture::new("xdev");
@@ -284,7 +284,7 @@ fn one_filesystem_is_accepted() {
     assert_eq!(plain, short);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(windows))]
 #[test]
 fn mft_backend_is_refused_with_a_reason() {
     let f = Fixture::new("mft");
@@ -296,7 +296,7 @@ fn mft_backend_is_refused_with_a_reason() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(windows))]
 #[test]
 fn streams_flag_reports_ntfs_only() {
     let f = Fixture::new("streams");
