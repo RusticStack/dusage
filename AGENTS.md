@@ -37,7 +37,8 @@ src/unix/watch.rs     --watch change feed over inotify
 src/mac/sys.rs        Darwin `struct stat`/`struct dirent` layouts, kqueue decls, errno helpers
 src/mac/enumerate.rs  readdir$INODE64 + fstatat enumeration, symlink/mount helpers
 src/mac/delete.rs     unlink/rmdir delete that never follows symlinks
-src/mac/watch.rs      --watch change feed over kqueue (EVFILT_VNODE)
+src/mac/watch.rs      --watch change feed: FSEvents, kqueue as the fallback
+src/mac/fsevents.rs   the FSEvents stream, CoreServices/CoreFoundation FFI
 src/cmd/              subcommand front ends: scan/big, search/find, prune/fastdel
 src/bin/dusage.rs     thin CLI over cmd::dispatch + cmd::finish
 src/bin/fastdel.rs    thin CLI over cmd::prune

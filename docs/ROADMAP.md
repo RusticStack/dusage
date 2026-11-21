@@ -579,15 +579,24 @@ consequence it has for the next change here.
 
 **Open, each with what it costs.**
 
-- **The kqueue feed has a directory budget.** A watch is per-descriptor, so the feed admits
-  4096 directories; a tree past that gets no feed at all and every tick is a full rescan.
-  That is a behaviour change from Linux, whose inotify feed covers every directory or gives
-  up as a whole. Removing the ceiling is what MRI-13 exists to do.
-- **FSEvents is deferred, and MRI-13 carries it.** kqueue is what shipped for this port.
-  The reason recorded at the time was CoreFoundation against zero dependencies; the binding
-  turns out to be reachable — `#[link(name = "CoreFoundation", kind = "framework")]` is what
-  `core-foundation-sys` does with no build script — so the open question is the change feed's
-  session behaviour and its dropped-event path, not the dependency rule.
+- **The 4096-directory budget is historical, and this is what it cost.** The port first
+  shipped kqueue, whose watch is per-descriptor, so it admitted 4096 directories and a tree
+  past that got no feed at all — every tick a full rescan, and a silent behaviour difference
+  from Linux, whose inotify feed covers every directory or gives up as a whole. FSEvents
+  replaced it as the default (MRI-13): one stream covers a whole hierarchy, so the ceiling no
+  longer decides whether `--watch` works. kqueue survives only as the fallback when the stream
+  cannot start, and its budget applies only then.
+- **FSEvents is what ships, and three of its limits are worth knowing.** The stream is created
+  with `WatchRoot` and without `UseCFTypes`, so names arrive as raw C strings and a
+  non-UTF-8 filename survives; `MustScanSubDirs`, `EventIdsWrapped` and `RootChanged` become
+  `Err` from `poll`, which the engine already turns into a full rescan, and that — not kqueue
+  — is the fallback the owner asked for. A dropped batch cannot be produced on demand, so the
+  drop path is tested by injecting flags into the callback's ingest function and the test says
+  so; the delivery path is tested for real by writing a file and asserting it is reported.
+  Two limits remain for users: macOS 26 (Tahoe) has a report of FSEvents silently delivering
+  nothing to a client built against an older SDK (`fsevents/fsevents#406`), which the pinned
+  `macos-15` legs cannot reach but `macos-latest` could, and watching under Desktop, Documents,
+  Downloads or another user's home needs Full Disk Access for the calling binary.
 - **`df` has no macOS oracle.** Every `dusage df` number on macOS is checked against the
   kernel's own records and our arithmetic, not against BSD `df`: the row-comparison tests are
   `cfg(target_os = "linux")` because BSD `df` has no `--version` and prints a different set

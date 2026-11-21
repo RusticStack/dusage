@@ -9,6 +9,7 @@
 pub mod delete;
 pub mod df;
 pub mod enumerate;
+pub mod fsevents;
 pub mod sys;
 pub mod watch;
 

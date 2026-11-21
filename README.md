@@ -160,7 +160,7 @@ you want for `dusage /`. Windows mount points are reparse points and are always 
 | `batched` / `auto` backend | `GetFileInformationByHandleEx` batches | `read_dir` + one `statx` per entry | `readdir$INODE64` + one `fstatat` per entry |
 | Size on disk (`--on-disk`) | `AllocationSize` | `st_blocks * 512` | `st_blocks * 512` |
 | Hardlink dedup (`--dedup-hardlinks`) | 128-bit file id | `dev << 64 \| ino` | `dev << 64 \| ino` |
-| `--watch` change feed | NTFS USN journal (elevated) | inotify (no privileges) | kqueue `EVFILT_VNODE`, up to 4096 directories |
+| `--watch` change feed | NTFS USN journal (elevated) | inotify (no privileges) | FSEvents, one stream per hierarchy (kqueue `EVFILT_VNODE` fallback at 4096 directories) |
 | `--mft` | raw NTFS `$MFT` | not applicable, refused with a reason | not applicable, refused with a reason |
 | `--streams` | named NTFS streams | no named streams, reports 0 | no named streams, reports 0 |
 | `-fstype` | no names | `/proc/self/mountinfo` | `getmntinfo` + `struct statfs`, keyed by the device of each mount point |
