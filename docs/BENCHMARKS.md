@@ -415,6 +415,325 @@ from different commits on different machines. Re-measure with `bench/run.sh` on
 the commit in question instead, and keep both `results.json` files if the
 comparison matters.
 
+## Windows (DOOMBRINGER)
+
+Everything above was measured on a 2-vCPU Linux container. This section is the same tool on
+the machine the NTFS work was always meant for: a Windows 11 desktop (i7-13700KF, 24 threads,
+48 GB) with three local NTFS volumes. It answers the twelve questions in `docs/ROADMAP.md`
+section 4 and covers the validation owed in section 5, all of which had only ever been argued
+from source reading.
+
+**How to refresh it.** Same rule as the rest of this document: every number below is program
+output.
+
+```console
+$ cargo build --release --examples
+$ powershell -ExecutionPolicy Bypass -File bench/windows/fixtures.ps1
+$ bash bench/windows/run.sh                              # timings -> bench/windows/results.json
+$ powershell -ExecutionPolicy Bypass -File bench/windows/checks.ps1   # behaviour -> checks.json
+$ bash bench/summary.sh bench/windows/results.json       # the timing table below
+$ bash bench/windows/summary-checks.sh                   # the behaviour tables below
+```
+
+The elevated half — real-time protection, `--mft` against the batched backend and robocopy,
+the USN watch, the cold-cache pass and the FAT32/ReFS FileId checks — is
+`powershell -ExecutionPolicy Bypass -File bench/windows/admin.ps1` from an elevated shell. It
+appends its rows to `bench/windows/admin-results.jsonl` and to `checks.json`, and the two
+generators above pick them up. Those rows are **not** in the tables below: the script needs one
+administrator approval on the machine and had not run when this record was taken, so every
+question that depends on it (`3`, `8`, the cold pass and the FAT32/ReFS `FileId` rows) is
+marked owed below rather than answered from an unprivileged measurement dressed up as one.
+
+**The run behind this section is archived**, the same way the Linux record is:
+`bench/records/20261121T002231Z-4db47d2-windows.json` and the `.md` in its name printed by
+`bash bench/summary.sh`. It can be re-rendered without re-measuring anything:
+
+```console
+$ bash bench/summary.sh bench/records/20261121T002231Z-4db47d2-windows.json
+$ bash bench/windows/summary-checks.sh
+```
+
+It describes the code at `4db47d2` — the commit that caps the default Windows worker count at
+the measured plateau. `git diff 4db47d2 HEAD -- src/win/ src/cli.rs` is empty, so the scan and
+delete paths these rows measure have not moved since; later commits on that branch changed only
+this harness and the placement of imports inside the example binaries.
+
+### The record
+
+The header `bench/windows/record.sh` writes, quoted as it stands:
+
+```json
+{
+  "schema": 1,
+  "generated": "2026-11-21T00:22:31Z",
+  "machine": {
+    "uname": "Windows 10.0.26300.9974 x86_64 (DOOMBRINGER, i7-13700KF)",
+    "cpus": 24,
+    "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+    "volume": "D:",
+    "filesystem": "NTFS"
+  },
+  "runs": {
+    "warm": 5,
+    "cold": 3
+  },
+  "delete_runs": 3,
+  "rss_method": "not measured: Windows peak working set needs a per-process sampler this harness does not have",
+  "cold_method": "standby-list purge (NtSetSystemInformation SystemMemoryListInformation 2/3/4), elevated; bench/windows/admin.ps1"
+}```
+
+### The measured table
+
+Verbatim stdout of `bash bench/summary.sh
+bench/records/20261121T002231Z-4db47d2-windows.json`: one row per case with the dusage median. The reference columns are empty by design — there is no `grep`, `du` or
+`find` on Windows to compare against — and so are the peak-RSS columns, which this harness
+does not fill.
+
+```console
+Generated 2026-11-21T00:22:31Z on Windows 10.0.26300.9974 x86_64 (DOOMBRINGER, i7-13700KF), 24 CPUs. Warm rows are medians of 5 alternating
+runs; cold rows are medians of 3, each preceded by a cache drop. Times in
+milliseconds; RSS is peak resident set, in MiB, measured in a pass of its own.
+
+RSS method: not measured: Windows peak working set needs a per-process sampler this harness does not have
+
+### Warm cache
+
+| Case | dusage ms | reference | ref ms | dusage/ref | dusage RSS MiB | ref RSS MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| scan-t1-tree1m | 328.0 | - |  | - | - | - |
+| scan-t2-tree1m | 235.0 | - |  | - | - | - |
+| scan-t4-tree1m | 188.0 | - |  | - | - | - |
+| scan-t8-tree1m | 141.0 | - |  | - | - | - |
+| scan-t16-tree1m | 142.0 | - |  | - | - | - |
+| scan-t24-tree1m | 141.0 | - |  | - | - | - |
+| scan-t32-tree1m | 145.0 | - |  | - | - | - |
+| scan-t1-Windows | 2448.0 | - |  | - | - | - |
+| scan-t2-Windows | 1518.0 | - |  | - | - | - |
+| scan-t4-Windows | 899.0 | - |  | - | - | - |
+| scan-t8-Windows | 752.0 | - |  | - | - | - |
+| scan-t16-Windows | 755.0 | - |  | - | - | - |
+| scan-t24-Windows | 795.0 | - |  | - | - | - |
+| scan-t32-Windows | 850.0 | - |  | - | - | - |
+| search-t1 | 376.0 | - |  | - | - | - |
+| search-t2 | 378.0 | - |  | - | - | - |
+| search-t4 | 276.0 | - |  | - | - | - |
+| search-t8 | 208.0 | - |  | - | - | - |
+| search-t16 | 233.0 | - |  | - | - | - |
+| search-t24 | 233.0 | - |  | - | - | - |
+| search-t32 | 199.0 | - |  | - | - | - |
+| enum-walk-tree1m | 265.7 | - |  | - | - | - |
+| enum-walk-large-fetch-tree1m | 198.7 | - |  | - | - | - |
+| enum-batch-64k-tree1m | 206.8 | - |  | - | - | - |
+| enum-batch-256k-tree1m | 210.5 | - |  | - | - | - |
+| enum-batch-1m-tree1m | 213.2 | - |  | - | - | - |
+| enum-walk-flat100k | 26.0 | - |  | - | - | - |
+| enum-walk-large-fetch-flat100k | 19.7 | - |  | - | - | - |
+| enum-batch-64k-flat100k | 22.2 | - |  | - | - | - |
+| enum-batch-256k-flat100k | 21.2 | - |  | - | - | - |
+| enum-batch-1m-flat100k | 20.6 | - |  | - | - | - |
+| enum-walk-tree1k_d100 | 60.2 | - |  | - | - | - |
+| enum-walk-large-fetch-tree1k_d100 | 54.4 | - |  | - | - | - |
+| enum-batch-64k-tree1k_d100 | 52.9 | - |  | - | - | - |
+| enum-batch-256k-tree1k_d100 | 58.2 | - |  | - | - | - |
+| enum-batch-1m-tree1k_d100 | 55.2 | - |  | - | - | - |
+| enum-walk-real | 6428.7 | - |  | - | - | - |
+| enum-walk-large-fetch-real | 6942.4 | - |  | - | - | - |
+| enum-batch-64k-real | 5334.1 | - |  | - | - | - |
+| enum-batch-256k-real | 5544.8 | - |  | - | - | - |
+| enum-batch-1m-real | 5324.7 | - |  | - | - | - |
+| delete-std-A | 1231.0 | - |  | - | - | - |
+| delete-serial-posix-A | 1225.0 | - |  | - | - | - |
+| delete-serial-classic-A | 1279.0 | - |  | - | - | - |
+| delete-parallel-A | 514.0 | - |  | - | - | - |
+| delete-std-B | 431.0 | - |  | - | - | - |
+| delete-serial-posix-B | 419.0 | - |  | - | - | - |
+| delete-serial-classic-B | 424.0 | - |  | - | - | - |
+| delete-parallel-B | 189.0 | - |  | - | - | - |
+
+Notes: warm pass, page cache untouched between runs```
+
+### What the behaviour checks say
+
+Verbatim stdout of `bash bench/windows/summary-checks.sh` over `bench/windows/checks.json`:
+
+```console
+Allocation fidelity: every number is the Win32 answer for the same file, read through the handle dusage uses.
+
+| fixture | EndOfFile | AllocationSize | GetCompressedFileSizeW | named streams | attributes |
+| --- | ---: | ---: | ---: | --- | --- |
+| resident.bin | 1 | 8 | 1 | ::$DATA=1 | Archive |
+| plain.bin | 1048576 | 1048576 | 1048576 | ::$DATA=1048576 | Archive |
+| comp.bin | 1048576 | 196608 | 196608 | ::$DATA=1048576 | Archive, Compressed |
+| sparse.bin | 1048576 | 0 | 0 | ::$DATA=1048576 | Archive, SparseFile |
+| ads.txt | 4 | 8 | 4 | ::$DATA=4 :hidden:$DATA=1048576 | Archive |
+| hl_a.txt | 16 | 16 | 16 | ::$DATA=16 | Archive |
+| hl_b.txt | 16 | 16 | 16 | ::$DATA=16 | Archive |
+| junction | 0 | 0 | 0 | - | Directory, ReparsePoint |
+| sub | 0 | 0 | 0 | - | Directory |
+
+File ids: hardlink pair hl_a.txt / hl_b.txt.
+
+| question | answer |
+| --- | --- |
+| hardlinks share one FileId | true |
+| FileId (high:low) | 00060000006994df0000000000000000 |
+| `fsutil file queryFileID <path>` | ok |
+| fsutil output | `File ID is 0x000000000000000000060000006994df` |
+
+File id support per volume:
+
+| volume | filesystem | FileIdInfo accepted | FileId | error |
+| --- | --- | --- | --- | --- |
+| D:\ | NTFS | true | 00050000000000050000000000000000 | - |
+| C:\ | NTFS | true | 00050000000000050000000000000000 | - |
+| E:\ | NTFS | true | 00050000000000050000000000000000 | - |
+
+Reparse points: fid\junction.
+
+| property | value |
+| --- | --- |
+| LinkType | Junction |
+| PSIsContainer | true |
+| attributes | Directory, ReparsePoint |
+| FILE_STANDARD_INFO Directory flag | true |
+
+`dusage scan fid`: 8 files, 1 dirs; `find` lists `ads.txt comp.bin hl_a.txt hl_b.txt plain.bin resident.bin sparse.bin sub sub/inner.txt`; the link target appears once.
+
+Long paths, deepest path 393 characters:
+
+| question | answer |
+| --- | --- |
+| LongPathsEnabled | true |
+| raw CreateFileW, no prefix | true (error -) |
+| raw CreateFileW, verbatim prefix | true (error -) |
+
+Hardlink overcount on real trees, `--dedup-hardlinks` as the reference:
+
+| root | names (naive) | names (dedup) | on disk naive GB | on disk dedup GB | overcount |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `C:\Users\KellHect\AppData\Local\pnpm\store` | 54030 | 54030 | 1.39 | 1.39 | 0% |
+| `C:\projects` | 127933 | 84345 | 3.58 | 2.95 | 21.4% |
+| `C:\Users\KellHect\.forge` | 27192 | 26939 | 6.51 | 4.53 | 43.7% |
+Elevation, opening the volume device:
+
+| device | elevated | CreateFileW(GENERIC_READ) | error |
+| --- | --- | --- | --- |
+| `\\.\C:` | false | false | 5 |
+| `\\.\D:` | false | false | 5 |
+
+POSIX disposition:
+
+| question | answer |
+| --- | --- |
+| FILE_DISPOSITION_INFO_EX accepted | true |
+| a second open while the first handle is still open | open failed 5 |
+| name gone after the last close | true |```
+
+### What the twelve questions came to
+
+Each answer is a sentence about a table above, not a second measurement.
+
+**1. Enumeration cost.** The batch the tool already ships is the fastest spelling on the real
+tree (`enum-batch-64k-real` 5334 ms against `enum-walk-real` 6429 ms) and level with the
+plain walk on the generated 1M tree (206.8 against 265.7 ms). Buffer size is not a lever:
+64 KiB, 256 KiB and 1 MiB land inside one another's spread on every tree, so the 64 KiB
+default stays. `FIND_FIRST_EX_LARGE_FETCH` takes 25% off the plain walk on the flat and wide
+trees (198.7 against 265.7 ms on the 1M tree) and *costs* 8% on the deep real tree (6942
+against 6429 ms), so it is not worth a second code path. The shape that matters is the
+per-directory cost: the same 1M entries enumerate at 3.8M/s when they sit in 1000
+directories and at 41k/s under `C:\Windows`, where 264k entries arrive from 68k directory
+opens.
+
+**2. Thread sweep.** Both shapes plateau at eight workers, and past that the directory-heavy
+real tree gets slower: `scan-t*-Windows` runs 2448, 1518, 899, 752, 755, 795 and 850 ms at
+1, 2, 4, 8, 16, 24 and 32 threads. That is a latency ceiling rather than a CPU one — 24
+hardware threads are available and the eighth worker already reaches the wall — which is
+what the default now encodes: one worker per core clamped to 4..8 on Windows
+(`native::MAX_WORKERS`), the same throughput as the old 4..16 clamp with half the workers.
+Linux keeps its old 4..16 clamp because nothing wider than a 2-vCPU box has ever been
+swept there — that 16 is inherited, **not** measured, and the only Linux sweep in this
+document (2 vCPUs, `threads-scan-*`) says a small box is already past its own plateau.
+
+**3. Real-time protection. Owed, not measured.** The elevated half of the harness measures the
+same scan and the same delete with Defender watching and with the fixture root excluded, and
+removes the exclusion when it returns. It has not run on this machine — it needs one
+administrator approval — so there is no protection number in this document, and nothing here
+recommends turning protection off.
+
+**4. Delete strategy.** Parallelism is the whole win and the disposition is not a lever.
+`delete-parallel-A` deletes a 20k-file tree in 514 ms where serial `remove_dir_all` takes
+1231 ms, the POSIX disposition 1225 ms and the classic one 1279 ms; the 5k x 128 KiB tree
+repeats the shape at 189 against 431, 419 and 424 ms. Every row ended with zero errors in
+every category, which is what the `errors` object on each row reports.
+
+**5. Allocation fidelity.** `AllocationSize` follows compression (1,048,576 -> 196,608) and
+sparseness (-> 0) exactly and agrees with `GetCompressedFileSizeW` on both. It reports 8 bytes
+for a one-byte resident file where `GetCompressedFileSizeW` reports 1, and — the open
+question in roadmap item 8 — **it does not include named streams**: a 4-byte file carrying a
+1 MiB alternate stream reports 8. That is why `--streams` is opt-in and why it costs a second
+pass.
+
+**6. FileId semantics.** Hardlinks share one 128-bit `FileId` (the `fileid` table: the same id
+from both names), and the `fsutil file queryFileID <path>` syntax needs no `=`. Every local
+volume here is NTFS and accepts `FileIdInfo`. The FAT32 and ReFS rows are **owed**: they come
+from small VHDX files the elevated half attaches for exactly that, and that run has not
+happened.
+
+**7. The reparse gap.** `is_symlink()` is true for a junction on this build, and the tool no
+longer depends on it: it tests `FILE_ATTRIBUTE_REPARSE_POINT`, so the DFS and dedup tags that
+`is_symlink()` misses fall under the same rule. The `reparse-scan` check shows the junction
+fixture scanned as 8 files and 1 directory with its target counted once. `find` not listing a
+link without `--follow` is asserted by `tests/search_cli.rs` and is a documented choice.
+
+**8. Privileges.** Opening the volume device fails with error 5 for a non-elevated token — the
+`elevation` table, measured here. The success side is **owed** with the rest of the elevated
+half, and it is the reason `--mft` documents an administrator shell.
+
+**9. Overcount.** Real pnpm-managed trees overcount far more than the 5-10% AGENTS.md
+recorded: `C:\projects` 3.58 GB naive against 2.95 GB with `--dedup-hardlinks` (21.4%), and
+`C:\forge` 6.51 against 4.53 GB (43.7%). The pnpm store itself is 0%, which is the useful
+control: its hardlinks point into project trees, and a link whose other name lies outside the
+root is still counted once.
+
+**10. Long paths.** The deepest fixture path is 393 characters. Both spellings open and
+delete it here, because this build has `LongPathsEnabled=1`; dusage uses the verbatim prefix
+unconditionally, so it does not depend on that policy. `dusage prune` deleted the whole
+393-character fixture in 973 us.
+
+**11. `--mft` and the USN watch. Owed, not measured.** Both come from the elevated half:
+`--mft` totals for a volume against the batched backend and `robocopy /L /E /XJ`, and a watch
+with files created and deleted under it, whose printed update is compared with what a full
+rescan would cost. A dry run of the watch outside this harness emitted about 33,800 update
+lines, more than half a megabyte of them per second, from a twelve-second watch over a 50-file
+directory — a feed that looks like it re-emits rather than filtering, which is roadmap item 9.
+Nothing from that dry run is in these tables.
+
+### Caveats for this section
+
+- **The antivirus is part of the measurement.** The first pass over the freshly built 1M tree
+  put the batched backend at twice the walk's time; the same rows on a quiet machine are
+  inside 10% of each other. `run.sh` settles before timing, warms the real system tree with one
+  untimed pass, and runs each enumeration backend in its own process, because a backend
+  measured last in a long-lived process came out at twice its solo time. Both traps are
+  written up in `bench/windows/NOTES.md`.
+- **Cold cache needs elevation, so the cold rows are owed.** Windows has no user-mode
+  `drop_caches`; the only honest cold pass purges the standby list and working sets
+  (`NtSetSystemInformation(SystemMemoryListInformation)`), which needs
+  `SeProfileSingleProcessPrivilege`. The harness now refuses to write a cold row when that
+  purge is refused, rather than labelling a warm number cold.
+- **The Linux clamp is not a measurement.** 4..16 on Linux is the number this repository
+  already shipped; the sweep below it was taken on a 2-vCPU container. Windows is the only
+  platform where the plateau has been measured, so 8 there is a result and 16 on Linux is a
+  default nobody has checked on hardware wide enough to test it.
+- **No peak RSS on Windows.** The Linux tables take it from `/usr/bin/time -v` or a `VmHWM`
+  sampler; this harness has neither, so the column is empty rather than guessed.
+- **`robocopy` is the oracle, with the limits the roadmap already records.** `/XJ` excludes
+  junctions, so a tree leaning on other reparse-point kinds is not comparable; the comparison
+  is reported per volume rather than as one verdict.
+- **One machine, one Defender configuration.** The plateau and the delete numbers belong to
+  this desktop, on an NVMe volume with real-time protection on. Read the shapes, not the
+  milliseconds, on a different box.
+
 ## Counts agree before timings mean anything
 
 Timings only compare tools doing the same work, so the cases were checked for

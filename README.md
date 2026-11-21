@@ -107,7 +107,7 @@ dusage <root> [min_big] [threads] [top_n]      (positional form, still supported
 |---|---|
 | `--min-big SIZE` | list files of at least SIZE (default `1G`; sizes like `300M`, `1.5G`, `512KiB`) |
 | `--top N` | rows per section (default 60) |
-| `--threads N` | worker threads (default: one per core, 4 to 16) |
+| `--threads N` | worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux) |
 | `--on-disk` | show size on disk next to file size |
 | `--by-ext` | add a breakdown by file extension |
 | `--dedup-hardlinks` | count a file with several hardlinks once |
@@ -180,7 +180,7 @@ fastdel <root> <min_age> [prefixes] [threads] [--dry]   (positional form, still 
 | `--limit N` | rows listed by `--dry` (default 50) |
 | `--preset NAME` | prefixes, age and list limit from a saved preset (below) |
 | `--print-presets` | list the presets and exit |
-| `--threads N` | worker threads (default: one per core, 4 to 16) |
+| `--threads N` | worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux) |
 
 ```powershell
 # cargo target folders anywhere under D:\work, any age; preview first

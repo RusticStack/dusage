@@ -102,7 +102,7 @@ OPTIONS:
         --time            print the modification time between size and path
         --time-style S    `long-iso` (default), `iso`, or `+FORMAT` built from %Y %m %d
                           %H %M %S and %% (times are UTC)
-        --threads N       worker threads (default: one per core, 4 to 16)
+        --threads N       worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux)
         --stats           a summary line on stderr
     -P, --no-dereference  never follow links (the default; accepted for compatibility)
     -L, --dereference     refused: the walk never follows links

@@ -24,7 +24,7 @@ OPTIONS:
     --age AGE       delete entries last modified more than AGE ago: 30s 15m 2h 7d 1w, or a
                     bare number of days; a negative number means no age filter. Required.
     --prefix a,b    only names starting with a prefix (case-sensitive); repeatable
-    --threads N     worker threads (default: one per core, 4 to 16)
+    --threads N     worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux)
     --dry           print the plan, delete nothing
     --log FILE      append one line per candidate (DELETED/FAILED/DRY) plus a summary
     --limit N       rows listed by --dry (default 50)
