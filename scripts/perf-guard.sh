@@ -212,6 +212,15 @@ baseline_field() {
     echo "$v"
 }
 
+baseline_tool() {
+    [ -f "$BASELINE" ] || return 1
+    local v
+    v=$(grep -m1 "\"$1\": {" "$BASELINE" 2>/dev/null |
+        sed -n "s/.*\"reference_tool\": \"\([^\"]*\)\".*/\1/p")
+    [ -n "$v" ] || return 1
+    echo "$v"
+}
+
 baseline_cpus() {
     [ -f "$BASELINE" ] || return 0
     sed -n 's/.*"cpus": \([0-9]*\).*/\1/p' "$BASELINE" | head -1
@@ -285,6 +294,7 @@ for i in "${!g_cmd[@]}"; do
         'BEGIN { if (r > 0) printf "%.2f", d / r; else printf "–" }')
     base_ratio=$(baseline_field "${g_case[i]}" ratio) || base_ratio=""
     base_ms=$(baseline_field "${g_case[i]}" dusage_ms) || base_ms=""
+    base_tool=$(baseline_tool "${g_case[i]}") || base_tool=""
     verdict=ok
     if [ -n "$ref_ms" ] && awk -v d="${med[i]}" -v r="$ref_ms" -v tol="$TOL" \
         'BEGIN { exit !(d > r * (1 + tol / 100)) }'; then
@@ -307,6 +317,12 @@ for i in "${!g_cmd[@]}"; do
     else
         [ "$verdict" = ok ] && verdict="ok (no baseline)"
     fi
+    # The fastest reference wins in each run, and it need not be the tool the baseline
+    # used: a ratio against rg and a ratio against grep are not the same number, so say so
+    # rather than pass or fail on the comparison.
+    if [ -n "$base_ratio" ] && [ -n "$base_tool" ] && [ "$base_tool" != "${ref_tool:-}" ]; then
+        verdict="$verdict (ratio not comparable: baseline used $base_tool, this run used ${ref_tool:-none}; re-record here)"
+    fi
     printf '%-24s %10s %10s %10s %8s %8s  %s\n' \
         "${g_case[i]}" "${med[i]}" "${ref_tool:-–}" "${ref_ms:-–}" "$ratio" "${base_ratio:-–}" "$verdict"
 done
@@ -316,7 +332,8 @@ if [ -f "$BASELINE" ]; then
     if [ -z "$base_cpus" ]; then
         echo "perf-guard: baseline has no machine block" >&2
     elif [ "$base_cpus" != "$CPUS" ]; then
-        echo "perf-guard: baseline was recorded on $base_cpus CPUs, this box has $CPUS; the comparison carries that difference" >&2
+        echo "perf-guard: baseline was recorded on $base_cpus CPUs, this box has $CPUS;" \
+            "a ratio from another box can misfire here, so re-record with --update-baseline on this host before trusting a red row" >&2
     fi
 else
     echo "perf-guard: no baseline at $BASELINE, only the reference comparison applies" >&2
