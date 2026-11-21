@@ -763,6 +763,120 @@ pub fn read_plain(dir: &Path, out: &mut Vec<Entry>, errs: &mut ErrorCounts) -> i
     Ok(())
 }
 
+/// WIN32_FIND_DATAW (fileapi.h), the record `FindFirstFileExW` fills.
+#[repr(C)]
+#[allow(dead_code)]
+struct Win32FindDataW {
+    file_attributes: u32,
+    creation_time: [u32; 2],
+    last_access_time: [u32; 2],
+    last_write_time: [u32; 2],
+    file_size_high: u32,
+    file_size_low: u32,
+    reserved0: u32,
+    reserved1: u32,
+    file_name: [u16; 260],
+    alternate_file_name: [u16; 14],
+}
+
+const FIND_EX_INFO_BASIC: u32 = 1;
+const FIND_EX_SEARCH_NAME_MATCH: u32 = 0;
+/// FIND_FIRST_EX_LARGE_FETCH: ask for a larger internal buffer.
+const FIND_FIRST_EX_LARGE_FETCH: u32 = 0x2;
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn FindFirstFileExW(
+        name: *const u16,
+        level: u32,
+        data: *mut c_void,
+        search_op: u32,
+        filter: *const c_void,
+        flags: u32,
+    ) -> HANDLE;
+    fn FindNextFileW(h: HANDLE, data: *mut c_void) -> i32;
+}
+
+/// The `readdir` backend done through `FindFirstFileExW` itself, so the
+/// `FIND_FIRST_EX_LARGE_FETCH` hint can be measured against the same code with it
+/// off. `read_plain` (std) is what the tool ships; this exists for
+/// `examples/win_enum_perf.rs` and is not on the scan path.
+pub fn read_plain_ex(
+    dir: &Path,
+    out: &mut Vec<Entry>,
+    errs: &mut ErrorCounts,
+    large_fetch: bool,
+) -> io::Result<()> {
+    let mut w = sys::wide_verbatim(dir)?;
+    // FindFirstFileExW wants `dir\*`.
+    w.pop();
+    if !w.ends_with(&[b'\\' as u16]) {
+        w.push(b'\\' as u16);
+    }
+    w.push(b'*' as u16);
+    w.push(0);
+    let flags = if large_fetch {
+        FIND_FIRST_EX_LARGE_FETCH
+    } else {
+        0
+    };
+    let mut data = std::mem::MaybeUninit::<Win32FindDataW>::uninit();
+    // SAFETY: `w` is NUL-terminated; `data` is a writable WIN32_FIND_DATAW.
+    let h = unsafe {
+        FindFirstFileExW(
+            w.as_ptr(),
+            FIND_EX_INFO_BASIC,
+            data.as_mut_ptr() as *mut c_void,
+            FIND_EX_SEARCH_NAME_MATCH,
+            std::ptr::null(),
+            flags,
+        )
+    };
+    if h == sys::INVALID_HANDLE_VALUE {
+        let e = io::Error::last_os_error();
+        // An empty directory fails the first call with this; that is not an error.
+        if matches!(e.raw_os_error(), Some(sys::ERROR_FILE_NOT_FOUND)) {
+            return Ok(());
+        }
+        return Err(e);
+    }
+    let _guard = FindGuard(h);
+    loop {
+        // SAFETY: the handle is live and `data` was filled by the last successful call.
+        let d = unsafe { data.assume_init_ref() };
+        let len = d.file_name.iter().position(|&c| c == 0).unwrap_or(0);
+        let name = OsString::from_wide(&d.file_name[..len]);
+        if name != "." && name != ".." {
+            out.push(Entry {
+                name,
+                attributes: d.file_attributes,
+                reparse_tag: d.reserved0,
+                size: ((d.file_size_high as u64) << 32) | d.file_size_low as u64,
+                alloc: 0,
+                file_id: 0,
+                last_write: ((d.last_write_time[1] as u64) << 32) | d.last_write_time[0] as u64,
+                change_time: 0,
+                creation_time: ((d.creation_time[1] as u64) << 32) | d.creation_time[0] as u64,
+                last_access_time: ((d.last_access_time[1] as u64) << 32)
+                    | d.last_access_time[0] as u64,
+            });
+        }
+        data = std::mem::MaybeUninit::uninit();
+        // SAFETY: same live handle, writable buffer.
+        let more = unsafe { FindNextFileW(h, data.as_mut_ptr() as *mut c_void) };
+        if more == 0 {
+            let e = io::Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(sys::ERROR_NO_MORE_FILES) => Ok(()),
+                _ => {
+                    errs.record(&e);
+                    Ok(())
+                }
+            };
+        }
+    }
+}
+
 /// The filesystem rejected a per-directory detail we asked for.
 pub fn is_unsupported(e: &io::Error) -> bool {
     matches!(
@@ -995,6 +1109,42 @@ mod tests {
         assert_eq!(size_of::<FileIdBothDirInfo>(), 112);
         assert_eq!(offset_of!(Win32FindStreamData, stream_name), 8);
         assert_eq!(size_of::<Win32FindStreamData>(), 600);
+        assert_eq!(offset_of!(Win32FindDataW, creation_time), 4);
+        assert_eq!(offset_of!(Win32FindDataW, file_size_high), 28);
+        assert_eq!(offset_of!(Win32FindDataW, reserved0), 36);
+        assert_eq!(offset_of!(Win32FindDataW, file_name), 44);
+        assert_eq!(offset_of!(Win32FindDataW, alternate_file_name), 564);
+        assert_eq!(size_of::<Win32FindDataW>(), 592);
+    }
+
+    /// The two `FindFirstFileExW` spellings and the batch agree on names, sizes and the
+    /// skip decision, so the flags change only how much one call fetches.
+    #[test]
+    fn plain_ex_matches_the_other_backends() {
+        let f = Fixture::new("plainex");
+        fs::create_dir_all(f.0.join("sub")).unwrap();
+        fs::write(f.0.join("a.txt"), b"hello").unwrap();
+        fs::write(f.0.join("sub/b.txt"), b"world!").unwrap();
+        let mut expect = Vec::new();
+        read_plain(&f.0, &mut expect, &mut sink()).unwrap();
+        expect.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(expect.len(), 2);
+        for large in [false, true] {
+            let mut got = Vec::new();
+            read_plain_ex(&f.0, &mut got, &mut sink(), large).unwrap();
+            got.sort_by(|a, b| a.name.cmp(&b.name));
+            assert_eq!(got.len(), expect.len(), "large_fetch={large}");
+            for (e, g) in expect.iter().zip(&got) {
+                assert_eq!(e.name, g.name);
+                assert_eq!(
+                    (e.size, e.attributes),
+                    (g.size, g.attributes),
+                    "large={large}"
+                );
+                assert_eq!(e.is_dir(), g.is_dir());
+                assert_eq!(is_skipped(e), is_skipped(g));
+            }
+        }
     }
 
     struct Fixture(PathBuf);

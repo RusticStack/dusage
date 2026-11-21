@@ -116,7 +116,7 @@ dusage <root> [min_big] [threads] [top_n]      (positional form, still supported
 |---|---|
 | `--min-big SIZE` | list files of at least SIZE (default `1G`; sizes like `300M`, `1.5G`, `512KiB`) |
 | `--top N` | rows per section (default 60) |
-| `--threads N` | worker threads (default: one per core, 4 to 16) |
+| `--threads N` | worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux) |
 | `--on-disk` | show size on disk next to file size |
 | `--by-ext` | add a breakdown by file extension |
 | `--dedup-hardlinks` | count a file with several hardlinks once |
@@ -181,7 +181,7 @@ fastdel <root> <min_age> [prefixes] [threads] [--dry]   (positional form, still 
 | `--limit N` | rows listed by `--dry` (default 50) |
 | `--preset NAME` | prefixes, age and list limit from a saved preset (below) |
 | `--print-presets` | list the presets and exit |
-| `--threads N` | worker threads (default: one per core, 4 to 16) |
+| `--threads N` | worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux) |
 
 ```powershell
 # cargo target folders anywhere under D:\work, any age; preview first
@@ -379,12 +379,15 @@ plus `bash bench/summary.sh` — warm and cold passes, peak RSS per row, `scan` 
 `-z` cases, `find` against `find -name`, `du` against GNU `du`, `tree` against `tree -s`,
 `df` against GNU `df`, and the thread sweep that justifies the 4..16 default. `bash scripts/perf-guard.sh` is the 25% regression check.
 
-As of the commit those tables were last generated at (`main`@`323bf88`, 2 vCPUs, warm cache):
-every content case is ahead of its reference — a general regex at 0.90× ripgrep, `-o` at
-0.84× `grep -rIo`, `-z` at 0.25×, the frequent literal at 0.76× `grep -rI` — with the one
-exception of `-U` under Unicode semantics at 1.15×. `find`'s glob form is 0.71×
-`find -name`, its expression form 0.99×, and both `du` rows are ahead of GNU `du` with
-byte-identical totals. Delete
+As of the run those tables were last generated from (`main`@`1f3331e`, 4 vCPUs, warm
+cache, medians of seven alternating runs): the metadata rows are far ahead — `scan` at 0.28×
+`du -sb`, both `du` rows at 0.29-0.30× GNU `du` with byte-identical totals, `find` at
+0.44-0.65× `find -name`, and `tree` at 0.70× `tree` while holding 70 MiB against its 5,
+because sorted column-aligned subtree totals cost one record per entry. The cases that print
+a lot are clearly ahead too — `-c` 0.58× `rg -c`, `-l` 0.62×, `-U` 0.69×, the frequent literal
+0.74×, `-o` 0.75× `rg -o`, `-z` 0.39× — and the plain content rows are level with `ripgrep`
+(0.89-1.07×). `df` is a tie at 2.8 ms against 2.5 ms. One row is genuinely behind:
+`find`'s expression walk at 1.13×, the sequential walk `-prune` and `-depth` force. Delete
 timings are not in that suite: the only recorded figure is the 0.4.0 container measurement,
 50,301 entries in **0.36 s** against 0.60 s for `rm -rf` on the same tree.
 
