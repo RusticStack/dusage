@@ -58,6 +58,8 @@ pub struct Pattern {
     /// table. `dusage search` asks this per line, so nothing about the needle is recomputed.
     finder: Option<bytes::Finder>,
     ci: bool,
+    /// `--no-unicode`: `-i` folds ASCII only, also for a literal.
+    ascii: bool,
     word: bool,
     re: Option<Regex>,
     /// The backtracking matcher, when the pattern is beyond the Pike VM.
@@ -83,6 +85,21 @@ impl Pattern {
         word: bool,
         pcre: bool,
     ) -> Result<Pattern, String> {
+        Pattern::with_options(text, fixed, ignore_case, word, pcre, false)
+    }
+
+    /// Like [`Pattern::with_engine`], with `ascii` turning Unicode semantics off the way
+    /// ripgrep's `--no-unicode` does: `.`, `\w`, `\d`, `\s`, `\b` and `-i` are ASCII-only
+    /// and a line is matched as bytes whatever it holds. The backtracking engine is not
+    /// affected.
+    pub fn with_options(
+        text: &str,
+        fixed: bool,
+        ignore_case: bool,
+        word: bool,
+        pcre: bool,
+        ascii: bool,
+    ) -> Result<Pattern, String> {
         if text.is_empty() {
             return Err("empty pattern".to_string());
         }
@@ -93,6 +110,7 @@ impl Pattern {
                 lit: Vec::new(),
                 finder: None,
                 ci: ignore_case,
+                ascii,
                 word,
                 re: None,
                 pcre: Some(Pcre::new(text)?),
@@ -107,6 +125,7 @@ impl Pattern {
                 lit: text.as_bytes().to_vec(),
                 finder: Some(bytes::Finder::new(text.as_bytes(), ignore_case)),
                 ci: ignore_case,
+                ascii,
                 word,
                 re: None,
                 pcre: None,
@@ -116,6 +135,11 @@ impl Pattern {
         }
         let flags = Flags {
             case_insensitive: ignore_case,
+            ascii_only: ascii,
+            ..Default::default()
+        };
+        let plain_flags = Flags {
+            ascii_only: ascii,
             ..Default::default()
         };
         let re = match Regex::new_with(text, flags) {
@@ -130,6 +154,7 @@ impl Pattern {
                         lit: Vec::new(),
                         finder: None,
                         ci: ignore_case,
+                        ascii,
                         word,
                         re: None,
                         pcre: Some(pcre),
@@ -144,7 +169,7 @@ impl Pattern {
         // literal fast path is disabled inside the regex when `-i` folds, so the checker
         // parses the pattern once more without folding to see whether it is plain.
         let plain = if ignore_case {
-            Regex::new_with(text, Flags::default())
+            Regex::new_with(text, plain_flags)
                 .ok()
                 .and_then(|r| r.literal().map(<[u8]>::to_vec))
         } else {
@@ -158,6 +183,7 @@ impl Pattern {
                     finder: Some(bytes::Finder::new(&lit, ignore_case)),
                     lit,
                     ci: ignore_case,
+                    ascii,
                     word,
                     re: None,
                     pcre: None,
@@ -173,6 +199,7 @@ impl Pattern {
             lit: Vec::new(),
             finder: None,
             ci: ignore_case,
+            ascii,
             word,
             re: Some(re),
             pcre: None,
@@ -185,7 +212,7 @@ impl Pattern {
     /// scanner reproduces exactly. A literal that needs Unicode folding takes the line path,
     /// because the scanner folds ASCII only.
     pub fn block_finder(&self) -> Option<&bytes::Finder> {
-        if self.ci && !self.lit.is_ascii() {
+        if self.ci && !self.ascii && !self.lit.is_ascii() {
             return None;
         }
         self.finder.as_ref()
@@ -287,7 +314,7 @@ impl Pattern {
                 Some(m) => m,
                 None => return Ok(None),
             };
-            if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
+            if !self.word || self.word_bounded(hay, m.start, m.end) {
                 return Ok(Some(Match {
                     start: m.start,
                     end: m.end,
@@ -307,7 +334,7 @@ impl Pattern {
         let mut at = from;
         while at <= hay.len() {
             let m = re.find_at(hay, at)?;
-            if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
+            if !self.word || self.word_bounded(hay, m.start, m.end) {
                 return Some(m);
             }
             at = m.start + 1;
@@ -318,7 +345,7 @@ impl Pattern {
     fn find_literal(&self, hay: &[u8], from: usize) -> Option<Match> {
         // A non-ASCII needle under `-i` is folded per character, so `-i` matches `É` for `é`
         // the way `rg` and `grep` do. Lines that are not valid UTF-8 keep the ASCII fold.
-        if self.ci && !self.lit.is_ascii() {
+        if self.ci && !self.ascii && !self.lit.is_ascii() {
             if let Some(m) = self.find_literal_unicode(hay, from) {
                 return Some(m);
             }
@@ -338,7 +365,7 @@ impl Pattern {
                 start: i,
                 end: i + self.lit.len(),
             };
-            if bytes::at_word_boundary(hay, m.start, m.end) {
+            if self.word_bounded(hay, m.start, m.end) {
                 return Some(m);
             }
             at = i + 1;
@@ -359,7 +386,7 @@ impl Pattern {
             let start = *map.get(i)?;
             let end = map.get(end_folded).copied().unwrap_or(text.len());
             let m = Match { start, end };
-            if !self.word || bytes::at_word_boundary(hay, m.start, m.end) {
+            if !self.word || self.word_bounded(hay, m.start, m.end) {
                 return Some(m);
             }
             at = i + 1;
@@ -411,10 +438,20 @@ impl Pattern {
             (PatternKind::Regex, Some(re)) if re.is_unicode() => re,
             _ => return self.find_all(hay, limit),
         };
-        let word = self.word;
         re.find_all_in(hay, limit, |m| {
-            !word || bytes::at_word_boundary(hay, m.start, m.end)
+            !self.word || self.word_bounded(hay, m.start, m.end)
         })
+    }
+
+    /// `-w`: nothing word-like on either side. A non-ASCII byte is word-like unless
+    /// `--no-unicode` says only ASCII letters, digits and `_` are.
+    fn word_bounded(&self, hay: &[u8], start: usize, end: usize) -> bool {
+        if !self.ascii {
+            return bytes::at_word_boundary(hay, start, end);
+        }
+        let word = |b: &u8| b.is_ascii_alphanumeric() || *b == b'_';
+        let left = start.checked_sub(1).and_then(|i| hay.get(i));
+        !left.is_some_and(word) && !hay.get(end).is_some_and(word)
     }
 
     pub fn find_all(&self, hay: &[u8], limit: usize) -> Vec<Match> {
@@ -474,6 +511,52 @@ mod tests {
             Some(Match { start: 2, end: 10 })
         );
         assert!(ci.is_match(b"neeeeedle"));
+    }
+
+    #[test]
+    fn no_unicode_matches_bytes() {
+        let m = |text: &str, ci: bool, word: bool, ascii: bool, hay: &str| {
+            let p = Pattern::with_options(text, false, ci, word, false, ascii).unwrap();
+            p.find_at(hay.as_bytes(), 0).map(|m| (m.start, m.end))
+        };
+        // `caf` is 3 bytes and `é` two more.
+        assert_eq!(m(r"\w+", false, false, false, "café"), Some((0, 5)));
+        assert_eq!(m(r"\w+", false, false, true, "café"), Some((0, 3)));
+        assert_eq!(
+            m(r"caf.", false, false, true, "café!"),
+            Some((0, 4)),
+            "one byte"
+        );
+        assert_eq!(m(r"\bcaf\b", false, false, false, "café"), None);
+        assert_eq!(m(r"\bcaf\b", false, false, true, "café"), Some((0, 3)));
+        assert_eq!(m(r"\d", false, false, false, "٣"), Some((0, 2)));
+        assert_eq!(m(r"\d", false, false, true, "٣"), None);
+        assert_eq!(
+            m(r"[^a-z]+", false, false, true, "aé"),
+            Some((1, 3)),
+            "bytes"
+        );
+        // -i folds ASCII only, for a literal and for a regex.
+        assert_eq!(m("CAFÉ", true, false, false, "café"), Some((0, 5)));
+        assert_eq!(m("CAFÉ", true, false, true, "café"), None);
+        assert_eq!(m("CAFé", true, false, true, "café"), Some((0, 5)));
+        assert_eq!(m("É+x?", true, false, false, "é"), Some((0, 2)));
+        assert_eq!(m("É+x?", true, false, true, "é"), None);
+        assert_eq!(
+            m("é+x?", false, false, true, "éé"),
+            Some((0, 4)),
+            "whole character"
+        );
+        // -w: a non-ASCII byte is no longer part of a word.
+        assert_eq!(m("caf", false, true, false, "un café"), None);
+        assert_eq!(m("caf", false, true, true, "un café"), Some((3, 6)));
+        assert_eq!(m("caf", false, true, true, "un cafe"), None);
+        // What only Unicode can answer is refused, not silently narrowed.
+        for pat in [r"\p{L}", r"[\p{Lu}]", "[é]", "[a-é]"] {
+            let err = Pattern::with_options(pat, false, false, false, false, true).unwrap_err();
+            assert!(err.contains("--no-unicode"), "{pat}: {err}");
+            assert!(Pattern::new(pat, false, false, false).is_ok(), "{pat}");
+        }
     }
 
     #[test]

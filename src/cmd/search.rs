@@ -105,6 +105,8 @@ OPTIONS:
     -M, --max-columns N    truncate printed lines at N bytes
         --max-columns-preview  say so when a line was cut
     --encoding NAME        auto (default), utf-8, utf-16le, utf-16be, latin1
+    --no-unicode           match bytes, not characters: '.', \\w, \\d, \\s, \\b, -w and -i
+                           are ASCII-only, also on a non-ASCII line (not with -P)
     --crlf                 read \r\n as the line terminator: '$' matches before the \r
                            and the \r is not printed (already the behaviour here)
     --files                with no pattern, list the files a search would read
@@ -572,6 +574,7 @@ pub(super) const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--max-columns-preview",
     "--no-heading",
     "--crlf",
+    "--no-unicode",
     "--binary",
     "--line-buffered",
     "--block-buffered",
@@ -1145,12 +1148,13 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
         }
     };
     let mut o = SearchOptions::new(
-        Pattern::with_engine(
+        Pattern::with_options(
             &pattern_text,
             scope == Scope::Paths || fixed,
             ignore_case,
             a.flag("-w") || a.flag("--word-regexp"),
             pcre,
+            scope == Scope::Content && a.flag("--no-unicode"),
         )?,
         roots,
     );

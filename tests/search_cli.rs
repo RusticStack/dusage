@@ -442,6 +442,46 @@ fn run_env(args: &[&str], env: &[(&str, &Path)]) -> Output {
 }
 
 #[test]
+fn no_unicode_matches_bytes_on_non_ascii_lines() {
+    let f = Fixture::new("nounicode");
+    fs::write(
+        f.root.join("nou.txt"),
+        "café ÉCOLE
+plain
+",
+    )
+    .unwrap();
+    let out = |args: &[&str]| stdout(&run(args, &f.root));
+    assert_eq!(
+        out(&["search", "-o", "--no-filename", "-g", "nou.txt", r"^\w+"]),
+        "café
+plain
+"
+    );
+    assert_eq!(
+        out(&[
+            "search",
+            "-o",
+            "--no-filename",
+            "-g",
+            "nou.txt",
+            "--no-unicode",
+            r"^\w+"
+        ]),
+        "caf
+plain
+"
+    );
+    assert!(out(&["search", "-i", "école"]).contains("ÉCOLE"));
+    let o = run(&["search", "-i", "--no-unicode", "école"], &f.root);
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    assert!(out(&["search", "-w", "--no-unicode", "caf"]).contains("café"));
+    let o = run(&["search", "--no-unicode", r"\p{L}"], &f.root);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--no-unicode"));
+}
+
+#[test]
 fn encoding_auto_and_forced() {
     let f = Fixture::new("encoding");
     let le: Vec<u8> = "needle in utf16\nsecond needle\n"
