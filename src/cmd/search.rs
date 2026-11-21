@@ -47,6 +47,12 @@ OPTIONS:
         --no-heading       the opposite of --heading, and the last one given wins
         --trim             drop leading whitespace from printed lines
         --path-separator SEP   print SEP where a path has a separator (one byte)
+        --hyperlink-format FORMAT
+                           with colour, make each path (or line number under a
+                           heading) a terminal hyperlink: a URL with {path},
+                           {host}, {line}, {column}, {wslprefix}, or one of
+                           default, none, file, grep+, kitty, macvim, textmate,
+                           vscode, vscode-insiders, vscodium, cursor
         --field-match-separator SEP
                            between the fields of a matching line (default ':')
         --field-context-separator SEP
@@ -473,6 +479,7 @@ pub(super) const SEARCH_VALUE_FLAGS: &[&str] = &[
     "--max-columns",
     "--encoding",
     "--path-separator",
+    "--hyperlink-format",
     "--field-match-separator",
     "--field-context-separator",
     "--context-separator",
@@ -1186,6 +1193,9 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     o.vimgrep = a.flag("--vimgrep");
     o.trim = a.flag("--trim");
     o.stop_on_nonmatch = a.flag("--stop-on-nonmatch");
+    if let Some(format) = a.value("--hyperlink-format") {
+        o.hyperlink = crate::hyperlink::HyperlinkFormat::parse(format).map_err(|e| Fail(2, e))?;
+    }
     if let Some(sep) = a.value("--path-separator") {
         let bytes = sep.as_bytes();
         if bytes.len() != 1 {

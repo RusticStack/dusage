@@ -442,6 +442,68 @@ fn run_env(args: &[&str], env: &[(&str, &Path)]) -> Output {
 }
 
 #[test]
+fn hyperlink_format_wraps_paths_when_coloured() {
+    let f = Fixture::new("hyperlink");
+    fs::write(f.root.join("hl.txt"), "a needle\n").unwrap();
+    let base = ["search", "-n", "-H", "-g", "hl.txt"];
+    let out = |extra: &[&str]| {
+        let args: Vec<&str> = base.iter().chain(extra).copied().collect();
+        stdout(&run(&args, &f.root))
+    };
+    let format = "x://{path}?{line}:{column}";
+    let open = "\x1b]8;;x://";
+    let close = "\x1b]8;;\x1b\\";
+    // The path of a row links to the row's line and the match's column.
+    let o = out(&["--color=always", "--hyperlink-format", format, "needle"]);
+    assert!(o.contains(open) && o.contains(close), "{o:?}");
+    assert!(o.contains("hl.txt?1:3\x1b\\"), "{o:?}");
+    assert!(
+        !o.contains(".\\hl.txt?") && !o.contains("./hl.txt?"),
+        "absolute: {o:?}"
+    );
+    // Under a heading the path links to the file and the line number to the line.
+    let o = out(&[
+        "--color=always",
+        "--heading",
+        "--hyperlink-format",
+        format,
+        "needle",
+    ]);
+    assert!(o.contains("hl.txt?1:1\x1b\\"), "{o:?}");
+    assert!(o.contains("hl.txt?1:3\x1b\\"), "{o:?}");
+    assert_eq!(o.matches(close).count(), 2, "{o:?}");
+    let o = out(&[
+        "--color=always",
+        "-l",
+        "--hyperlink-format",
+        "vscode",
+        "needle",
+    ]);
+    assert!(
+        o.contains("\x1b]8;;vscode://file/") && o.contains("hl.txt:1:1\x1b\\"),
+        "{o:?}"
+    );
+    // No colour, no links; `none` and the empty format turn them off.
+    for extra in [
+        &["--color=never", "--hyperlink-format", format, "needle"][..],
+        &["--color=always", "--hyperlink-format", "none", "needle"],
+        &["--color=always", "--hyperlink-format", "", "needle"],
+        &["--color=always", "needle"],
+    ] {
+        let o = out(extra);
+        assert!(
+            o.contains("needle") && !o.contains("\x1b]8"),
+            "{extra:?}: {o:?}"
+        );
+    }
+    for bad in ["{path}", "file://{host}", "file://{path}{nope}"] {
+        let o = run(&["search", "--hyperlink-format", bad, "needle"], &f.root);
+        assert_eq!(o.status.code(), Some(2), "{bad}");
+        assert!(String::from_utf8_lossy(&o.stderr).contains("hyperlink format"));
+    }
+}
+
+#[test]
 fn encoding_auto_and_forced() {
     let f = Fixture::new("encoding");
     let le: Vec<u8> = "needle in utf16\nsecond needle\n"

@@ -372,6 +372,31 @@ fn write_path(out: &mut dyn Write, path: &str, o: &SearchOptions) -> io::Result<
     }
 }
 
+/// Open an OSC 8 hyperlink to `path` (`--hyperlink-format`), saying whether one was opened
+/// and so has to be closed with [`LINK_CLOSE`]. Links ride on colour: a pipe gets none.
+fn link_open(
+    out: &mut dyn Write,
+    o: &SearchOptions,
+    color: bool,
+    path: &str,
+    line: Option<u64>,
+    column: Option<u64>,
+) -> io::Result<bool> {
+    let url = match &o.hyperlink {
+        Some(format) if color => format.url(path, line, column),
+        _ => None,
+    };
+    let Some(url) = url else {
+        return Ok(false);
+    };
+    out.write_all(b"\x1b]8;;")?;
+    out.write_all(url.as_bytes())?;
+    out.write_all(b"\x1b\\")?;
+    Ok(true)
+}
+
+const LINK_CLOSE: &[u8] = b"\x1b]8;;\x1b\\";
+
 /// The same bytes in a buffer, for a row whose name field is built once and reused.
 fn push_path(buf: &mut Vec<u8>, path: &str, o: &SearchOptions) {
     match o.path_separator {
@@ -409,7 +434,11 @@ impl Row<'_> {
         text: &[u8],
     ) -> io::Result<()> {
         let o = self.o;
+        // A link points at this row: its line, and its match's column when it has one.
+        let line = Some(h.number).filter(|n| *n > 0);
+        let column = span.map(|(s, _)| (h.text_start + s + 1) as u64);
         if self.named {
+            let linked = link_open(out, o, self.color, path, line, column)?;
             if self.color {
                 out.write_all(color::PATH.as_bytes())?;
             }
@@ -417,13 +446,21 @@ impl Row<'_> {
             if self.color {
                 out.write_all(color::RESET.as_bytes())?;
             }
+            if linked {
+                out.write_all(LINK_CLOSE)?;
+            }
             out.write_all(if o.null { b"\0" } else { sep })?;
         }
         if o.line_numbers {
             if self.color {
+                // Under a heading the row has no path of its own, so its number is the link.
+                let linked = !self.named && link_open(out, o, true, path, line, column)?;
                 out.write_all(color::LINE.as_bytes())?;
                 write_u64(out, h.number)?;
                 out.write_all(color::RESET.as_bytes())?;
+                if linked {
+                    out.write_all(LINK_CLOSE)?;
+                }
             } else {
                 write_u64(out, h.number)?;
             }
@@ -532,7 +569,11 @@ impl<'a> SearchStream<'a> {
             self.owed = false;
         }
         if o.files_with_matches || o.files_without_matches {
+            let linked = link_open(out, o, color, &f.path, None, None)?;
             write_path(out, &f.path, o)?;
+            if linked {
+                out.write_all(LINK_CLOSE)?;
+            }
             out.write_all(if o.null { b"\0" } else { end })?;
             return Ok(());
         }
@@ -560,12 +601,16 @@ impl<'a> SearchStream<'a> {
             if self.printed_heading {
                 writeln!(out)?;
             }
+            let linked = link_open(out, o, color, &f.path, None, None)?;
             if color {
                 out.write_all(color::PATH.as_bytes())?;
             }
             write_path(out, &f.path, o)?;
             if color {
                 out.write_all(color::RESET.as_bytes())?;
+            }
+            if linked {
+                out.write_all(LINK_CLOSE)?;
             }
             out.write_all(end)?;
             self.printed_heading = true;

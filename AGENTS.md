@@ -12,6 +12,7 @@ src/lib.rs            module list; re-exports queue::par_for_each; `native` = wi
 src/queue.rs          par_for_each: condvar work queue (one mutex, panic-safe)
 src/cli.rs            arg parser, human units (sizes, ages), thread default
 src/guard.rs          protected-root guard, one implementation per platform
+src/hyperlink.rs      --hyperlink-format: URL template, aliases, path encoding
 src/model.rs          shared types: Totals, TopEntry, BigFile, ErrorKind/ErrorCounts, Source, ScanResult
 src/report.rs         text / JSON rendering of ScanResult, SearchReport, path listings
 src/scan.rs           scan engine (readdir / batched / mft backends) and watch
