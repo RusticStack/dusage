@@ -80,7 +80,7 @@ OPTIONS:
     -B, --before-context N print N lines before each match
     -C, --context N        print N lines of context around each match (same as -A N -B N)
     -a, --text             search binary files instead of reporting them
-    -j, --threads N        worker threads (default: one per core, 4 to 16)
+    -j, --threads N        worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux)
     -g, --glob PATTERN     include files matching a glob; prefix with ! to exclude
         --include PATTERN  grep's spelling of a narrowing glob; repeatable
         --exclude PATTERN  grep's spelling of an exclusion glob; repeatable

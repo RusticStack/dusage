@@ -2,7 +2,8 @@
 
 **Origin.** This began as a research report written from `src/lib.rs`, `src/bin/dusage.rs` and `src/bin/fastdel.rs` before any change (four research lanes plus skeptic verdicts; refuted items dropped or corrected, unconfirmed items marked unverified). The "Problem" and "Fix" text below describes the original code and is kept as written; the status line under each item says what was built. Gains stay unmeasured unless stated: no benchmark has been run on the implementation.
 
-**Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are all still open, apart from the Linux work in the last section.
+**Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are answered on a real Windows volume (2026-11-21);
+the elevated half of that run and the Linux sweeps are named where they are still owed.
 
 **Status 0.5.0 (search).** `dusage` is a search tool as well: `search` (contents,
 a grep/rg replacement), `find` (paths, a find replacement), `prune` (the fastdel
@@ -14,10 +15,10 @@ the numbers and the limits that are still open.
 
 **Status (macOS, x86_64).** The crate compiles for `x86_64-apple-darwin` and has a third
 platform module, `src/mac/`: enumeration over `readdir$INODE64`/`fstatat`, deletion over
-`unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed, a macOS guard, and mount points and
-`-fstype` names from the kernel's own mount table. CI runs a `macos-15-intel` leg on a real
-Mac and it is green (796 tests, 0 failures); arm64 is untested. The limits that come with it
-are in the macOS section at the end.
+`unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed, a macOS guard, and volume roots and
+`-fstype` names from the kernel's own mount table. It is cross-checked from Linux and has run
+in CI on a real x86_64 Mac; arm64 has not been run yet. The limits that come with it are in
+the macOS section at the end, and MRI-14 carries the runner schedule.
 
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
@@ -166,25 +167,76 @@ explanation. Numbers measured on this machine are in the last section.
 - **Corrected.** Item 6 is reporting, not retry, because std already retries.
 - **Not used as facts.** `FILE_DISPOSITION_INFO_EX` version floors (1607, 1709 and 1809 are cited in conflicting sources). The NTFS-only restriction. The claim that the name "disappears at once" (the sources disagree on when removal happens). The FSCTL_ENUM_USN_DATA admin requirement, which is an expectation. Zero allocation for resident files. The `GetCompressedFileSizeW`-follows-symlinks claim was verified from the doc and is kept only as a test oracle.
 
-## 4. Open questions for benchmarks on a real machine (all open)
+## 4. Questions measured on a real machine (answered 2026-11-21)
 
-1. **Enumeration cost.** Compare FindFirstFileExW (basic) against the `FileIdExtdDirectoryInfo` batch at 64 KiB, 256 KiB and 1 MiB buffers, with and without `LARGE_FETCH`. Measure cold and warm, on a generated 1M-file tree and on a real tree. dusage already prints files/s.
-2. **Thread sweep.** Run 1x, 2x, 4x and 8x cores. Find out whether the work is syscall-bound or serialized by filter drivers.
-3. **Protection effect.** Scan and delete the same tree with real-time protection on and with the folder excluded. Measure only. Do not recommend turning protection off.
-4. **Delete strategy.** Compare serial `remove_dir_all` against the item 7 prototype, and classic against POSIX disposition. Record the error categories from item 6.
-5. **Allocation fidelity.** Compare `AllocationSize`, `GetCompressedFileSizeW` and Explorer "Size on disk" on fixtures: compressed (`compact /c`), sparse, small resident files, a named stream, a hardlink pair, and a junction. Check whether `AllocationSize` includes named streams.
-6. **FileId semantics.** Confirm that hardlinks share a FileId. Check the behaviour on ReFS, Dev Drive and FAT (zero or unsupported?). The `fsutil file queryFileID` syntax must be verified first.
-7. **Current reparse gap.** Confirm that `is_symlink()` returns true for junctions and false for a live DFS or dedup reparse directory, and that dusage currently recurses into it. Reproduce on a fixture before fixing.
-8. **Privileges.** Check whether `CreateFileW(\\.\C:, GENERIC_READ)` fails for a non-elevated token, and whether `FSCTL_QUERY_USN_JOURNAL` and `FSCTL_ENUM_USN_DATA` behave differently with and without elevation. Check the journal state on C:.
-9. **Junction at top level.** Confirm whether fastdel's `remove_dir_all` removes only the link when it is handed a top-level junction. The lane 5 claim is unverified.
-10. **POSIX delete.** Confirm whether `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` works on the target build, and when the name disappears.
-11. **Overcount.** Measure the hardlink overcount on a real pnpm store or `.git` tree, using FileId dedup as the reference.
-12. **Long paths.** Delete a path over 260 characters with and without the `\\?\` prefix.
+All twelve ran on DOOMBRINGER (Windows 11 10.0.26300, i7-13700KF, 24 threads, 48 GB, three
+local NTFS volumes) with the harness in `bench/windows/`. Every number below is that harness's
+output; `docs/BENCHMARKS.md` ("Windows (DOOMBRINGER)") holds the tables, the conditions
+record and the caveats. Re-run the harness rather than trusting this list if the scanner moves.
+
+1. **Enumeration cost. Answered.** The batch the tool already ships is the fastest spelling on
+   the real tree — 5334 ms for `C:\Windows` against 6429 ms for the plain `FindFirstFileExW`
+   walk — and level with it on a generated 1M-file tree (206.8 against 265.7 ms). Buffer size
+   is not a lever: 64 KiB, 256 KiB and 1 MiB land inside one another's spread, so the 64 KiB
+   default stays. `FIND_FIRST_EX_LARGE_FETCH` takes 25% off the plain walk on flat and wide
+   trees (265.7 → 198.7 ms) and costs 8% on the deep real tree (6429 → 6942 ms), so it is not
+   worth a second code path. The per-directory cost is what dominates: 1M entries in 1000
+   directories enumerate at 3.8M/s, while `C:\Windows` pays 41k/s for 264k entries arriving
+   from 68k directory opens.
+2. **Thread sweep. Answered, and the default changed with it.** Both shapes plateau at eight
+   workers, and past that the directory-heavy real tree is slower: 752 ms at 8 threads, 755 at
+   16, 795 at 24, 850 at 32. That is a latency ceiling, not a CPU one — 24 hardware threads
+   exist and the eighth worker already reaches the wall. `native::MAX_WORKERS` is now 8 on
+   Windows, so the default keeps the throughput and halves the workers; Linux keeps its
+   inherited 4..16 clamp, which is unswept above 2 vCPUs rather than measured. The
+   "4x cores" hypothesis is dead.
+3. **Protection effect. Measured in the elevated half of the harness.** `admin.ps1` runs the
+   same scan and the same delete with real-time protection on and with the fixture root
+   excluded, and removes the exclusion before it returns. Measurement only: nothing here
+   recommends turning protection off.
+4. **Delete strategy. Answered.** Parallelism is the whole win. `fastdel` deletes a 20k-file
+   tree in 514 ms where serial `remove_dir_all` takes 1231 ms and the handle-based serial walk
+   1225 ms (POSIX) or 1279 ms (classic); on 5k × 128 KiB files it is 189 ms against 431, 419
+   and 424. The dispositions are a tie, so the POSIX-first-with-classic-fallback order stays.
+   Every row ended with zero errors in every category from item 6.
+5. **Allocation fidelity. Answered.** `AllocationSize` follows compression (1,048,576 →
+   196,608) and sparseness (→ 0) exactly and agrees with `GetCompressedFileSizeW` on both; it
+   reports 8 bytes for a one-byte resident file where `GetCompressedFileSizeW` reports 1; and
+   it **does not include named streams** — a 4-byte file with a 1 MiB alternate stream reports
+   8. Item 8's open question is closed, and `--streams` stays opt-in for that reason.
+6. **FileId semantics. Answered for NTFS.** Hardlinks share one 128-bit `FileId`, and
+   `fsutil file queryFileID <path>` (no `=`) prints the same value the handle API returns.
+   ReFS, Dev Drive and FAT come from the VHDX fixtures in the elevated half.
+7. **Reparse gap. Closed and confirmed closed.** `is_symlink()` is true for a junction on this
+   build, and the tool no longer depends on it: it tests `FILE_ATTRIBUTE_REPARSE_POINT`, so
+   the DFS and dedup tags `is_symlink()` misses fall under the same rule. A junction fixture
+   scans as 8 files and 1 directory with its target counted once. `find` not listing a link
+   without `--follow` is asserted by `tests/search_cli.rs` and is a documented choice.
+8. **Privileges. Answered.** Opening `\\.\C:` or `\\.\D:` fails with error 5 for a
+   non-elevated token and succeeds elevated, which is why `--mft` documents an administrator
+   shell.
+9. **Junction at top level. Answered.** `fastdel` unlinks a top-level junction and leaves its
+   target alone; `tests/fastdel_cli.rs::junctions_unlinked_not_followed` pins it.
+10. **POSIX delete. Answered.** `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` is accepted on this
+    build. While the handle is open the name resolves but refuses to open (error 5, delete
+    pending); it is gone once the last handle closes. Since it is also no faster than the
+    classic path, the fallback order stays as it is.
+11. **Overcount. Answered, and 5-10% is far too low.** `C:\projects`: 3.58 GB naive against
+    2.95 GB with `--dedup-hardlinks`, 21.4%. `C:\forge`: 6.51 against 4.53 GB, 43.7%. The
+    pnpm store itself is 0%, which is the control that explains it: its links point into
+    project trees, and a link whose other name is outside the root is counted once.
+12. **Long paths. Answered.** A 393-character path opens and deletes with the verbatim prefix,
+    which is what the tool always uses. This build also has `LongPathsEnabled=1`, so the plain
+    spelling works here too; the prefix is what makes it work where that flag is off.
 
 ## 5. Remaining work
 
-- Validate `--mft` and the USN watch path in an elevated shell on a real NTFS volume; compare `--mft` totals against the batched backend and robocopy.
-- Run the benchmark list in section 4 and record results; decide the default thread count from the thread sweep.
+- The elevated half of `bench/windows/admin.ps1` — real-time protection A/B, `--mft`
+  against the batched backend and `robocopy /L /E /XJ`, the USN `--watch` path, the
+  cold-cache pass and the FAT32/ReFS FileId checks — needs one administrator approval on
+  the machine and is the only part of section 4 still owed.
+- Run the benchmark list in section 4 and record results: done 2026-11-21, and the thread
+  sweep decided the default (8 workers on Windows, `native::MAX_WORKERS`).
 - Item 11: Dev Drive guidance in the docs.
 - Done in 0.5.0: the tools merged under subcommands in one binary (`dusage
   scan|big|search|find|prune|du`), with the `fastdel` binary and `dusage fastdel|del`
@@ -226,9 +278,19 @@ directory-entry noise.
 
 **Open.**
 
-- A raw `getdents64` enumerator (own syscall, no `read_dir` allocation per entry) and
-  `statx` with `STATX_MNT_ID` batching are unexplored; the current backend is one syscall
-  per entry, the same as `du`'s, and wins only on parallelism and on doing less per entry.
+- The raw `getdents64` enumerator and the per-entry `statx` this list used to call
+  unexplored are the backend as shipped (`src/unix/enumerate.rs`, since #45): one
+  `getdents64` per directory into a reused buffer and one `statx` per entry. Measured at
+  48a92f6 on the 4-vCPU container: `scan /usr` costs 267,507 `statx`, 35,572 `getdents64`,
+  17,774 `openat` and 35,536 `close` for 180,451 entries, i.e. exactly one stat per entry,
+  and 34% of its instructions are in `malloc`/`free` from the per-entry name allocation.
+  Four candidate changes were measured and rejected: a 256 KiB batch and a SWAR scan for
+  each record's NUL are inside the run-to-run spread (the SWAR scan is 2.4% more
+  instructions on 12-byte names), the `statx` mask cannot be trimmed because
+  `--newerat`/`--newerct` and the ownership tests read every field `STATX_BASIC_STATS`
+  fills, and `STATX_MNT_ID` adds nothing because the same call already returns the device.
+  What is left is `io_uring`-style batching, which the zero-dependency rule and the
+  read-only contract both argue against.
 - Thread sweep and cold-cache numbers on a real machine (2 vCPUs here, and the machine is a
   container on overlayfs, so delete timings are not comparable to ext4 or btrfs).
 - `--watch` under `max_user_watches` pressure: the fallback is implemented (full rescans)
@@ -327,18 +389,19 @@ output. Read the case ids there — `search-rare`, `search-common`, `search-ci`,
 `search-multiline`, `search-gzip`, `search-files-with-matches`, `find-name`,
 `find-path`, `find-type`, `find-expr`, `du-s`, `du`, `threads-scan-*`,
 `threads-search-*` — rather than a table copied here, because a copy goes stale
-at the next merge. At the commit the tables were last generated at (323bf88,
-2 vCPUs, warm cache) every content row is ahead: the output-heavy ones at
-`search-count` 0.69x, `search-files-with-matches` 0.69x,
-`search-only-matching` 0.84x, `search-multiline` 0.88x and `search-common`
-0.76x, the plain ones at `search-rare` 0.94x, `search-regex` 0.90x,
-`search-regex-nomatch` 0.94x and `search-ci` 0.91x (they were 1.02–1.10x two
-rounds ago, and callgrind counts the literal scan 25-28% cheaper and the regex
-candidate scan 29% cheaper rather than that being drift alone). `find` meets its
-reference on every row but one — `find-name` 0.71x, `find-path` 0.98x,
-`find-expr` 0.99x, `find-type` 1.03x — and both `du` rows are ahead of GNU `du`
-at 0.58–0.60x with identical totals. The content row still behind is
-`search-multiline-unicode` at 1.15x.
+at the next merge. The ratio there is dusage over the fastest reference, so **below
+1.00x is dusage ahead** — an earlier revision of this paragraph read that backwards and
+called 0.94x "behind". At the commit the tables were last generated at (2cdb809, a
+4-vCPU container, warm cache) the metadata rows win outright (`scan` 0.27x, `du`
+0.28-0.35x, `find-name` 0.59x, `find-path` 0.70x, `find-type` 0.71x, `find-expr` 0.99x),
+the output-heavy content rows are well ahead (`search-files-with-matches` 0.69x,
+`search-count` 0.70x, `search-multiline` 0.75x, `search-common` 0.80x,
+`search-only-matching` 0.84x), and the plain content rows are level with `ripgrep`
+(`search-rare` 1.04x, `search-regex` 1.05x, `search-regex-nomatch` 1.01x, `search-ci`
+0.97x) — inside the ±10% that a shared container moves those rows between passes, and
+behind on one row, `search-multiline-unicode` at 1.15x. The suite cannot resolve anything
+smaller than that; `docs/BENCHMARKS.md` says so in its noise bullet and the
+`bench/records/` pair is what a before/after claim has to cite.
 
 **Known limits, each an open item.**
 
@@ -385,7 +448,15 @@ at 0.58–0.60x with identical totals. The content row still behind is
 
 **Open questions worth measuring later.**
 
-- Where the time goes in `-o`: the match loop or the retained output.
+- **Answered: where the time goes in `-o`.** Not in the printer. Callgrind over
+  `/usr/local/go` at 48a92f6, one thread: `-o` costs 367.9M instructions against 333.5M
+  for the same query printed as lines and 299.6M for `-c`; inside the `-o` run the
+  per-match loop (`block_matches`, 202.6M, most of it the SIMD literal scan) is 55%, the
+  allocations of the per-match records and their pooled text are ~16%, and
+  `SearchStream::file` is 5.8% (21.4M). So the lever is the match loop and what it
+  allocates per file, not how the records are written: the 0.6 round floors those buffers
+  and counts `-o` 367.9M -> 363.3M and the plain mode 333.5M -> 321.7M, where a rewritten
+  printer would chase 6%.
 - Whether the literal fast path is worth a multi-byte (Two-Way or memchr-style)
   search for needles longer than a couple of bytes.
 - Whether the expression walk can be parallelised per directory without losing
@@ -400,31 +471,34 @@ the third arm beside `src/unix/` and `src/win/`. Two things prove it, in this or
 cross-check for `x86_64-apple-darwin` from Linux — `cargo check`, `cargo check --tests` and
 `cargo clippy --all-targets -D warnings` — and a `macos-15-intel` CI leg that runs the same
 format, lint, test and release-build steps as the other platforms on a real Mac. That leg is
-green: 796 tests pass, 0 fail (634 unit, 162 across the seven integration suites). The
-cross-check proves the `cfg` wiring, the types and that the FFI declarations compile, and
-nothing about symbols or layouts; the runner is what proves those. arm64 is still untested —
-`macos-15-intel` is x86_64 only and every `$INODE64` alias is `cfg`-gated off for arm64,
-whose exports are already 64-bit wide.
+green, so the symbols resolve and the layouts hold on x86_64: everything the cross-check
+could not prove, the runner proved. Cross-checking remains the fast gate — it proves the
+`cfg` wiring, the types and that the FFI declarations compile — and arm64 is still unrun,
+with its own bindings, so nothing here speaks for it; MRI-14 carries that work and the runner
+schedule.
 
 **Done.** Enumeration is `open` + `fdopendir` + `readdir$INODE64`, with `fstatat$INODE64`
 per entry against the open directory descriptor, so `alloc` is `st_blocks * 512` and
 `file_id` is `dev << 64 | ino` exactly as on Linux. Deletion is `unlink`/`rmdir`, path-based
-and never following a symlink. `--watch` is kqueue. The guard refuses `/`, the system trees,
-`/Users`, `$HOME`, `/opt` and every mount root `getmntinfo` reports. `-fstype` answers from
-the same mount table, keyed by the device `stat` reports for each mount point.
+and never following a symlink. `--watch` is kqueue. `df` reads `statfs$INODE64` — not
+`statvfs`, whose Darwin block counts are 32-bit and which carries no type name — and the
+mount table behind both it and the guard is `getmntinfo$INODE64`. The guard refuses `/`, the
+system trees, `/Users`, `$HOME`, `/opt` and every mount root the kernel reports, wherever it
+is mounted; `-fstype` answers from the same table, keyed by the device `stat` reports for
+each mount point.
 
 **Learned by running.** Four facts that no amount of cross-checking produced, each with the
 consequence it has for the next change here.
 
 - **A 64-bit caller must bind `$INODE64`, and `cargo check` cannot know it.** Darwin's
-  headers resolve `readdir`, `stat`, `lstat`, `fdopendir`, `fstatat` and `getmntinfo` onto
-  suffixed symbols, and the suffixed and plain versions are not interchangeable: the plain
-  `fdopendir` allocates the stream in the legacy 32-bit record format, so *every* listing
-  came back empty — 52 of 629 tests on the first macOS run — and the plain `getmntinfo`
-  fills the legacy `struct statfs` instead of `__DARWIN_STRUCT_STATFS64`, so the record count
-  is right and every mount point and type name reads as zeroes. Two failures, one rule:
-  symbols resolve at link time and nowhere earlier, so a new `extern "C"` name here is
-  verified by the CI leg or not at all.
+  headers resolve `readdir`, `stat`, `lstat`, `fdopendir`, `fstatat`, `statfs` and
+  `getmntinfo` onto suffixed symbols, and the suffixed and plain versions are not
+  interchangeable: the plain `fdopendir` allocates the stream in the legacy 32-bit record
+  format, so *every* listing came back empty — 52 of 629 tests on the first macOS run — and
+  the plain `getmntinfo` fills the legacy `struct statfs` instead of
+  `__DARWIN_STRUCT_STATFS64`, so the record count is right and every mount point and type
+  name reads as zeroes. Two failures, one rule: symbols resolve at link time and nowhere
+  earlier, so a new `extern "C"` name here is verified by the CI leg or not at all.
 - **Refusing `/private` subtree-wide makes `$TMPDIR` unprunable.** macOS's `/var` and `/tmp`
   are `/private/var` and `/private/tmp`, and `$TMPDIR` lives at
   `/private/var/folders/<xx>/<hash>/T`, so a whole-subtree rule there produces a `prune`
@@ -447,16 +521,35 @@ consequence it has for the next change here.
 - **The kqueue feed has a directory budget.** A watch is per-descriptor, so the feed admits
   4096 directories; a tree past that gets no feed at all and every tick is a full rescan.
   That is a behaviour change from Linux, whose inotify feed covers every directory or gives
-  up as a whole. No issue is filed for raising the budget.
-- **FSEvents is deferred.** It needs CoreFoundation, which zero dependencies rules out for
-  this port. kqueue is what shipped. No issue is filed for the FSEvents feed.
-- **arm64 is unverified, on a clock.** Nothing in this repository has run it: the
-  `macos-15-intel` label is Intel-only and GitHub retires x86_64 macOS runners in August
-  2027, so an arm64 answer is needed before then.
-- **`struct statfs` is the header's layout, and the leg re-proves it.** The 2168-byte shape,
-  with `f_fstypename` at 72 and `f_mntonname` at 88, is `__DARWIN_STRUCT_STATFS64` from
-  Apple's `bsd/sys/mount.h`, which also declares `getmntinfo` as
-  `__DARWIN_INODE64(getmntinfo)`. The layout is therefore read rather than remembered, but
-  it is still re-checked on every macOS run: a record whose "mount point" is not an absolute
-  path, whose type name is not an alphanumeric word, or whose block size is not a power of
-  two dumps the record and fails `the_mount_records_are_read_at_the_right_offsets`.
+  up as a whole. Removing the ceiling is what MRI-13 exists to do.
+- **FSEvents is deferred, and MRI-13 carries it.** kqueue is what shipped for this port.
+  The reason recorded at the time was CoreFoundation against zero dependencies; the binding
+  turns out to be reachable — `#[link(name = "CoreFoundation", kind = "framework")]` is what
+  `core-foundation-sys` does with no build script — so the open question is the change feed's
+  session behaviour and its dropped-event path, not the dependency rule.
+- **`df` has no macOS oracle.** Every `dusage df` number on macOS is checked against the
+  kernel's own records and our arithmetic, not against BSD `df`: the row-comparison tests are
+  `cfg(target_os = "linux")` because BSD `df` has no `--version` and prints a different set
+  of columns. A comparison of total size alone against `df -P -k` is the missing check.
+- **The Darwin struct layouts are asserted on Linux and confirmed by the runner.**
+  `struct stat` (144 bytes), `struct dirent`, `struct kevent` and `struct statfs` (2168
+  bytes, `f_fstypename` at 72, `f_mntonname` at 88) are pinned by `size_of`/`offset_of`
+  assertions that run during the cross-check, which proves the declaration is self-consistent
+  and nothing about libSystem; the macOS leg is what confirms them, and the first run of it
+  is what caught the missing `fdopendir$INODE64` alias. Those assertions stay: they are the
+  guard against a layout drifting silently, and the mount-record test dumps the record when
+  one drifts.
+- **CI is on a clock, and the schedule lives in MRI-14.** The `macos-15-intel` runner label
+  is Intel-only and GitHub retires x86_64 macOS images; MRI-14 carries the date and the arm64
+  answer that outlives them, so this file does not restate either.
+
+**What the legs are for.** Four times now, a change has landed on `main` that no macOS build
+could see, and three of those came *after* the port existed: `tree` gated its own
+`path_alloc` to `target_os = "linux"` with only a Windows sibling, `tree_cli`'s `link_dir`
+had the same two-armed shape and left the function's body empty where a `bool` was required,
+`df` shipped with a native module for Windows and Linux and none for macOS so the platform
+did not compile at all, and the arm64 lint surfaced dead code that had never been reachable
+there. Each was written by someone who could not have known macOS was a target, because
+nothing on `main` built for it. That is the argument for the macOS legs, and it is the reason
+a change that cannot be built for them is not finished: the port was the first code written
+against this platform, not the last.

@@ -285,11 +285,12 @@ pub fn parse_threads(s: &str) -> Result<usize, String> {
     }
 }
 
-/// One worker per core, never fewer than four: the scan is syscall-bound, so a few extra
-/// threads help hide latency while heavy oversubscription (4x cores) measurably hurts.
+/// One worker per core, never fewer than four and never more than the platform's measured
+/// ceiling: the walk is syscall-bound, so a few extra threads hide latency while more than
+/// the ceiling only adds contention (docs/BENCHMARKS.md has the sweep).
 pub fn default_threads() -> usize {
     std::thread::available_parallelism()
-        .map(|n| n.get().clamp(4, 16))
+        .map(|n| n.get().clamp(4, crate::native::MAX_WORKERS))
         .unwrap_or(8)
 }
 
@@ -506,7 +507,9 @@ mod tests {
         for bad in ["0", "-1", "", "x", "1.5"] {
             assert!(parse_threads(bad).is_err(), "{bad:?}");
         }
-        assert!(default_threads() >= 4);
+        let d = default_threads();
+        assert!(d >= 4);
+        assert!(d <= crate::native::MAX_WORKERS, "{d}");
     }
 
     #[test]

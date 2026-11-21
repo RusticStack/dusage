@@ -18,7 +18,7 @@ USAGE:
 POSITIONAL (legacy, overridden by the matching option):
     root              directory to scan
     min_big           report files >= this size (bytes, or 300M / 1.5G / 512KiB; default 1G)
-    threads           worker threads (default: one per core, 4 to 16)
+    threads           worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux)
     top_n             rows to print per section (default 60)
 
 OPTIONS:

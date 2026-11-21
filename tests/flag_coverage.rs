@@ -58,6 +58,11 @@ const FRONT_ENDS: &[Front] = &[
         tables: Tables::Du,
     },
     Front {
+        command: Some("tree"),
+        base: &["."],
+        tables: Tables::Tree,
+    },
+    Front {
         command: Some("search"),
         base: &["x", "."],
         tables: Tables::Search,
@@ -102,6 +107,7 @@ const NEEDS_VALUE: &[(&str, Probe)] = &[
     ("--prefix", Probe::Value("x")),
     ("--size", Probe::Value("1M")),
     ("--type-add", Probe::Value("rust2:*.rs2")),
+    ("--sort", Probe::Value("name")),
     ("--watch", Probe::Help("1")),
 ];
 

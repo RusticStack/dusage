@@ -107,7 +107,7 @@ dusage <root> [min_big] [threads] [top_n]      (positional form, still supported
 |---|---|
 | `--min-big SIZE` | list files of at least SIZE (default `1G`; sizes like `300M`, `1.5G`, `512KiB`) |
 | `--top N` | rows per section (default 60) |
-| `--threads N` | worker threads (default: one per core, 4 to 16) |
+| `--threads N` | worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux) |
 | `--on-disk` | show size on disk next to file size |
 | `--by-ext` | add a breakdown by file extension |
 | `--dedup-hardlinks` | count a file with several hardlinks once |
@@ -155,11 +155,20 @@ you want for `dusage /`. Windows mount points are reparse points and are always 
 | `--one-filesystem` | no-op (mount points are links) | skips other devices | skips other devices |
 | Protected `fastdel` roots | volume roots, `Windows`, `Program Files`, `ProgramData`, profile | `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` | `/`, the `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/Applications`, `/cores` and `/dev` subtrees, `/Users`, `$HOME`, `/opt`, `/Volumes`, `/private/tmp`, `/private/var` and every mount root `getmntinfo` reports |
 
-macOS is built and cross-checked for `x86_64-apple-darwin`. Apple-silicon `arm64` is a
-different target and is **unverified**: nothing in this repository has run it. The Darwin
-`struct stat`, `struct dirent`, `struct kevent` and the `$INODE64` symbol aliases are pinned
-by compile-time `size_of`/`offset_of` assertions, which a cross-check executes but cannot
-prove against libSystem; a build and a test run on a Mac is what confirms them.
+macOS is cross-checked for `x86_64-apple-darwin` from Linux and CI runs the full suite on a
+real Intel Mac (`macos-15-intel`), which is what confirms the Darwin
+`struct stat`, `struct dirent`, `struct kevent` and the `$INODE64` symbol aliases that the
+compile-time `size_of`/`offset_of` assertions pin. Apple-silicon `arm64` is a different
+target with different bindings and is **unverified**: nothing in this repository has run it.
+MRI-14 carries that work and the runner schedule.
+
+The macOS legs are not there to re-prove the port; they are there so that a change cannot
+land without being built for this platform. The port was the first code written against
+macOS, not the last: `tree`'s Linux-only `path_alloc`, `tree_cli`'s two-armed `link_dir` and
+`df`'s missing macOS module all landed afterwards, each written by someone with no way to
+learn macOS was a target, because nothing on `main` built for it. A change that cannot be
+built for the platform it names is not finished, and these legs are the only thing that says
+so before a release does.
 
 ## fastdel
 
@@ -179,7 +188,7 @@ fastdel <root> <min_age> [prefixes] [threads] [--dry]   (positional form, still 
 | `--limit N` | rows listed by `--dry` (default 50) |
 | `--preset NAME` | prefixes, age and list limit from a saved preset (below) |
 | `--print-presets` | list the presets and exit |
-| `--threads N` | worker threads (default: one per core, 4 to 16) |
+| `--threads N` | worker threads (default: one per core, 4 to 8 on Windows, 4 to 16 on Linux) |
 
 ```powershell
 # cargo target folders anywhere under D:\work, any age; preview first

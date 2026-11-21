@@ -61,9 +61,10 @@ never does, `-U`, `-z` over a gzip tree built from the search tree on first run,
 expression form (`find-expr`, the sequential walk `-prune` and `-depth` force),
 `du -s`, `du`, and `scan` across a thread sweep.
 
-`bench/run.sh` warms every command once, then runs five interleaved rounds — one
-run of every row per round, so machine drift hits all tools alike — and reports
-the median of the five. Cold rows get their own pass with their own cache drop,
+`bench/run.sh` warms every command once, then runs `N` interleaved rounds — one run
+of every row per round, so machine drift hits all tools alike — and reports the
+median (five by default; the record behind this document used seven warm rounds and
+five cold ones, which the preamble states). Cold rows get their own pass with their own cache drop,
 and the RSS columns come from a pass of their own so the measurement never
 perturbs the clock. Warm and cold numbers are never mixed in one table.
 
@@ -112,11 +113,20 @@ sizes, the run counts, the RSS and cold methods, and one object per row with
 CSV on stdout keeps its original seven columns and appends `cache` and
 `maxrss_kb`.
 
-The file is **not tracked**: `.gitignore` lists it, so a fresh clone has no
-result file and `bench/summary.sh` exits 2 with "run bench/run.sh first" until
-you make one. The tables below are a snapshot of the run named in their
-preamble, kept here so the document reads on its own; re-running the suite
-replaces them.
+The working file is **not tracked**: `.gitignore` lists it, so a fresh clone has no
+result file and `bench/summary.sh` exits 2 with "run bench/run.sh first" until you
+make one. The tables below are a snapshot of the run named in their preamble, kept
+here so the document reads on its own; re-running the suite replaces them.
+
+A run whose numbers this document quotes is **archived** instead, under
+`bench/records/` as `<utc>-<commit>-<label>.json` next to the `<label>.md` that
+`bash bench/summary.sh <that json>` printed. `20261120T230616Z-48a92f6-before.json`
+and `20261120T232911Z-2cdb809-after.json` are the pair behind the tables and the
+prose below, and every claim of a change here can be re-rendered from them without
+re-running anything:
+```console
+$ bash bench/summary.sh bench/records/20261120T232911Z-2cdb809-after.json
+```
 
 `bench/summary.sh` renders that file as Markdown: one table per cache pass, one
 line per case, the fastest reference of the case named beside its own median,
@@ -124,21 +134,25 @@ both peak-RSS columns and their ratio. It is POSIX `sh` plus `awk`.
 
 ## The commit these numbers describe
 
-The run behind this document was made from `main` at `323bf88` (the merge of the
-third optimization round: the expression walk borrowing its entry text, building
-its paths in buffers it reuses, and answering the builtin ignore list once per
-directory instead of once per entry). Check that commit against
-`git log --oneline -1 -- src/ bench/` before quoting a table: if the scanner or
-the walk has moved since, the numbers describe the old code and the suite should
-be re-run. The header the run wrote is its conditions record, quoted as it stands:
+The run behind this document was made at `2cdb809` (branch `capy/search-output-perf`:
+the whole-file read buffer handed back to the thread, and a floor under the record
+buffers a printing mode reallocated per file). It is the second of two records in
+`bench/records/`: `20261120T230616Z-48a92f6-before.json` is the same suite at the
+merge before it, on the same machine, and the pair is what any before/after claim
+here rests on. Check the commit against `git log --oneline -1 -- src/ bench/`
+before quoting a table: if the scanner or the walk has moved since, the numbers
+describe the old code and the suite should be re-run. The machine is a 4-vCPU
+container on a shared host, not a quiet box, which is why the next section spends a
+bullet on noise. The header the run wrote is its conditions record, quoted as it
+stands:
 
 ```json
 {
   "schema": 1,
-  "generated": "2026-11-20T15:18:06Z",
+  "generated": "2026-11-20T23:28:15Z",
   "machine": {
     "uname": "Linux 6.1.158+ x86_64",
-    "cpus": 2,
+    "cpus": 4,
     "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
     "rg": "ripgrep 14.1.0",
     "grep": "grep (GNU grep) 3.11",
@@ -146,8 +160,8 @@ be re-run. The header the run wrote is its conditions record, quoted as it stand
     "du": "du (GNU coreutils) 9.4"
   },
   "runs": {
-    "warm": 5,
-    "cold": 3,
+    "warm": 7,
+    "cold": 5,
     "rss": 3
   },
   "rss_method": "gnu-time (/usr/bin/time -v, maxrss of the largest process in the command)",
@@ -155,8 +169,8 @@ be re-run. The header the run wrote is its conditions record, quoted as it stand
   "trees": [
     {
       "root": "/usr",
-      "bytes": 7991131817,
-      "files": 180497
+      "bytes": 7868020188,
+      "files": 180451
     },
     {
       "root": "/usr/local/go",
@@ -182,8 +196,8 @@ peak-RSS figures. Cases with no reference row are the thread sweeps and the
 dusage-only variants; their `ref` columns are empty by design.
 
 ```console
-Generated 2026-11-20T15:18:06Z on Linux 6.1.158+ x86_64, 2 CPUs. Warm rows are medians of 5 alternating
-runs; cold rows are medians of 3, each preceded by a cache drop. Times in
+Generated 2026-11-20T23:28:15Z on Linux 6.1.158+ x86_64, 4 CPUs. Warm rows are medians of 7 alternating
+runs; cold rows are medians of 5, each preceded by a cache drop. Times in
 milliseconds; RSS is peak resident set, in MiB, measured in a pass of its own.
 
 RSS method: gnu-time (/usr/bin/time -v, maxrss of the largest process in the command)
@@ -192,38 +206,38 @@ RSS method: gnu-time (/usr/bin/time -v, maxrss of the largest process in the com
 
 | Case | dusage ms | reference | ref ms | dusage/ref | dusage RSS MiB | ref RSS MiB |
 | --- | --- | --- | --- | --- | --- | --- |
-| scan | 375.6 | `du -sb` | 737.4 | 0.51x | 7 | 4 |
-| scan-t1 | 769.4 | - |  | - | 5 | - |
-| search-rare | 115.6 | `rg` | 122.5 | 0.94x | 12 | 9 |
-| search-common | 130.1 | `grep -rI` | 170.2 | 0.76x | 16 | 5 |
-| search-regex | 115.4 | `rg` | 128.6 | 0.90x | 10 | 9 |
-| search-regex-nomatch | 120.3 | `rg` | 128.5 | 0.94x | 9 | 9 |
-| search-ci | 119.1 | `rg` | 130.3 | 0.91x | 8 | 9 |
-| search-ci-fixed | 116.4 | - |  | - | 10 | - |
-| search-count | 114.7 | `grep -rIc` | 166.6 | 0.69x | 11 | 5 |
-| search-only-matching | 132.0 | `grep -rIo` | 157.4 | 0.84x | 17 | 5 |
-| search-multiline | 403.6 | `rg -U` | 459.8 | 0.88x | 47 | 59 |
-| search-multiline-unicode | 182.1 | `rg -U unicode` | 158.5 | 1.15x | 46 | 10 |
-| search-files-with-matches | 110.1 | `grep -rIl` | 158.7 | 0.69x | 9 | 5 |
-| search-gzip | 180.4 | `rg -z` | 733.3 | 0.25x | 17 | 7 |
-| find-name | 291.2 | `find -name` | 412.8 | 0.71x | 15 | 5 |
-| find-path | 39.8 | `find -path` | 40.6 | 0.98x | 6 | 3 |
-| find-type | 40.7 | `find -name` | 39.4 | 1.03x | 6 | 3 |
-| find-expr | 42.1 | `find -name` | 42.5 | 0.99x | 4 | 3 |
-| du-s | 455.7 | `du -s` | 755.1 | 0.60x | 19 | 4 |
-| du | 400.3 | `du` | 688.8 | 0.58x | 20 | 4 |
-| threads-scan-1 | 723.2 | - |  | - | 5 | - |
-| threads-scan-2 | 360.2 | - |  | - | 7 | - |
-| threads-scan-4 | 393.3 | - |  | - | 7 | - |
-| threads-scan-8 | 403.9 | - |  | - | 9 | - |
-| threads-scan-16 | 410.9 | - |  | - | 11 | - |
-| threads-scan-default | 360.5 | - |  | - | 8 | - |
-| threads-search-1 | 128.8 | - |  | - | 12 | - |
-| threads-search-2 | 132.4 | - |  | - | 12 | - |
-| threads-search-4 | 123.1 | - |  | - | 16 | - |
-| threads-search-8 | 142.9 | - |  | - | 22 | - |
-| threads-search-16 | 161.2 | - |  | - | 33 | - |
-| threads-search-default | 144.9 | - |  | - | 15 | - |
+| scan | 269.5 | `du -sb` | 992.1 | 0.27x | 8 | 4 |
+| scan-t1 | 939.0 | - |  | - | 5 | - |
+| search-rare | 85.0 | `rg` | 81.7 | 1.04x | 10 | 10 |
+| search-common | 107.7 | `rg` | 133.8 | 0.80x | 20 | 11 |
+| search-regex | 91.6 | `rg` | 86.9 | 1.05x | 12 | 11 |
+| search-regex-nomatch | 86.3 | `rg` | 85.7 | 1.01x | 10 | 10 |
+| search-ci | 90.0 | `rg` | 93.1 | 0.97x | 12 | 11 |
+| search-ci-fixed | 88.7 | - |  | - | 10 | - |
+| search-count | 91.9 | `rg -c` | 132.0 | 0.70x | 11 | 10 |
+| search-only-matching | 115.2 | `rg -o` | 137.4 | 0.84x | 25 | 11 |
+| search-multiline | 272.8 | `rg -U` | 364.6 | 0.75x | 67 | 75 |
+| search-multiline-unicode | 121.8 | `rg -U unicode` | 106.2 | 1.15x | 47 | 11 |
+| search-files-with-matches | 81.8 | `rg -l` | 118.0 | 0.69x | 11 | 10 |
+| search-gzip | 161.3 | `rg -z` | 462.0 | 0.35x | 22 | 8 |
+| find-name | 314.7 | `find -name` | 531.9 | 0.59x | 15 | 5 |
+| find-path | 37.5 | `find -path` | 53.3 | 0.70x | 6 | 3 |
+| find-type | 35.9 | `find -name` | 50.7 | 0.71x | 6 | 3 |
+| find-expr | 49.0 | `find -name` | 49.4 | 0.99x | 4 | 3 |
+| du-s | 311.8 | `du -s` | 1011.6 | 0.31x | 22 | 4 |
+| du | 338.9 | `du` | 977.2 | 0.35x | 22 | 4 |
+| threads-scan-1 | 997.7 | - |  | - | 5 | - |
+| threads-scan-2 | 505.8 | - |  | - | 6 | - |
+| threads-scan-4 | 283.7 | - |  | - | 8 | - |
+| threads-scan-8 | 310.8 | - |  | - | 9 | - |
+| threads-scan-16 | 376.7 | - |  | - | 10 | - |
+| threads-scan-default | 268.9 | - |  | - | 7 | - |
+| threads-search-1 | 173.8 | - |  | - | 13 | - |
+| threads-search-2 | 162.1 | - |  | - | 13 | - |
+| threads-search-4 | 103.3 | - |  | - | 20 | - |
+| threads-search-8 | 164.3 | - |  | - | 41 | - |
+| threads-search-16 | 271.7 | - |  | - | 62 | - |
+| threads-search-default | 100.5 | - |  | - | 18 | - |
 
 Notes: warm pass, page cache untouched between runs
 
@@ -231,24 +245,24 @@ Notes: warm pass, page cache untouched between runs
 
 | Case | dusage ms | reference | ref ms | dusage/ref | dusage RSS MiB | ref RSS MiB |
 | --- | --- | --- | --- | --- | --- | --- |
-| scan | 380.6 | `du -sb` | 767.1 | 0.50x | 7 | 4 |
-| search-rare | 710.3 | `rg` | 989.9 | 0.72x | 12 | 9 |
-| search-common | 740.5 | `rg` | 1066.2 | 0.69x | 16 | 9 |
-| search-regex | 704.2 | `rg` | 1220.6 | 0.58x | 10 | 9 |
-| search-regex-nomatch | 719.3 | `rg` | 1100.5 | 0.65x | 9 | 9 |
-| search-ci | 647.0 | `rg` | 1022.0 | 0.63x | 8 | 9 |
-| search-ci-fixed | 961.1 | - |  | - | 10 | - |
-| search-count | 760.3 | `rg -c` | 1357.1 | 0.56x | 11 | 9 |
-| search-only-matching | 947.4 | `rg -o` | 1384.4 | 0.68x | 17 | 10 |
-| search-multiline | 943.0 | `rg -U` | 1526.8 | 0.62x | 47 | 59 |
-| search-multiline-unicode | 861.6 | `rg -U unicode` | 1462.3 | 0.59x | 46 | 10 |
-| search-gzip | 252.4 | `rg -z` | 1085.1 | 0.23x | 17 | 7 |
-| find-name | 334.8 | `find -name` | 410.7 | 0.82x | 15 | 5 |
-| find-path | 36.8 | `find -path` | 41.2 | 0.89x | 6 | 3 |
-| find-type | 42.0 | `find -name` | 40.5 | 1.04x | 6 | 3 |
-| find-expr | 41.9 | `find -name` | 40.6 | 1.03x | 4 | 3 |
-| du-s | 435.1 | `du -s` | 691.2 | 0.63x | 19 | 4 |
-| du | 436.0 | `du` | 762.2 | 0.57x | 20 | 4 |
+| scan | 285.6 | `du -sb` | 1000.7 | 0.29x | 8 | 4 |
+| search-rare | 557.6 | `rg` | 554.2 | 1.01x | 10 | 10 |
+| search-common | 567.8 | `rg` | 557.4 | 1.02x | 20 | 11 |
+| search-regex | 525.1 | `rg` | 512.0 | 1.03x | 12 | 11 |
+| search-regex-nomatch | 558.8 | `rg` | 556.4 | 1.00x | 10 | 10 |
+| search-ci | 580.5 | `rg` | 542.7 | 1.07x | 12 | 11 |
+| search-ci-fixed | 525.4 | - |  | - | 10 | - |
+| search-count | 578.5 | `rg -c` | 525.7 | 1.10x | 11 | 10 |
+| search-only-matching | 566.0 | `rg -o` | 536.9 | 1.05x | 25 | 11 |
+| search-multiline | 723.9 | `rg -U` | 957.8 | 0.76x | 67 | 75 |
+| search-multiline-unicode | 624.9 | `rg -U unicode` | 634.9 | 0.98x | 47 | 11 |
+| search-gzip | 182.2 | `rg -z` | 518.6 | 0.35x | 22 | 8 |
+| find-name | 324.8 | `find -name` | 470.8 | 0.69x | 15 | 5 |
+| find-path | 31.3 | `find -path` | 52.5 | 0.60x | 6 | 3 |
+| find-type | 31.8 | `find -name` | 49.9 | 0.64x | 6 | 3 |
+| find-expr | 46.5 | `find -name` | 51.1 | 0.91x | 4 | 3 |
+| du-s | 303.1 | `du -s` | 921.4 | 0.33x | 22 | 4 |
+| du | 285.7 | `du` | 1006.4 | 0.28x | 22 | 4 |
 
 Cold cache method: fadvise (posix_fadvise DONTNEED per file: file data evicted exactly, dentries and inodes retained, so metadata-only cases stay effectively warm)
 ```
@@ -276,9 +290,9 @@ Verbatim output of `bash scripts/perf-guard.sh` at the same commit:
 ```console
 case                      dusage_ms        ref     ref_ms    ratio base_ratio  verdict
 ------------------------ ---------- ---------- ---------- -------- --------  --------
-search-rare                   105.8         rg      114.4     0.92    1.028  ok
-search-regex-nomatch          105.9         rg      127.2     0.83    1.071  ok
-search-count                  118.6  grep -rIc      162.2     0.73    0.807  ok
+search-rare                    73.2         rg       74.3     0.99    1.028  ok
+search-regex-nomatch           77.4         rg       74.3     1.04    1.071  ok
+search-count                   81.1      rg -c      119.7     0.68    0.807  ok
 perf-guard: pass (tolerance 25%, 5 runs per row)
 ```
 
@@ -305,23 +319,39 @@ The ratio column is dusage over the fastest reference for that case, so below
 `1.00x` means dusage is ahead. A few observations that belong to the mechanism
 rather than to any single number:
 
-- **Every row that has a reference is at or ahead of it, except two.** The
-  output-heavy content cases (`search-count` 0.69x,
-  `search-files-with-matches` 0.69x, `search-only-matching` 0.84x,
-  `search-multiline` 0.88x, `search-common` 0.76x) get there by streaming results
-  as the walk reaches them instead of collecting them, and by a matching line
-  sharing its file's buffer through an offset rather than owning a `Vec`. The
-  plain rows are 0.94x (`search-rare`), 0.90x (`search-regex`), 0.94x
-  (`search-regex-nomatch`) and 0.91x (`search-ci`) — they were 1.02–1.10x two
-  rounds ago, and the cause is traceable in instructions rather than in a timing
-  that drifts: callgrind counts the literal scan 25-28% cheaper and the regex
-  candidate scan 29% cheaper over the same trees. The two rows still behind are
-  `search-multiline-unicode` at 1.15x and `find-type` at 1.03x, both inside the
-  10-20% this box moves between passes.
-- **`-U` on ASCII files is ahead** (`search-multiline` 0.88x) while `-U` with
-  Unicode semantics is 1.15x: the ASCII path settles its matches from the line
-  holding each occurrence, and the Unicode one still decodes the lines that hold
-  non-ASCII bytes.
+- **The metadata rows win by a wide margin, the output-heavy content rows by a
+  clear one, and the plain content rows are level.** On the warm pass `scan` is
+  0.27x of `du -sb`, `du` 0.28-0.35x, `find-name` 0.59x, `find-path` 0.70x and
+  `find-type` 0.71x; the cases that print a lot — `search-files-with-matches`
+  0.69x, `search-count` 0.70x, `search-multiline` 0.75x, `search-common` 0.80x,
+  `search-only-matching` 0.84x — get there by streaming results as the walk
+  reaches them instead of collecting them, and by a matching line sharing its
+  file's buffer through an offset rather than owning a `Vec`. The plain rows
+  (`search-rare` 1.04x, `search-regex` 1.05x, `search-regex-nomatch` 1.01x,
+  `search-ci` 0.97x) are level with `ripgrep`, and the one row genuinely behind is
+  `search-multiline-unicode` at 1.15x.
+- **Read a ratio of two or three percent as a tie on this box.** A single run of a
+  content case here spans up to 2.6x (one `-o` row ranged 83-148 ms over thirteen
+  alternating rounds), so the seven-sample medians above move the plain rows by
+  ±10% between passes. The sharper instrument is an interleaved pair, one run of
+  dusage and one of the reference per round over twelve rounds: that measured
+  `search-rare` 0.92x, `search-regex` 0.91x, `search-ci` 1.00x, `search-common`
+  0.83x and `search-only-matching` 0.69x in one sitting. Both instruments are in
+  this commit's record.
+- **The ratio reads the other way from how this section once said it.** Below
+  `1.00x` is dusage ahead: an earlier revision described the 0.94x plain rows as
+  having "slipped behind ripgrep", which inverted the comparison. They were ahead
+  of it then and they are level with it now, on this box, for the reason the next
+  bullet gives.
+- **Content search is kernel-bound, so instruction cuts are small on the clock.**
+  Over `/usr/local/go` a `-o` run spends 0.07-0.11 s in user space against
+  0.20-0.26 s in the kernel; `scan /usr` on four threads spends 0.21 s of user
+  time against 0.77 s of system time. The plain content rows ask the kernel fewer
+  questions than `ripgrep` does (55.6k syscalls against 179k on the search tree:
+  `ripgrep` readlinks every entry, dusage reads `d_type`) and pay 319M
+  instructions against 303M for a case-insensitive literal, which is why they land
+  at parity rather than ahead. Where the clock can still move is per-file
+  syscalls, not instructions.
 - **`-z` is far ahead** (0.25x) because the decoder runs in this process over
   already-read bytes, with no second tool and no temporary files, and **`-c` is
   ahead of `grep -rIc`** (0.69x) because a count never builds the hits it counts.
@@ -353,19 +383,356 @@ rather than to any single number:
   match, while the expression form prints as it walks and holds 4 MiB. `du`'s
   19–20 MiB against GNU `du`'s 4 is the cost of the parallel walk that wins that
   row half the clock, not of anything it retains per file.
-- **The thread sweeps** (`threads-scan-*`, `threads-search-*`) are the evidence
-  for the 4..16 default, and they read differently on a 2-vCPU box: `scan` shows
-  the classic shape (723 ms on one thread, 360 at two, worse past the core
-  count), while `search` is already kernel-bound here and its sweep is flat —
-  129 ms on one thread against 145 at the default and 161 at sixteen, so on a
-  small box the default costs a few percent of parallelism it cannot use. On a
-  box with a different core count read the shape, not the absolute milliseconds.
+- **The thread sweeps** (`threads-scan-*`, `threads-search-*`) are the evidence for
+  the default, and on this 4-vCPU container they say the default already is the
+  right one. Measured as thirteen interleaved rounds of every count in one sweep
+  (the table's own rows are seven samples and carry the box's noise): `scan` runs
+  957 ms on one thread, 501 on two, 256 on four, 311 on eight and 344 on sixteen;
+  `search` runs 167, 163, 100, 105 and 133 ms the same way. Both are fastest at one
+  thread per core, and heavy oversubscription (4x cores, sixteen here) costs 35-58%.
+  `cli::default_threads` is `available_parallelism` clamped to 4..16, i.e. cores, so
+  the code and the measurement agree; the older prose's "4x cores" hypothesis is
+  refuted by both.
+- **The cold pass converges to parity on the content rows** here (1.00-1.10x against
+  `ripgrep`), which is what an I/O-bound run predicts: `fadvise` evicts the data and
+  both tools pay the same reads. One earlier three-sample cold pass reported
+  `search-common` at 1.40x; five interleaved evicted rounds of the same command
+  measured 0.88x, so read the three-sample cold content rows as the least
+  trustworthy numbers in the document.
+- **Measured and rejected this round**, each recorded rather than shipped: answering
+  a `-U` Unicode pattern line by line without the whole-file ASCII scan and UTF-8
+  validation (833M instructions against 523M, 9% slower — the per-line character
+  VM costs more than the whole-file byte program), a 256 KiB `getdents64` batch, a
+  SWAR scan for each record's name terminator (2.4% more instructions on 12-byte
+  names), and trimming the `statx` mask (`--newerat`/`--newerct` and the ownership
+  tests read every field `STATX_BASIC_STATS` fills). What did land is the buffer
+  reuse in `search`: callgrind counts `-o` 367.9M -> 363.3M instructions and the
+  plain mode 333.5M -> 321.7M, off the clock's radar and on the allocator's.
 
 Where the earlier revisions of this document quoted a "what changed since the
 last run" table, note that such a table cannot be generated: it compared runs
 from different commits on different machines. Re-measure with `bench/run.sh` on
 the commit in question instead, and keep both `results.json` files if the
 comparison matters.
+
+## Windows (DOOMBRINGER)
+
+Everything above was measured on a 2-vCPU Linux container. This section is the same tool on
+the machine the NTFS work was always meant for: a Windows 11 desktop (i7-13700KF, 24 threads,
+48 GB) with three local NTFS volumes. It answers the twelve questions in `docs/ROADMAP.md`
+section 4 and covers the validation owed in section 5, all of which had only ever been argued
+from source reading.
+
+**How to refresh it.** Same rule as the rest of this document: every number below is program
+output.
+
+```console
+$ cargo build --release --examples
+$ powershell -ExecutionPolicy Bypass -File bench/windows/fixtures.ps1
+$ bash bench/windows/run.sh                              # timings -> bench/windows/results.json
+$ powershell -ExecutionPolicy Bypass -File bench/windows/checks.ps1   # behaviour -> checks.json
+$ bash bench/summary.sh bench/windows/results.json       # the timing table below
+$ bash bench/windows/summary-checks.sh                   # the behaviour tables below
+```
+
+The elevated half — real-time protection, `--mft` against the batched backend and robocopy,
+the USN watch, the cold-cache pass and the FAT32/ReFS FileId checks — is
+`powershell -ExecutionPolicy Bypass -File bench/windows/admin.ps1` from an elevated shell. It
+appends its rows to `bench/windows/admin-results.jsonl` and to `checks.json`, and the two
+generators above pick them up. Those rows are **not** in the tables below: the script needs one
+administrator approval on the machine and had not run when this record was taken, so every
+question that depends on it (`3`, `8`, the cold pass and the FAT32/ReFS `FileId` rows) is
+marked owed below rather than answered from an unprivileged measurement dressed up as one.
+
+**The run behind this section is archived**, the same way the Linux record is:
+`bench/records/20261121T002231Z-4db47d2-windows.json` and the `.md` in its name printed by
+`bash bench/summary.sh`. It can be re-rendered without re-measuring anything:
+
+```console
+$ bash bench/summary.sh bench/records/20261121T002231Z-4db47d2-windows.json
+$ bash bench/windows/summary-checks.sh
+```
+
+It describes the code at `4db47d2` — the commit that caps the default Windows worker count at
+the measured plateau. `git diff 4db47d2 HEAD -- src/win/ src/cli.rs` is empty, so the scan and
+delete paths these rows measure have not moved since; later commits on that branch changed only
+this harness and the placement of imports inside the example binaries.
+
+### The record
+
+The header `bench/windows/record.sh` writes, quoted as it stands:
+
+```json
+{
+  "schema": 1,
+  "generated": "2026-11-21T00:22:31Z",
+  "machine": {
+    "uname": "Windows 10.0.26300.9974 x86_64 (DOOMBRINGER, i7-13700KF)",
+    "cpus": 24,
+    "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+    "volume": "D:",
+    "filesystem": "NTFS"
+  },
+  "runs": {
+    "warm": 5,
+    "cold": 3
+  },
+  "delete_runs": 3,
+  "rss_method": "not measured: Windows peak working set needs a per-process sampler this harness does not have",
+  "cold_method": "standby-list purge (NtSetSystemInformation SystemMemoryListInformation 2/3/4), elevated; bench/windows/admin.ps1"
+}```
+
+### The measured table
+
+Verbatim stdout of `bash bench/summary.sh
+bench/records/20261121T002231Z-4db47d2-windows.json`: one row per case with the dusage median. The reference columns are empty by design — there is no `grep`, `du` or
+`find` on Windows to compare against — and so are the peak-RSS columns, which this harness
+does not fill.
+
+```console
+Generated 2026-11-21T00:22:31Z on Windows 10.0.26300.9974 x86_64 (DOOMBRINGER, i7-13700KF), 24 CPUs. Warm rows are medians of 5 alternating
+runs; cold rows are medians of 3, each preceded by a cache drop. Times in
+milliseconds; RSS is peak resident set, in MiB, measured in a pass of its own.
+
+RSS method: not measured: Windows peak working set needs a per-process sampler this harness does not have
+
+### Warm cache
+
+| Case | dusage ms | reference | ref ms | dusage/ref | dusage RSS MiB | ref RSS MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| scan-t1-tree1m | 328.0 | - |  | - | - | - |
+| scan-t2-tree1m | 235.0 | - |  | - | - | - |
+| scan-t4-tree1m | 188.0 | - |  | - | - | - |
+| scan-t8-tree1m | 141.0 | - |  | - | - | - |
+| scan-t16-tree1m | 142.0 | - |  | - | - | - |
+| scan-t24-tree1m | 141.0 | - |  | - | - | - |
+| scan-t32-tree1m | 145.0 | - |  | - | - | - |
+| scan-t1-Windows | 2448.0 | - |  | - | - | - |
+| scan-t2-Windows | 1518.0 | - |  | - | - | - |
+| scan-t4-Windows | 899.0 | - |  | - | - | - |
+| scan-t8-Windows | 752.0 | - |  | - | - | - |
+| scan-t16-Windows | 755.0 | - |  | - | - | - |
+| scan-t24-Windows | 795.0 | - |  | - | - | - |
+| scan-t32-Windows | 850.0 | - |  | - | - | - |
+| search-t1 | 376.0 | - |  | - | - | - |
+| search-t2 | 378.0 | - |  | - | - | - |
+| search-t4 | 276.0 | - |  | - | - | - |
+| search-t8 | 208.0 | - |  | - | - | - |
+| search-t16 | 233.0 | - |  | - | - | - |
+| search-t24 | 233.0 | - |  | - | - | - |
+| search-t32 | 199.0 | - |  | - | - | - |
+| enum-walk-tree1m | 265.7 | - |  | - | - | - |
+| enum-walk-large-fetch-tree1m | 198.7 | - |  | - | - | - |
+| enum-batch-64k-tree1m | 206.8 | - |  | - | - | - |
+| enum-batch-256k-tree1m | 210.5 | - |  | - | - | - |
+| enum-batch-1m-tree1m | 213.2 | - |  | - | - | - |
+| enum-walk-flat100k | 26.0 | - |  | - | - | - |
+| enum-walk-large-fetch-flat100k | 19.7 | - |  | - | - | - |
+| enum-batch-64k-flat100k | 22.2 | - |  | - | - | - |
+| enum-batch-256k-flat100k | 21.2 | - |  | - | - | - |
+| enum-batch-1m-flat100k | 20.6 | - |  | - | - | - |
+| enum-walk-tree1k_d100 | 60.2 | - |  | - | - | - |
+| enum-walk-large-fetch-tree1k_d100 | 54.4 | - |  | - | - | - |
+| enum-batch-64k-tree1k_d100 | 52.9 | - |  | - | - | - |
+| enum-batch-256k-tree1k_d100 | 58.2 | - |  | - | - | - |
+| enum-batch-1m-tree1k_d100 | 55.2 | - |  | - | - | - |
+| enum-walk-real | 6428.7 | - |  | - | - | - |
+| enum-walk-large-fetch-real | 6942.4 | - |  | - | - | - |
+| enum-batch-64k-real | 5334.1 | - |  | - | - | - |
+| enum-batch-256k-real | 5544.8 | - |  | - | - | - |
+| enum-batch-1m-real | 5324.7 | - |  | - | - | - |
+| delete-std-A | 1231.0 | - |  | - | - | - |
+| delete-serial-posix-A | 1225.0 | - |  | - | - | - |
+| delete-serial-classic-A | 1279.0 | - |  | - | - | - |
+| delete-parallel-A | 514.0 | - |  | - | - | - |
+| delete-std-B | 431.0 | - |  | - | - | - |
+| delete-serial-posix-B | 419.0 | - |  | - | - | - |
+| delete-serial-classic-B | 424.0 | - |  | - | - | - |
+| delete-parallel-B | 189.0 | - |  | - | - | - |
+
+Notes: warm pass, page cache untouched between runs```
+
+### What the behaviour checks say
+
+Verbatim stdout of `bash bench/windows/summary-checks.sh` over `bench/windows/checks.json`:
+
+```console
+Allocation fidelity: every number is the Win32 answer for the same file, read through the handle dusage uses.
+
+| fixture | EndOfFile | AllocationSize | GetCompressedFileSizeW | named streams | attributes |
+| --- | ---: | ---: | ---: | --- | --- |
+| resident.bin | 1 | 8 | 1 | ::$DATA=1 | Archive |
+| plain.bin | 1048576 | 1048576 | 1048576 | ::$DATA=1048576 | Archive |
+| comp.bin | 1048576 | 196608 | 196608 | ::$DATA=1048576 | Archive, Compressed |
+| sparse.bin | 1048576 | 0 | 0 | ::$DATA=1048576 | Archive, SparseFile |
+| ads.txt | 4 | 8 | 4 | ::$DATA=4 :hidden:$DATA=1048576 | Archive |
+| hl_a.txt | 16 | 16 | 16 | ::$DATA=16 | Archive |
+| hl_b.txt | 16 | 16 | 16 | ::$DATA=16 | Archive |
+| junction | 0 | 0 | 0 | - | Directory, ReparsePoint |
+| sub | 0 | 0 | 0 | - | Directory |
+
+File ids: hardlink pair hl_a.txt / hl_b.txt.
+
+| question | answer |
+| --- | --- |
+| hardlinks share one FileId | true |
+| FileId (high:low) | 00060000006994df0000000000000000 |
+| `fsutil file queryFileID <path>` | ok |
+| fsutil output | `File ID is 0x000000000000000000060000006994df` |
+
+File id support per volume:
+
+| volume | filesystem | FileIdInfo accepted | FileId | error |
+| --- | --- | --- | --- | --- |
+| D:\ | NTFS | true | 00050000000000050000000000000000 | - |
+| C:\ | NTFS | true | 00050000000000050000000000000000 | - |
+| E:\ | NTFS | true | 00050000000000050000000000000000 | - |
+
+Reparse points: fid\junction.
+
+| property | value |
+| --- | --- |
+| LinkType | Junction |
+| PSIsContainer | true |
+| attributes | Directory, ReparsePoint |
+| FILE_STANDARD_INFO Directory flag | true |
+
+`dusage scan fid`: 8 files, 1 dirs; `find` lists `ads.txt comp.bin hl_a.txt hl_b.txt plain.bin resident.bin sparse.bin sub sub/inner.txt`; the link target appears once.
+
+Long paths, deepest path 393 characters:
+
+| question | answer |
+| --- | --- |
+| LongPathsEnabled | true |
+| raw CreateFileW, no prefix | true (error -) |
+| raw CreateFileW, verbatim prefix | true (error -) |
+
+Hardlink overcount on real trees, `--dedup-hardlinks` as the reference:
+
+| root | names (naive) | names (dedup) | on disk naive GB | on disk dedup GB | overcount |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `C:\Users\KellHect\AppData\Local\pnpm\store` | 54030 | 54030 | 1.39 | 1.39 | 0% |
+| `C:\projects` | 127933 | 84345 | 3.58 | 2.95 | 21.4% |
+| `C:\Users\KellHect\.forge` | 27192 | 26939 | 6.51 | 4.53 | 43.7% |
+Elevation, opening the volume device:
+
+| device | elevated | CreateFileW(GENERIC_READ) | error |
+| --- | --- | --- | --- |
+| `\\.\C:` | false | false | 5 |
+| `\\.\D:` | false | false | 5 |
+
+POSIX disposition:
+
+| question | answer |
+| --- | --- |
+| FILE_DISPOSITION_INFO_EX accepted | true |
+| a second open while the first handle is still open | open failed 5 |
+| name gone after the last close | true |```
+
+### What the twelve questions came to
+
+Each answer is a sentence about a table above, not a second measurement.
+
+**1. Enumeration cost.** The batch the tool already ships is the fastest spelling on the real
+tree (`enum-batch-64k-real` 5334 ms against `enum-walk-real` 6429 ms) and level with the
+plain walk on the generated 1M tree (206.8 against 265.7 ms). Buffer size is not a lever:
+64 KiB, 256 KiB and 1 MiB land inside one another's spread on every tree, so the 64 KiB
+default stays. `FIND_FIRST_EX_LARGE_FETCH` takes 25% off the plain walk on the flat and wide
+trees (198.7 against 265.7 ms on the 1M tree) and *costs* 8% on the deep real tree (6942
+against 6429 ms), so it is not worth a second code path. The shape that matters is the
+per-directory cost: the same 1M entries enumerate at 3.8M/s when they sit in 1000
+directories and at 41k/s under `C:\Windows`, where 264k entries arrive from 68k directory
+opens.
+
+**2. Thread sweep.** Both shapes plateau at eight workers, and past that the directory-heavy
+real tree gets slower: `scan-t*-Windows` runs 2448, 1518, 899, 752, 755, 795 and 850 ms at
+1, 2, 4, 8, 16, 24 and 32 threads. That is a latency ceiling rather than a CPU one — 24
+hardware threads are available and the eighth worker already reaches the wall — which is
+what the default now encodes: one worker per core clamped to 4..8 on Windows
+(`native::MAX_WORKERS`), the same throughput as the old 4..16 clamp with half the workers.
+Linux keeps its old 4..16 clamp because nothing wider than a 2-vCPU box has ever been
+swept there — that 16 is inherited, **not** measured, and the only Linux sweep in this
+document (2 vCPUs, `threads-scan-*`) says a small box is already past its own plateau.
+
+**3. Real-time protection. Owed, not measured.** The elevated half of the harness measures the
+same scan and the same delete with Defender watching and with the fixture root excluded, and
+removes the exclusion when it returns. It has not run on this machine — it needs one
+administrator approval — so there is no protection number in this document, and nothing here
+recommends turning protection off.
+
+**4. Delete strategy.** Parallelism is the whole win and the disposition is not a lever.
+`delete-parallel-A` deletes a 20k-file tree in 514 ms where serial `remove_dir_all` takes
+1231 ms, the POSIX disposition 1225 ms and the classic one 1279 ms; the 5k x 128 KiB tree
+repeats the shape at 189 against 431, 419 and 424 ms. Every row ended with zero errors in
+every category, which is what the `errors` object on each row reports.
+
+**5. Allocation fidelity.** `AllocationSize` follows compression (1,048,576 -> 196,608) and
+sparseness (-> 0) exactly and agrees with `GetCompressedFileSizeW` on both. It reports 8 bytes
+for a one-byte resident file where `GetCompressedFileSizeW` reports 1, and — the open
+question in roadmap item 8 — **it does not include named streams**: a 4-byte file carrying a
+1 MiB alternate stream reports 8. That is why `--streams` is opt-in and why it costs a second
+pass.
+
+**6. FileId semantics.** Hardlinks share one 128-bit `FileId` (the `fileid` table: the same id
+from both names), and the `fsutil file queryFileID <path>` syntax needs no `=`. Every local
+volume here is NTFS and accepts `FileIdInfo`. The FAT32 and ReFS rows are **owed**: they come
+from small VHDX files the elevated half attaches for exactly that, and that run has not
+happened.
+
+**7. The reparse gap.** `is_symlink()` is true for a junction on this build, and the tool no
+longer depends on it: it tests `FILE_ATTRIBUTE_REPARSE_POINT`, so the DFS and dedup tags that
+`is_symlink()` misses fall under the same rule. The `reparse-scan` check shows the junction
+fixture scanned as 8 files and 1 directory with its target counted once. `find` not listing a
+link without `--follow` is asserted by `tests/search_cli.rs` and is a documented choice.
+
+**8. Privileges.** Opening the volume device fails with error 5 for a non-elevated token — the
+`elevation` table, measured here. The success side is **owed** with the rest of the elevated
+half, and it is the reason `--mft` documents an administrator shell.
+
+**9. Overcount.** Real pnpm-managed trees overcount far more than the 5-10% AGENTS.md
+recorded: `C:\projects` 3.58 GB naive against 2.95 GB with `--dedup-hardlinks` (21.4%), and
+`C:\forge` 6.51 against 4.53 GB (43.7%). The pnpm store itself is 0%, which is the useful
+control: its hardlinks point into project trees, and a link whose other name lies outside the
+root is still counted once.
+
+**10. Long paths.** The deepest fixture path is 393 characters. Both spellings open and
+delete it here, because this build has `LongPathsEnabled=1`; dusage uses the verbatim prefix
+unconditionally, so it does not depend on that policy. `dusage prune` deleted the whole
+393-character fixture in 973 us.
+
+**11. `--mft` and the USN watch. Owed, not measured.** Both come from the elevated half:
+`--mft` totals for a volume against the batched backend and `robocopy /L /E /XJ`, and a watch
+with files created and deleted under it, whose printed update is compared with what a full
+rescan would cost. A dry run of the watch outside this harness emitted about 33,800 update
+lines, more than half a megabyte of them per second, from a twelve-second watch over a 50-file
+directory — a feed that looks like it re-emits rather than filtering, which is roadmap item 9.
+Nothing from that dry run is in these tables.
+
+### Caveats for this section
+
+- **The antivirus is part of the measurement.** The first pass over the freshly built 1M tree
+  put the batched backend at twice the walk's time; the same rows on a quiet machine are
+  inside 10% of each other. `run.sh` settles before timing, warms the real system tree with one
+  untimed pass, and runs each enumeration backend in its own process, because a backend
+  measured last in a long-lived process came out at twice its solo time. Both traps are
+  written up in `bench/windows/NOTES.md`.
+- **Cold cache needs elevation, so the cold rows are owed.** Windows has no user-mode
+  `drop_caches`; the only honest cold pass purges the standby list and working sets
+  (`NtSetSystemInformation(SystemMemoryListInformation)`), which needs
+  `SeProfileSingleProcessPrivilege`. The harness now refuses to write a cold row when that
+  purge is refused, rather than labelling a warm number cold.
+- **The Linux clamp is not a measurement.** 4..16 on Linux is the number this repository
+  already shipped; the sweep below it was taken on a 2-vCPU container. Windows is the only
+  platform where the plateau has been measured, so 8 there is a result and 16 on Linux is a
+  default nobody has checked on hardware wide enough to test it.
+- **No peak RSS on Windows.** The Linux tables take it from `/usr/bin/time -v` or a `VmHWM`
+  sampler; this harness has neither, so the column is empty rather than guessed.
+- **`robocopy` is the oracle, with the limits the roadmap already records.** `/XJ` excludes
+  junctions, so a tree leaning on other reparse-point kinds is not comparable; the comparison
+  is reported per volume rather than as one verdict.
+- **One machine, one Defender configuration.** The plateau and the delete numbers belong to
+  this desktop, on an NVMe volume with real-time protection on. Read the shapes, not the
+  milliseconds, on a different box.
 
 ## Counts agree before timings mean anything
 
@@ -407,7 +774,10 @@ Two divergences, both explained:
 - **This VM drifts between runs.** Read the `min_ms`/`max_ms` columns in
   `results.json` before trusting a small gap; differences under roughly the
   spread are ties. Every comparison that mattered here was run as an alternating
-  sequence for exactly this reason.
+  sequence for exactly this reason, and on a shared 4-vCPU container the spread is
+  the headline: a content case's five runs spanned 84-222 ms in one pass, so the
+  warm ratios on the plain content rows carry ±10% and only a two-fold gap is worth
+  a sentence. `min_ms` is the closest thing in the file to an uncontended number.
 - **The trees are conventional, not adversarial.** `/usr` is a normal package
   mix; `/usr/local/go` is text-only and unusually friendly to a content
   scanner — no `.gitignore` files, few hidden entries, no `node_modules` or
