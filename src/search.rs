@@ -15,7 +15,7 @@ use crate::par_for_each;
 use crate::pattern::{Match, Pattern};
 use std::borrow::Cow;
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read};
@@ -166,6 +166,8 @@ pub struct SearchOptions {
     pub stop_on_nonmatch: bool,
     /// The byte printed wherever a path holds a separator (`--path-separator`).
     pub path_separator: Option<u8>,
+    /// Time every file's scan and keep the counters per directory (`--stats`).
+    pub dir_stats: bool,
     /// Between the fields of a matching line (`--field-match-separator`), `:` by default.
     pub field_match_sep: Vec<u8>,
     /// Between the fields of a context line (`--field-context-separator`), `-` by default.
@@ -262,6 +264,7 @@ impl SearchOptions {
             trim: false,
             stop_on_nonmatch: false,
             path_separator: None,
+            dir_stats: false,
             field_match_sep: b":".to_vec(),
             field_context_sep: b"-".to_vec(),
             context_sep: Some(b"--".to_vec()),
@@ -329,6 +332,29 @@ pub struct Stats {
     pub matches: u64,
     pub errors: ErrorCounts,
     pub elapsed: Duration,
+    /// What the scan cost per directory, keyed by each file's parent. Filled only under
+    /// [`SearchOptions::dir_stats`].
+    pub dirs: BTreeMap<PathBuf, DirStats>,
+}
+
+/// The scan's counters for the files directly inside one directory.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DirStats {
+    pub files: u64,
+    pub bytes: u64,
+    pub matches: u64,
+    /// Time spent opening, reading and matching the files, summed over the workers: on several
+    /// threads the directories add up to more than the run's wall clock.
+    pub scan: Duration,
+}
+
+impl DirStats {
+    fn add(&mut self, from: &DirStats) {
+        self.files += from.files;
+        self.bytes += from.bytes;
+        self.matches += from.matches;
+        self.scan += from.scan;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2502,8 +2528,23 @@ fn scan_file(
     // One scan buffer per thread: a fresh `vec![0u8; BLOCK]` per file zeroes 64 KiB that the
     // read is about to overwrite, which on a 162k-file tree is ten gigabytes of memset.
     let mut buf = scan_buffer();
+    if !o.dir_stats {
+        let res = scan_file_with(path, kind, o, stats, &mut buf);
+        recycle_buffer(buf);
+        return res;
+    }
+    let before = (stats.files_scanned, stats.bytes_scanned, stats.matches);
+    let t0 = Instant::now();
     let res = scan_file_with(path, kind, o, stats, &mut buf);
+    let scan = t0.elapsed();
     recycle_buffer(buf);
+    let dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
+    stats.dirs.entry(dir).or_default().add(&DirStats {
+        files: stats.files_scanned - before.0,
+        bytes: stats.bytes_scanned - before.1,
+        matches: stats.matches - before.2,
+        scan,
+    });
     res
 }
 
@@ -3704,6 +3745,14 @@ fn merge_stats(into: &mut Stats, from: &Stats) {
     into.bytes_scanned += from.bytes_scanned;
     into.matches += from.matches;
     into.errors.add(&from.errors);
+    for (dir, d) in &from.dirs {
+        match into.dirs.get_mut(dir) {
+            Some(have) => have.add(d),
+            None => {
+                into.dirs.insert(dir.clone(), d.clone());
+            }
+        }
+    }
 }
 
 /// Handle one line. Returns true when the file should stop being read (`-m` reached).
