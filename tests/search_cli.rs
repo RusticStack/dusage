@@ -1607,12 +1607,14 @@ fn null_data_splits_on_nul() {
     let f = Fixture::new("nulldata");
     let dir = f.root.join("nd");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("nul.dat"), b"aaa\0needle one\0ccc\0").unwrap();
+    // Not `nul.dat`: before Windows 11 a reserved device name keeps its meaning with an
+    // extension, so that write goes to the NUL device and the file never exists.
+    fs::write(dir.join("nulsep.dat"), b"aaa\0needle one\0ccc\0").unwrap();
     fs::write(dir.join("plain.txt"), "alpha needle beta\nsecond\n").unwrap();
 
     // A record ends at NUL, the record number counts records, and the output ends the same
     // way, so `dusage search --null-data … | xargs -0` works.
-    let nul = dir.join("nul.dat").display().to_string();
+    let nul = dir.join("nulsep.dat").display().to_string();
     let plain = dir.join("plain.txt").display().to_string();
     let rec = run(&["search", "--null-data", "-n", "needle"], &dir);
     assert_eq!(code(&rec), 0, "{}", stderr(&rec));
