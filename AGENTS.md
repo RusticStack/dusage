@@ -128,15 +128,21 @@ enqueued via `push`. It stops when the queue is empty and nothing is active.
 
 - Directory mtime = last direct-child create/delete (not recursive).
 - `DirEntry::metadata()` on Windows is served from the cached find data: no
-  extra syscall. "The tool is syscall-bound, so threads matter more than CPU"
-  is only a hypothesis; thread default stays 4x cores until benchmarked.
+  extra syscall. Measured 2026-11-21 (docs/BENCHMARKS.md, Windows section): the
+  walk is latency-bound and plateaus at eight workers on both a 1M-file tree and
+  `C:\Windows`, and 24 or 32 threads are 6-13% slower on the real tree, so the
+  default is one worker per core clamped to 4..8 (`native::MAX_WORKERS`).
+- Per-directory cost, not per-entry cost, is what a real volume pays: 1M entries
+  in 1000 directories enumerate at 3.8M/s, `C:\Windows` (264k entries from 68k
+  directories) at 41k/s.
 - `FILE_ID_EXTD_DIR_INFO` (`GetFileInformationByHandleEx`) returns
   AllocationSize and a 128-bit FileId per entry without opening each file.
 - std `remove_dir_all` already retries sharing violations; blind retries add
   nothing. fastdel reports final errors by category instead.
 - `robocopy /L /E /XJ` is a decent correctness oracle for directory sizes.
-- Hardlinks (pnpm stores, .git objects) inflate naive byte sums — reported by
-  the user as ~5-10%, not verified. `--dedup-hardlinks` counts each FileId once.
+- Hardlinks (pnpm stores, .git objects) inflate naive byte sums: measured at 21.4%
+  on `C:\projects` and 43.7% on `C:\forge` against `--dedup-hardlinks`, which
+  counts each FileId once. The 5-10% the user reported was an underestimate.
 - Tool and agent temp dirs can regenerate at
   ~100 GB/day — that's why fastdel exists.
 
@@ -165,15 +171,20 @@ Open:
 - Validate the USN `--watch` path on a real volume in an elevated shell (the
   MFT backend is validated and benchmarked; see README).
 - Run the benchmark questions in `docs/ROADMAP.md` (no speedup is measured yet).
-- Measure the Linux backends properly: the thread sweep and the cold-cache numbers in
-  README were taken on a 2-vCPU container, and a `getdents64`-level enumerator (raw
-  syscall, no `read_dir` allocation) is unexplored.
-- Keep the macOS runner labels alive. Both architectures now build and test on real Macs —
-  `macos-15-intel` for the `$INODE64` bindings and `macos-15` for the plain ones arm64 uses —
-  and what is left is coverage: labels retire (`macos-14` was already gone when the arm64 leg
-  was added), and MRI-14 tracks the schedule.
-  FSEvents is deferred (CoreFoundation against zero dependencies); the kqueue feed stops at
-  4096 watched directories and gives up wholesale past that. Details in `docs/ROADMAP.md`.
+- Measure the Linux backends properly: the cold-cache numbers in README were taken on a
+  2-vCPU container. The raw `getdents64` enumerator is shipped (#45) and the thread sweep
+  is measured at 13 interleaved rounds on a 4-vCPU container (one thread per core is
+  fastest for `scan` and `search`; 4x cores costs 35-58%), so what remains is `io_uring`
+  batching, which the zero-dependency and read-only rules both argue against.
+- Keep the macOS coverage alive. Both architectures build and test on real Macs —
+  `macos-15-intel` binds the `$INODE64` symbols and `macos-15` binds the plain ones arm64
+  uses — so what is left is coverage, not the platform: labels retire (`macos-14` was already
+  gone when the arm64 leg was added) and MRI-14 tracks the schedule. `getmntinfo` and
+  `struct statfs` are bound, so a volume root is refused wherever it is mounted and `-fstype`
+  answers from the kernel's table. FSEvents and the kqueue feed's 4096-directory budget are
+  MRI-13. The guard matches both the lexical and the canonical spelling of a path, because
+  `/etc`, `/tmp`, `/bin`, `/sbin` and `/var` are symlinks into `/private` there. Details in
+  `docs/ROADMAP.md`.
 
 ## Style
 

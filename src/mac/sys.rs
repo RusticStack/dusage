@@ -7,7 +7,9 @@
 
 #![allow(non_camel_case_types)]
 
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_char, c_int, OsString};
+use std::os::unix::ffi::OsStringExt;
+use std::path::PathBuf;
 
 // open (fcntl.h). BSD numbers these differently from Linux: `O_NONBLOCK` is 4, not
 // 0o4000, which is why the constant is reached through `crate::native::sys` and never
@@ -103,20 +105,20 @@ pub const MFSTYPENAMELEN: usize = 16;
 pub const MAXPATHLEN: usize = 1024;
 
 /// `MNT_NOWAIT` (mount.h): answer from the mount table the kernel already has, instead of
-/// waking every filesystem to refresh it. A dead network mount cannot then hang a walk
-/// that only wanted to know what is mounted.
+/// waking every filesystem to refresh it. A dead network mount cannot then block the query.
 pub const MNT_NOWAIT: c_int = 2;
 
-/// `struct statfs` (mount.h), the 64-bit Darwin layout — `__DARWIN_STRUCT_STATFS64`, the
-/// one `getmntinfo$INODE64` fills.
+/// `struct statfs` (mount.h), the 64-bit Darwin layout — `__DARWIN_STRUCT_STATFS64`, the one
+/// `statfs$INODE64` fills and `getmntinfo$INODE64` returns.
 ///
 /// This is how macOS answers "what is mounted, and of what type": there is no `/proc` to
-/// read. It is also why a device-keyed table needs a `stat` per mount — see
-/// [`StatFs::f_fsid`].
+/// read. Every counter is 64 bits here, which is why `df` reads this rather than `statvfs` —
+/// Darwin's `statvfs` block counts are `unsigned int` (`__darwin_fsblkcnt_t` in
+/// `sys/_types.h`), so a volume past 2^32 blocks overflows them.
 ///
 /// The legacy struct of the same name in that header is a different shape entirely
-/// (`short`/`long` counters, `f_fstypename` at 104, `MNAMELEN` 90 on the 32-bit-inode
-/// path), so a reader bound to the plain `getmntinfo` gets a plausible record count and no
+/// (`short`/`long` counters, `f_fstypename` at 104, `MNAMELEN` 90 on the 32-bit-inode path),
+/// so a caller bound to the plain `statfs` or `getmntinfo` gets a plausible record and no
 /// names at all.
 #[repr(C)]
 pub struct StatFs {
@@ -128,13 +130,13 @@ pub struct StatFs {
     pub f_files: u64,
     pub f_ffree: u64,
     /// A filesystem id, *not* a device number: Darwin's mount table has no `st_dev`. Two
-    /// mounts of the same filesystem share it, and it is not comparable with `dev_of`.
+    /// mounts of one filesystem share it, and it is not comparable with `dev_of`.
     pub f_fsid: [i32; 2],
     pub f_owner: u32,
     pub f_type: u32,
     pub f_flags: u32,
     pub f_fssubtype: u32,
-    /// NUL-terminated type name (`apfs`, `hfs`, `nfs`, ...), `MFSTYPENAMELEN` bytes.
+    /// NUL-terminated type name (`apfs`, `autofs`, ...), `MFSTYPENAMELEN` bytes.
     pub f_fstypename: [c_char; MFSTYPENAMELEN],
     /// NUL-terminated mount point, `MAXPATHLEN` bytes.
     pub f_mntonname: [c_char; MAXPATHLEN],
@@ -144,7 +146,49 @@ pub struct StatFs {
     pub f_reserved: [u32; 7],
 }
 
-// struct stat, struct dirent, struct statfs and the layout the parser relies on. These are the
+/// One fixed-width C string field, cut at its NUL.
+///
+/// The length never comes from anything but the terminator: a field with no NUL inside its
+/// width is not a name this layer can trust, so it yields `None` rather than a truncation.
+pub fn c_field<const N: usize>(field: &[c_char; N]) -> Option<&[u8]> {
+    // SAFETY: `field` is a live array of exactly `N` bytes and the slice borrows it for no
+    // longer than `field` lives.
+    let raw = unsafe { std::slice::from_raw_parts(field.as_ptr() as *const u8, N) };
+    let nul = raw.iter().position(|&b| b == 0)?;
+    Some(&raw[..nul])
+}
+
+/// The kernel's mount table: each mount point and its filesystem type name, in the order the
+/// kernel lists them.
+///
+/// `getmntinfo` hands back a pointer to an array it keeps and overwrites on the next call, so
+/// the records are copied out here and nothing below holds the pointer. A record whose names
+/// do not terminate is skipped rather than guessed at.
+pub fn mounts() -> Vec<(PathBuf, String)> {
+    let mut buf: *mut StatFs = std::ptr::null_mut();
+    // SAFETY: `getmntinfo` writes exactly one pointer into `buf`. A non-positive return is an
+    // error, checked before `buf` is read.
+    let n = unsafe { getmntinfo(&mut buf, MNT_NOWAIT) };
+    if n <= 0 || buf.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: the kernel returned `n` consecutive records at `buf`, valid until the next
+    // `getmntinfo` call, and nothing in the copy below makes one.
+    let records = unsafe { std::slice::from_raw_parts(buf, n as usize) };
+    records
+        .iter()
+        .filter_map(|fs| {
+            let point = c_field(&fs.f_mntonname)?;
+            let kind = c_field(&fs.f_fstypename)?;
+            Some((
+                PathBuf::from(OsString::from_vec(point.to_vec())),
+                String::from_utf8_lossy(kind).into_owned(),
+            ))
+        })
+        .collect()
+}
+
+// struct stat, struct dirent and the layout the parser relies on. These are the
 // documented 64-bit Darwin layouts; the values are asserted so a declaration that drifts
 // from them fails a cross-check rather than at runtime on a Mac.
 const _: () = {
@@ -222,16 +266,15 @@ extern "C" {
     pub fn lstat(path: *const c_char, buf: *mut StatBuf) -> c_int;
     #[cfg_attr(not(target_arch = "aarch64"), link_name = "stat$INODE64")]
     pub fn stat(path: *const c_char, buf: *mut StatBuf) -> c_int;
+    /// `int statfs(const char *, struct statfs *)`. `mount.h` declares it
+    /// `__DARWIN_INODE64(statfs)`, so a 64-bit caller binds the suffixed symbol — the same
+    /// rule `stat` follows, and the plain symbol fills the legacy struct instead.
+    #[cfg_attr(not(target_arch = "aarch64"), link_name = "statfs$INODE64")]
+    pub fn statfs(path: *const c_char, buf: *mut StatFs) -> c_int;
     /// `int getmntinfo(struct statfs **, int)`: fills `*mntbufp` with a pointer to an array
-    /// the kernel owns, and returns how many records it holds.
-    ///
-    /// The alias is not optional and not decorative. `mount.h` declares this
-    /// `__DARWIN_INODE64(getmntinfo)`, and the two symbols fill *different structs*: the
-    /// plain one fills the legacy `struct statfs` whose `long` block counters push
-    /// `f_fstypename` to 104, while `$INODE64` fills `__DARWIN_STRUCT_STATFS64`, the layout
-    /// declared above. Binding the plain name compiles, links and returns a record count,
-    /// and every string field then reads as zeroes — the same trap `fdopendir` set on the
-    /// first macOS run, one layer over.
+    /// the kernel owns and returns how many records it holds. Declared
+    /// `__DARWIN_INODE64(getmntinfo)`; on `arm64` the plain names are already the 64-bit ones,
+    /// which is why every alias here is gated the same way.
     #[cfg_attr(not(target_arch = "aarch64"), link_name = "getmntinfo$INODE64")]
     pub fn getmntinfo(mntbufp: *mut *mut StatFs, flags: c_int) -> c_int;
 }

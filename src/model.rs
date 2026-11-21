@@ -382,3 +382,36 @@ mod tests {
         assert_eq!((a.total(), a.access_denied, a.other), (3, 1, 2));
     }
 }
+
+/// A filesystem's name without the trailing separator, so one volume has one spelling.
+///
+/// The Windows API hands back a drive root as `E:\` from the volume list and as `E:` from a
+/// drive letter, and the same volume can arrive both ways; comparing them as strings is what
+/// made `df` print every volume twice. Stripping trailing separators on both sides is the
+/// normalisation, and the root itself (`/`, `\`) is left alone because it is a whole name.
+pub fn mount_label(raw: &str) -> String {
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        raw.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod mount_label_tests {
+    use super::mount_label;
+
+    #[test]
+    fn a_mount_label_has_no_trailing_separator() {
+        assert_eq!(mount_label("E:\\"), "E:");
+        assert_eq!(mount_label("E:"), "E:");
+        assert_eq!(mount_label("E:/"), "E:");
+        assert_eq!(mount_label("/dev/root"), "/dev/root");
+        assert_eq!(mount_label("/home/user/"), "/home/user");
+        // A root is a whole name, not an empty one.
+        assert_eq!(mount_label("/"), "/");
+        assert_eq!(mount_label("\\"), "\\");
+        assert_eq!(mount_label(""), "");
+    }
+}

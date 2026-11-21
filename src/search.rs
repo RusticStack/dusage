@@ -40,6 +40,10 @@ const MAX_PER_LINE: usize = 1024;
 /// How much match text one file pools before the rest of it is stored per record instead: a
 /// match's place in the pool is a `u32` pair.
 const POOL_MAX: usize = 1 << 30;
+/// The capacity a worker thread keeps for the next file's records and their pooled text, so a
+/// file of ordinary size costs no allocation at all.
+const HITS_FLOOR: usize = 64;
+const POOL_FLOOR: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -2403,6 +2407,11 @@ thread_local! {
     /// The scan buffer, allocated once per worker thread and handed back after every file.
     static SCAN_BUF: std::cell::RefCell<Vec<u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The buffer a mode that needs the whole file in memory reads into (`-U`, and the modes
+    /// that read the file there to expand or transcode it), kept per thread for the same
+    /// reason as the scan buffer.
+    static WHOLE_BUF: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     /// The line-level buffers a scan of one file needs. Allocating them per file is what made a
     /// 162k-file search sit at 250 MB resident: not the live data, but the freed blocks each
     /// arena keeps, which a trim threshold of 128 KiB brings back to 170 MB.
@@ -2441,6 +2450,22 @@ impl Lines {
         self.hits.clear();
         self.pool.clear();
     }
+}
+
+/// The thread's whole-file buffer, for the modes that read a file into memory.
+fn whole_buffer() -> Vec<u8> {
+    WHOLE_BUF.with(|b| {
+        let mut slot = b.borrow_mut();
+        if slot.capacity() == 0 {
+            slot.reserve(BLOCK);
+        }
+        std::mem::take(&mut *slot)
+    })
+}
+
+/// Give the whole-file buffer back, so the next file on this thread allocates nothing.
+fn recycle_whole(buf: Vec<u8>) {
+    WHOLE_BUF.with(|b| *b.borrow_mut() = buf);
 }
 
 fn scan_buffer() -> Vec<u8> {
@@ -2701,29 +2726,48 @@ fn scan_multiline(
     o: &SearchOptions,
     stats: &mut Stats,
 ) -> io::Result<Option<FileHits>> {
+    // One whole-file buffer per thread, handed back after every file, as the streaming path
+    // does with its block: a tree of 15k files otherwise allocates and copies every byte of it
+    // once per file. A compressed file is expanded into a buffer of its own, since what is
+    // searched is the expansion.
+    let mut buf = whole_buffer();
+    let res = scan_multiline_with(path, kind, o, stats, &mut buf);
+    recycle_whole(buf);
+    res
+}
+
+fn scan_multiline_with(
+    path: &Path,
+    kind: Kind,
+    o: &SearchOptions,
+    stats: &mut Stats,
+    buf: &mut Vec<u8>,
+) -> io::Result<Option<FileHits>> {
     let Some(mut f) = open_scan(path, kind)? else {
         return Ok(None);
     };
     stats.files_scanned += 1;
-    let mut data = Vec::new();
-    f.read_to_end(&mut data)?;
-    stats.bytes_scanned += data.len() as u64;
+    buf.clear();
+    f.read_to_end(buf)?;
+    stats.bytes_scanned += buf.len() as u64;
+    let mut expanded: Option<Vec<u8>> = None;
     if o.search_zip {
-        if let Some(expanded) = expand_stream(path, &data)? {
-            data = expanded;
+        if let Some(data) = expand_stream(path, buf)? {
             stats.bytes_scanned += data.len() as u64;
+            expanded = Some(data);
         }
     }
+    let data: &[u8] = expanded.as_deref().unwrap_or(buf);
     // The whole file at once: `find_all_in` decides once, rather than once per match,
     // whether a Unicode pattern has to read these bytes as characters.
-    let found = o.pattern.find_all_in(&data, usize::MAX);
+    let found = o.pattern.find_all_in(data, usize::MAX);
     let name = || path_text(path).into_owned();
     if found.is_empty() {
         let wants = o.files_without_matches || (o.include_zero && o.count) || o.passthru;
         return Ok(wants.then(|| FileHits {
             path: name(),
             hits: if o.passthru {
-                plain_lines(&data)
+                plain_lines(data)
             } else {
                 Vec::new()
             },
@@ -2735,7 +2779,7 @@ fn scan_multiline(
     }
     stats.matches += found.len() as u64;
     let mut hits = if o.passthru {
-        every_line(&data, &found)
+        every_line(data, &found)
     } else if o.only_matching {
         // Each record carries the line its match starts on, counted forward from the previous
         // record's line rather than from the start of the file.
@@ -2743,7 +2787,7 @@ fn scan_multiline(
         let mut pos = 0usize;
         let mut out = Vec::with_capacity(found.len());
         for m in &found {
-            let ls = line_start(&data, m.start);
+            let ls = line_start(data, m.start);
             if ls >= pos {
                 number += bytes::count_byte(&data[pos..ls], b'\n') as u64;
                 pos = ls;
@@ -2762,11 +2806,11 @@ fn scan_multiline(
     } else if o.count || o.files_with_matches || o.files_without_matches || o.quiet {
         Vec::new()
     } else {
-        matched_lines(&data, &found)
+        matched_lines(data, &found)
     };
     // `-c` counts the lines the matches cover, which is what a per-line mode would count.
     let lines = if hits.is_empty() {
-        matched_line_count(&data, &found)
+        matched_line_count(data, &found)
     } else {
         hits.iter().filter(|h| h.matched).count() as u64
     };
@@ -3107,6 +3151,20 @@ impl<'a> Scanner<'a> {
     }
 
     fn with_lines(o: &'a SearchOptions, lines: Lines) -> Self {
+        let mut lines = lines;
+        let want_lines = !o.count && !o.files_with_matches && !o.files_without_matches && !o.quiet;
+        // A file that prints records hands its buffers to the printer, so the thread gets an
+        // empty one back and would grow it from zero for the next file. A floor of a few KiB
+        // per worker thread turns a dozen reallocations per file into none for the files a
+        // tree is mostly made of, and is not paid by the modes that keep no records.
+        if want_lines {
+            lines
+                .hits
+                .reserve(HITS_FLOOR.saturating_sub(lines.hits.capacity()));
+            lines
+                .pool
+                .reserve(POOL_FLOOR.saturating_sub(lines.pool.capacity()));
+        }
         Scanner {
             o,
             carry: lines.carry,
@@ -3116,7 +3174,7 @@ impl<'a> Scanner<'a> {
             matches: 0,
             remaining_after: 0,
             last_emitted: 0,
-            want_lines: !o.count && !o.files_with_matches && !o.files_without_matches && !o.quiet,
+            want_lines,
             limit: o.max_count.unwrap_or(u64::MAX),
             stopped: false,
             line: lines.line,

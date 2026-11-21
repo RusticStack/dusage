@@ -22,7 +22,7 @@ use super::sys;
 use crate::model::{ErrorCounts, Kind, Stat};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, CStr, CString, OsStr, OsString};
+use std::ffi::{c_int, CStr, CString, OsStr, OsString};
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -652,7 +652,7 @@ pub fn dev_of(path: &Path) -> io::Result<u64> {
 /// Linux's `/proc/self/mountinfo` does.
 pub fn filesystem_types() -> HashMap<u64, String> {
     let mut out = HashMap::new();
-    for (point, name) in mounts() {
+    for (point, name) in sys::mounts() {
         if let Ok(dev) = dev_of(&point) {
             out.insert(dev, name);
         }
@@ -667,50 +667,7 @@ pub fn filesystem_types() -> HashMap<u64, String> {
 /// a volume under `/private/var/folders` mounted by a test harness) was invisible. The
 /// kernel's own table has no such blind spot.
 pub fn mount_roots() -> Vec<PathBuf> {
-    mounts().into_iter().map(|(point, _)| point).collect()
-}
-
-/// The mount table: mount point and filesystem type name, in the order the kernel lists
-/// them.
-///
-/// `getmntinfo` hands back a pointer to an array it keeps and overwrites on the next call,
-/// so the records are copied out here and nothing below holds the pointer.
-/// `MNT_NOWAIT` keeps a dead mount from blocking the query.
-fn mounts() -> Vec<(PathBuf, String)> {
-    let mut buf: *mut sys::StatFs = std::ptr::null_mut();
-    // SAFETY: `getmntinfo` writes exactly one pointer into `buf`. A non-positive return is
-    // an error, checked before `buf` is read.
-    let n = unsafe { sys::getmntinfo(&mut buf, sys::MNT_NOWAIT) };
-    if n <= 0 || buf.is_null() {
-        return Vec::new();
-    }
-    // SAFETY: the kernel returned `n` consecutive records at `buf`, valid until the next
-    // `getmntinfo` call, and the fresh slice does not outlive this copy.
-    let records = unsafe { std::slice::from_raw_parts(buf, n as usize) };
-    records
-        .iter()
-        .filter_map(|fs| {
-            let point = c_field(&fs.f_mntonname)?;
-            let kind = c_field(&fs.f_fstypename)?;
-            Some((
-                PathBuf::from(OsString::from_vec(point.to_vec())),
-                String::from_utf8_lossy(kind).into_owned(),
-            ))
-        })
-        .collect()
-}
-
-/// One fixed-width C string field, cut at its NUL.
-///
-/// Like a directory name, the length is never taken from anything but the terminator: a
-/// field with no NUL in its width is not a name this layer can trust, so it yields `None`
-/// rather than a truncated guess.
-fn c_field<const N: usize>(field: &[c_char; N]) -> Option<&[u8]> {
-    // SAFETY: `field` is a live array of exactly `N` bytes, and the slice borrows it for
-    // no longer than `field` itself lives.
-    let raw = unsafe { std::slice::from_raw_parts(field.as_ptr() as *const u8, N) };
-    let nul = raw.iter().position(|&b| b == 0)?;
-    Some(&raw[..nul])
+    sys::mounts().into_iter().map(|(point, _)| point).collect()
 }
 
 /// True when `e` lives on a different filesystem than `root_dev` (a mount point).
@@ -1291,13 +1248,14 @@ mod tests {
         for fs in records {
             let dump = record_dump(fs);
             let point =
-                c_field(&fs.f_mntonname).unwrap_or_else(|| panic!("no mount point\n{dump}"));
+                sys::c_field(&fs.f_mntonname).unwrap_or_else(|| panic!("no mount point\n{dump}"));
             assert!(
                 point.starts_with(b"/"),
                 "mount point {:?} is not absolute\n{dump}",
                 String::from_utf8_lossy(point)
             );
-            let kind = c_field(&fs.f_fstypename).unwrap_or_else(|| panic!("no type name\n{dump}"));
+            let kind =
+                sys::c_field(&fs.f_fstypename).unwrap_or_else(|| panic!("no type name\n{dump}"));
             assert!(
                 !kind.is_empty(),
                 "{:?} has no type name\n{dump}",
@@ -1321,7 +1279,7 @@ mod tests {
 
     #[test]
     fn the_mount_table_names_the_root_filesystem() {
-        let mounts = mounts();
+        let mounts = sys::mounts();
         assert!(!mounts.is_empty(), "the kernel reported no mounts");
         let (_, kind) = mounts
             .iter()
