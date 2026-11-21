@@ -1219,6 +1219,10 @@ impl Ref {
                 }
                 let mut c = Command::new(sh);
                 c.arg("-c").arg(line);
+                // Git's grep decides what `.` and a class match from the locale, and a test
+                // started outside Git Bash has none set: `^caf.$` then misses `café` and the
+                // byte-dot difference reads as gone. Pin it instead of inheriting it.
+                c.env("LC_ALL", "C.UTF-8");
                 c
             }
             None => {
