@@ -2,7 +2,7 @@
 name = "dusage"
 version = "0.5.0"
 edition = "2021"
-description = "Fast parallel disk-usage scanner and age-filtered pruner for Windows and Linux"
+description = "Fast parallel disk-usage scanner, content and path search, and age-filtered pruner for Windows, Linux and macOS"
 license = "MIT OR Apache-2.0"
 authors = ["RusticStack"]
 repository = "https://github.com/RusticStack/dusage"

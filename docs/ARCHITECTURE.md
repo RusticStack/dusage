@@ -164,9 +164,9 @@ separator (`std::path::MAIN_SEPARATOR`). JSON is one object containing every `Sc
 `elapsed_secs` as an f64 and `source` as a label. It must be valid JSON for any
 path (control chars, quotes, backslashes, non-BMP).
 
-### Platform layer (`src/win/*`, `src/unix/*`) — the `crate::native` surface
+### Platform layer (`src/win/*`, `src/unix/*`, `src/mac/*`) — the `crate::native` surface
 
-Both platforms implement exactly this, and nothing above the platform layer knows which
+All three platforms implement exactly this, and nothing above the platform layer knows which
 one is present:
 
 This is the whole surface — every item below is called from above the platform layer, so a

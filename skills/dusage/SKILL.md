@@ -1,18 +1,19 @@
 ---
 name: dusage
-description: Find what is using disk space on Windows or Linux and free it safely with the dusage and fastdel CLIs, and search file contents or paths with the same binary (a grep/rg and find replacement). Use when the user asks what is filling a drive or folder, why a disk is full, to clean up caches, build output, temp or agent folders, or to grep a tree or list files by name. Scans and searches are read-only; deletion only happens after the user approves an exact list.
+description: Find what is using disk space on Windows, Linux or macOS and free it safely with the dusage and fastdel CLIs, and search file contents or paths with the same binary (a grep/rg and find replacement). Use when the user asks what is filling a drive or folder, why a disk is full, to clean up caches, build output, temp or agent folders, or to grep a tree or list files by name. Scans and searches are read-only; deletion only happens after the user approves an exact list.
 argument-hint: "[drive or folder, e.g. C:\\ or /var]"
 ---
 
-# dusage: find and reclaim disk space on Windows and Linux
+# dusage: find and reclaim disk space on Windows, Linux and macOS
 
 `dusage` is one binary with four jobs: `scan` reports what uses space under a folder or
 drive, `big` lists the largest files, `search` greps file contents and `find` lists paths by
 name. `fastdel` (also `dusage prune` and `dusage del`) permanently deletes a folder's
 children that match a name prefix and an age. Nothing else here writes a byte. All of it
-ships from https://github.com/RusticStack/dusage for Windows 10/11 (NTFS) and Linux
-x86_64. macOS is not supported: tell the user and stop. `--mft` and `--streams` are
-NTFS-only features; on Linux they refuse or report zero.
+ships from https://github.com/RusticStack/dusage for Windows 10/11 (NTFS), Linux and macOS
+(Intel and Apple Silicon). Release binaries exist for Windows x64 and Linux x86_64 only; on
+macOS, build from source. `--mft` and `--streams` are NTFS-only features; on Linux and macOS
+they refuse or report zero.
 
 ## 1. Make sure the tools are available
 
@@ -53,6 +54,9 @@ curl -LO "https://github.com/RusticStack/dusage/releases/download/v$ver/dusage-$
 tar -xzf "dusage-$ver-linux-x64.tar.gz" && install -m755 "dusage-$ver-linux-x64/dusage" "dusage-$ver-linux-x64/fastdel" ~/.local/bin/
 ```
 
+On macOS there is no release binary: use the `cargo install` line above (it needs a Rust
+toolchain; ask before installing one).
+
 Do not change the user's permanent PATH without asking.
 
 ## 2. Find where the space goes
@@ -76,7 +80,10 @@ dusage ~/proj --dedup-hardlinks --top 25     # space actually freed (node_module
 dusage /var --json                           # machine-readable, for summing groups
 ```
 
-On Linux, `-x`/`--one-filesystem` keeps a scan on one filesystem; without it a scan of `/`
+The bash lines work on macOS too; there `/var` is a symlink to `/private/var`, and a root that
+is a symlink is refused, so pass the target.
+
+On Linux and macOS, `-x`/`--one-filesystem` keeps a scan on one filesystem; without it a scan of `/`
 descends into every mount, and `--on-disk` is what the filesystem really allocated (sparse
 and compressed files read low).
 
@@ -85,21 +92,22 @@ Speed tips:
   files. It reads the NTFS master file table: about 10 s for a drive instead of a minute or
   more. It always reads the whole volume's table, so skip it for small folders. Without admin
   it fails with "needs an elevated (admin) shell". Fall back to the default backend then.
-  There is no equivalent on Linux, and `--mft` there refuses with a reason.
+  There is no equivalent on Linux or macOS, and `--mft` there refuses with a reason.
 - Run independent scans of different folders in parallel.
 - Totals at a volume root under `--mft` include NTFS metadata (`$MFT`, `$LogFile`) and
   `pagefile.sys`. Those are not reclaimable.
 
 Folder age: a directory's modified time only changes when a direct child is created or
 deleted. To see whether a tree is still in use, check `LastWriteTime` of the folder and a few
-children (on Linux, `stat -c '%y %n' folder child...`). Treat this as a hint and confirm with
+children (on Linux, `stat -c '%y %n' folder child...`; on macOS, `stat -f '%Sm %N' folder
+child...`). Treat this as a hint and confirm with
 the user.
 
 ## 3. Search inside a tree (grep and find)
 
 Use `dusage search` instead of `grep`/`rg` and `dusage find` instead of `find` when the user
 wants matches in file contents or a list of paths. Both are read-only, work the same on
-Windows and Linux, and take the same filters.
+Windows, Linux and macOS, and take the same filters.
 
 ```bash
 dusage search -n 'TODO' src/                 # matching lines with line numbers
@@ -185,7 +193,10 @@ Rules:
 - `fastdel` deletes the children of the root, never the root itself. On Windows it refuses
   drive roots, Windows, Program Files, ProgramData and user-profile roots in every spelling;
   on Linux it refuses `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`,
-  `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` and their ancestors. Do
+  `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` and their ancestors; on
+  macOS it refuses `/`, everything under `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`,
+  `/Applications`, `/cores` and `/dev`, and `/Users`, `$HOME`, `/opt`, `/Volumes`, `/private/tmp`,
+  `/private/var` and every mounted volume's root (their children stay prunable). Do
   not try to work around a refusal; report it.
 - `--prefix` is case-sensitive. `--age` takes `30m`, `2h`, `7d`, `1w`, or `-1` for any age.
 - `--preset cargo|node|agent-temp` is a saved prefix/age bundle; `--print-presets` lists them
