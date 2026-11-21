@@ -343,6 +343,18 @@ rather than to any single number:
   bookkeeping per entry; on the cold pass it is 0.97x, which is the same tie from
   the other side. `df` at 1.12x is 0.3 ms on a command that takes 2.5 ms — see
   the row below it.
+- **`-U` with Unicode semantics is a tie that costs 66% more instructions.** On the
+  same tree the row pays 517.3M instructions where `ripgrep` pays 311.8M: 107.5M in
+  the mandatory-literal prefilter, 165.0M in the byte VM run from `floor` to
+  recover each match's leftmost-first start (85.5M of that building the initial
+  thread list), 37.5M in the forward DFA. Two interleaved pairs measured it at
+  1.01x and 1.11x while the table has read 1.15x and 0.99x on different passes, so
+  the ratio is unresolved here and the instruction count is the finding. Answering
+  the candidate lines instead was tried twice and cost more both times - 833M with
+  the character program per line, 705M with the byte program, because the price is
+  per VM restart rather than per byte. `bench/records/20261121-uni-investigation.md`
+  has all three attempts with their numbers, and the reverse automaton that would
+  recover the start without the VM as the next cut.
 - **`tree` is ahead of the tool it replaces.** 1224.0 ms against plain `tree`'s
   1745.0 ms (0.70x), and 1157.3 ms against `tree -s`'s 1692.2 ms cold (0.68x).
   The work is one batched enumeration per directory handing both size columns
