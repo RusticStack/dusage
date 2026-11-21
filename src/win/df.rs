@@ -139,7 +139,7 @@ fn volume_root_of(path: &Path) -> io::Result<Vec<u16>> {
 fn row(device: String, root: &[u16]) -> io::Result<FsUsage> {
     let (size, used, available) = space(root)?;
     Ok(FsUsage {
-        filesystem: device,
+        filesystem: crate::model::mount_label(&device),
         fs_type: fs_type(root),
         mount: PathBuf::from(text(root)),
         size,
@@ -213,6 +213,8 @@ pub fn filesystems() -> io::Result<Vec<FsUsage>> {
                 let Ok(r) = row(text(&path), &path) else {
                     continue;
                 };
+                // `row` normalised the label, and the letter fallback below is written in
+                // the same spelling, so one volume cannot arrive twice.
                 if seen.contains(&r.filesystem) {
                     continue;
                 }
@@ -239,6 +241,8 @@ pub fn filesystems() -> io::Result<Vec<FsUsage>> {
         }
         let letter = (b'A' + bit as u8) as char;
         let name = format!("{letter}:");
+        // Compare the normalised spelling: the volume list above names this volume `E:\`,
+        // and a plain string comparison against `E:` would add it a second time.
         if seen.iter().any(|s| s == &name) {
             continue;
         }

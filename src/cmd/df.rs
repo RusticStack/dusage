@@ -220,12 +220,14 @@ fn is_dummy(fs_type: Option<&str>) -> bool {
 }
 
 /// A stable key for "one filesystem": the device number when the platform has one, else the
-/// name. Two mounts of one filesystem collapse; two tmpfs mounts stay two rows.
+/// name without its trailing separator. Two mounts of one filesystem collapse; two tmpfs
+/// mounts stay two rows. The normalisation is what keeps one Windows volume from being two
+/// rows — the API names it `E:\` from the volume list and `E:` from a drive letter.
 fn identity(f: &FsUsage) -> String {
     if f.device != 0 {
         format!("dev:{}", f.device)
     } else {
-        format!("name:{}", f.filesystem)
+        format!("name:{}", crate::model::mount_label(&f.filesystem))
     }
 }
 
@@ -470,6 +472,33 @@ pub fn run(raw: Vec<String>) -> Result<(), Fail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake(filesystem: &str, mount: &str) -> FsUsage {
+        FsUsage {
+            filesystem: filesystem.to_string(),
+            fs_type: Some("NTFS".to_string()),
+            mount: std::path::PathBuf::from(mount),
+            size: 1,
+            used: 1,
+            available: 1,
+            inodes: None,
+            inodes_used: None,
+            inodes_free: None,
+            device: 0,
+        }
+    }
+
+    /// The regression this pins: a Windows box reported every volume twice, once as `E:\`
+    /// from the volume list and once as `E:` from the drive-letter fallback. Both spellings
+    /// have to be one identity without a device number to key on.
+    #[test]
+    fn one_volume_has_one_identity_however_it_is_spelled() {
+        assert_eq!(
+            identity(&fake("E:\\", "E:\\")),
+            identity(&fake("E:", "E:\\"))
+        );
+        assert_ne!(identity(&fake("E:", "E:\\")), identity(&fake("D:", "D:\\")));
+    }
 
     #[test]
     fn human_units_follow_du() {

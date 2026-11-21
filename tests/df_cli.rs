@@ -154,6 +154,26 @@ fn every_mounted_filesystem_is_listed_unless_asked_otherwise() {
     assert!(more.lines().count() >= all.lines().count());
 }
 
+/// One filesystem must not appear as two rows. This is the shape of the Windows defect that
+/// printed every volume twice, once as `E:\` and once as `E:`, and it is checked on every
+/// platform because a full listing is where a duplicate would show.
+#[test]
+fn no_mount_point_is_listed_twice() {
+    // The default listing is the one that promises one row per filesystem; `-a` keeps
+    // stacked mounts on one point apart, as GNU df does.
+    let listing = stdout(&dusage(&[]));
+    let mut mounts: Vec<&str> = Vec::new();
+    for line in listing.lines().skip(1) {
+        let mount = line.split_whitespace().last().unwrap_or_default();
+        assert!(
+            !mounts.contains(&mount),
+            "mount point {mount} appears twice:\n{listing}"
+        );
+        mounts.push(mount);
+    }
+    assert!(!mounts.is_empty(), "a listing has rows:\n{listing}");
+}
+
 #[test]
 fn inode_columns_and_human_units() {
     let dir = here();
