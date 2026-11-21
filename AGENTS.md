@@ -137,7 +137,7 @@ enqueued via `push`. It stops when the queue is empty and nothing is active.
   nothing. fastdel reports final errors by category instead.
 - `robocopy /L /E /XJ` is a decent correctness oracle for directory sizes.
 - Hardlinks (pnpm stores, .git objects) inflate naive byte sums: measured at 21.4%
-  on `C:\projects` and 43.7% on `C:orge` against `--dedup-hardlinks`, which
+  on `C:\projects` and 43.7% on `C:\forge` against `--dedup-hardlinks`, which
   counts each FileId once. The 5-10% the user reported was an underestimate.
 - Tool and agent temp dirs can regenerate at
   ~100 GB/day — that's why fastdel exists.
