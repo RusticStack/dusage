@@ -277,7 +277,8 @@ record and the caveats. Re-run the harness rather than trusting this list if the
    8. Item 8's open question is closed, and `--streams` stays opt-in for that reason.
 6. **FileId semantics. Answered for NTFS.** Hardlinks share one 128-bit `FileId`, and
    `fsutil file queryFileID <path>` (no `=`) prints the same value the handle API returns.
-   ReFS, Dev Drive and FAT come from the VHDX fixtures in the elevated half.
+   FAT32 and ReFS come from the VHDX fixtures in the elevated half (`bench/windows/admin.ps1`,
+   section 5). Nothing attaches or formats a Dev Drive, so Dev Drive stays unanswered.
 7. **Reparse gap. Closed and confirmed closed.** `is_symlink()` is true for a junction on this
    build, and the tool no longer depends on it: it tests `FILE_ATTRIBUTE_REPARSE_POINT`, so
    the DFS and dedup tags `is_symlink()` misses fall under the same rule. A junction fixture
