@@ -9,6 +9,8 @@
 #      and with -Root excluded. The exclusion is removed in a finally block whatever else
 #      happens, and nothing here recommends turning protection off — it is measured only.
 #   2. MFT against the batched backend and robocopy, on the volumes named in -Volumes.
+#      One volume is the default because three whole-volume passes over a large volume take
+#      longer than a person leaves an elevated window open; add 'E:' for a second data point.
 #   3. The USN --watch path: a watch is started, files are created and deleted under it, and
 #      the update it prints is compared with a full rescan so a silent full rescan shows up.
 #   4. A cold-cache pass: the standby list and working sets are purged between runs, which
@@ -17,12 +19,15 @@
 #      -Root and formatting them; the files are detached and deleted afterwards.
 #
 # Output: appends rows to bench/windows/admin-results.jsonl (merged into results.json by
-# run.sh) and to bench/windows/checks.json (rendered by summary-checks.sh).
+# run.sh) and to bench/windows/checks.json (rendered by summary-checks.sh), plus a line per
+# step in bench/windows/admin.log. Every row lands on disk as it is measured and each of the
+# five sections is isolated, so a run that is closed or fails part-way still contributes
+# whatever it finished.
 
 param(
     [string]$Root = 'D:\dusage-bench',
     [string]$Bin = '',
-    [string[]]$Volumes = @('D:', 'E:'),
+    [string[]]$Volumes = @('D:'),
     [int]$Runs = 3,
     [switch]$SkipProtection,
     [switch]$SkipMft,
@@ -50,8 +55,18 @@ if (-not $isAdmin) {
 $rows = New-Object System.Collections.ArrayList
 $checks = New-Object System.Collections.ArrayList
 
-function Add-Row($o) { $null = $rows.Add($o) }
-function Add-Check($o) { $null = $checks.Add($o) }
+# Rows and checks go to disk the moment they are measured. An elevated window can be
+# closed, or a whole-volume scan can fail, at any point in a twenty-minute run, and a
+# buffer that only lands at the end loses everything measured before it.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+function Add-Row($o) {
+    $null = $rows.Add($o)
+    [System.IO.File]::AppendAllText($rowsOut, (($o | ConvertTo-Json -Compress -Depth 6) + "`n"), $utf8NoBom)
+}
+function Add-Check($o) {
+    $null = $checks.Add($o)
+    [System.IO.File]::AppendAllText($checksOut, (($o | ConvertTo-Json -Compress -Depth 6) + "`n"), $utf8NoBom)
+}
 
 function Native([scriptblock]$sb) {
     $old = $ErrorActionPreference
@@ -134,10 +149,17 @@ function Purge-Cache {
 }
 
 # Everything this run prints lands in a log beside the record, because an elevated window
-# that closes takes its console with it.
+# that closes takes its console with it. The transcript is a convenience; Write-Log is the
+# record, so a transcript that cannot start never costs the run.
 $logPath = Join-Path $repo 'bench\windows\admin.log'
-Start-Transcript -Path $logPath -Force | Out-Null
-Write-Output 'admin: elevated, starting'
+function Write-Log([string]$m) {
+    $line = "{0} {1}" -f (Get-Date -Format 'HH:mm:ss'), $m
+    Write-Log $line
+    try { [System.IO.File]::AppendAllText($logPath, $line + "`r`n", $utf8NoBom) } catch { }
+}
+try { Start-Transcript -Path (Join-Path $repo 'bench\windows\admin-transcript.log') -Force | Out-Null } catch { }
+Write-Log ("admin: elevated={0} repo={1} root={2} bin={3}" -f $isAdmin, $repo, $Root, $Bin)
+Write-Log ("admin: sections {0}" -f (($PSBoundParameters.Keys | Where-Object { $_ -like 'Skip*' }) -join ' '))
 
 # ------------------------------------------------------ 1. real-time protection (question 3)
 # Measure only. The exclusion is for -Root, it is removed before this script returns, and
@@ -179,49 +201,60 @@ if (-not $SkipProtection) {
     finally {
         if ($excluded) {
             Remove-MpPreference -ExclusionPath $Root -ErrorAction SilentlyContinue
-            Write-Output "admin: defender exclusion for $Root removed"
+            Write-Log "admin: defender exclusion for $Root removed"
         }
     }
 }
 
 # ---------------------------------------------- 2. --mft against the batched backend (q11)
 if (-not $SkipMft) {
-    foreach ($v in $Volumes) {
-        $root = "${v}\"
-        $batched = Native { & $Bin scan $root --backend batched --threads 16 --on-disk } | Where-Object { $_ -match 'TOTAL' } | Select-Object -First 1
-        $mft = Native { & $Bin scan $root --mft --on-disk } | Where-Object { $_ -match 'TOTAL' } | Select-Object -First 1
-        $robocopy = Native { & robocopy $root NULL /L /E /XJ /BYTES /NFL /NDL /NJH /NP } | Where-Object { $_ -match '^ *Bytes' } | Select-Object -First 1
-        $check = [ordered]@{ kind = 'mft'; volume = $root }
-        if ($batched -match 'on disk ([\d.]+) GB .* files (\d+) \| dirs (\d+)') {
-            $check.batched_disk_gb = [double]$Matches[1]; $check.batched_files = [int64]$Matches[2]
+    Write-Log 'section 2: --mft vs batched vs robocopy'
+    try {
+        foreach ($v in $Volumes) {
+            $root = "${v}\"
+            # Three whole-volume passes per volume, so the slowest steps announce themselves:
+            # a window that looks hung gets closed, and a closed window ends the run.
+            Write-Log "  $root batched scan ..."
+            $batched = Native { & $Bin scan $root --backend batched --threads 16 --on-disk } | Where-Object { $_ -match 'TOTAL' } | Select-Object -First 1
+            Write-Log "  $root --mft scan ..."
+            $mft = Native { & $Bin scan $root --mft --on-disk } | Where-Object { $_ -match 'TOTAL' } | Select-Object -First 1
+            Write-Log "  $root robocopy /L ..."
+            $robocopy = Native { & robocopy $root NULL /L /E /XJ /BYTES /NFL /NDL /NJH /NP } | Where-Object { $_ -match '^ *Bytes' } | Select-Object -First 1
+            $check = [ordered]@{ kind = 'mft'; volume = $root }
+            if ($batched -match 'on disk ([\d.]+) GB .* files (\d+) \| dirs (\d+)') {
+                $check.batched_disk_gb = [double]$Matches[1]; $check.batched_files = [int64]$Matches[2]
+            }
+            if ($mft -match 'on disk ([\d.]+) GB .* files (\d+) \| dirs (\d+)') {
+                $check.mft_disk_gb = [double]$Matches[1]; $check.mft_files = [int64]$Matches[2]
+            }
+            if ($robocopy -match 'Bytes *: *([\d,]+)') { $check.robocopy_bytes = [int64]($Matches[1] -replace ',', '') }
+            $check.batched_line = $batched
+            $check.mft_line = $mft
+            Add-Check $check
+            Write-Log ("admin: MFT {0}: {1} / {2}" -f $root, $batched, $mft)
         }
-        if ($mft -match 'on disk ([\d.]+) GB .* files (\d+) \| dirs (\d+)') {
-            $check.mft_disk_gb = [double]$Matches[1]; $check.mft_files = [int64]$Matches[2]
-        }
-        if ($robocopy -match 'Bytes *: *([\d,]+)') { $check.robocopy_bytes = [int64]($Matches[1] -replace ',', '') }
-        $check.batched_line = $batched
-        $check.mft_line = $mft
-        Add-Check $check
-        Write-Output ("admin: MFT {0}: {1} / {2}" -f $root, $batched, $mft)
     }
+    catch { Write-Log ("section 2 failed: " + $_) }
 }
 
 # --------------------------------------------------------- 3. USN --watch on a real volume (q11)
 if (-not $SkipWatch) {
-    $watchRoot = Join-Path $Root 'watch'
-    Remove-Item -LiteralPath $watchRoot -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $watchRoot | Out-Null
-    for ($i = 0; $i -lt 50; $i++) { [System.IO.File]::WriteAllText((Join-Path $watchRoot "seed$i.txt"), 'x') }
-    $log = Join-Path $Root 'watch.log'
-    $errLog = Join-Path $Root 'watch.err'
-    $bash = (Get-Command bash.exe -ErrorAction SilentlyContinue).Source
-    if (-not $bash) { $bash = 'C:\Program Files\Git\bin\bash.exe' }
-    $binBash = $Bin.Replace('', '/')
-    $rootBash = $watchRoot.Replace('', '/')
-    $logBash = $log.Replace('', '/')
-    $errBash = $errLog.Replace('', '/')
-    # The watch runs for twelve seconds; two files are created and one is deleted inside
-    # that window, then the watch is stopped and its whole output is read back.
+    Write-Log 'section 3: USN --watch'
+    try {
+        $watchRoot = Join-Path $Root 'watch'
+        Remove-Item -LiteralPath $watchRoot -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $watchRoot | Out-Null
+        for ($i = 0; $i -lt 50; $i++) { [System.IO.File]::WriteAllText((Join-Path $watchRoot "seed$i.txt"), 'x') }
+        $log = Join-Path $Root 'watch.log'
+        $errLog = Join-Path $Root 'watch.err'
+        $bash = (Get-Command bash.exe -ErrorAction SilentlyContinue).Source
+        if (-not $bash) { $bash = 'C:\Program Files\Git\bin\bash.exe' }
+        $binBash = $Bin.Replace('\', '/')
+        $rootBash = $watchRoot.Replace('\', '/')
+        $logBash = $log.Replace('\', '/')
+        $errBash = $errLog.Replace('\', '/')
+        # The watch runs for twelve seconds; two files are created and one is deleted inside
+        # that window, then the watch is stopped and its whole output is read back.
     $script = @"
 "$binBash" scan "$rootBash" --watch 2 > "$logBash" 2> "$errBash" &
 WPID=`$!
@@ -235,97 +268,101 @@ kill `$WPID 2>/dev/null
 wait `$WPID 2>/dev/null
 exit 0
 "@
-    $script | Out-File -Encoding ascii -FilePath (Join-Path $Root 'watch.sh')
-    Native { & $bash (Join-Path $Root 'watch.sh') } | Out-Null
-    $out = Get-Content -Raw -LiteralPath $log -ErrorAction SilentlyContinue
-    $err = Get-Content -Raw -LiteralPath $errLog -ErrorAction SilentlyContinue
-    $sawCreated = ($out -match 'created_b')
-    $sawDeleted = ($out -match 'created_a')
-    $updates = ([regex]::Matches($out, 'elapsed')).Count
-    Add-Check ([ordered]@{
-            kind   = 'watch'
-            step   = 'scan --watch 2 over a 50-file directory; two files created and one deleted while it ran'
-            detail = "updates=$updates saw_created_b=$sawCreated saw_created_a=$sawDeleted full_rescan=$($out -match 'full')"
-            output = (($out -replace '\s+', ' ').Trim())
-            stderr = (($err -replace '\s+', ' ').Trim())
-        })
-    Write-Output ("admin: watch updates={0} created_seen={1} deleted_seen={2}" -f $updates, $sawCreated, $sawDeleted)
+        $script | Out-File -Encoding ascii -FilePath (Join-Path $Root 'watch.sh')
+        Native { & $bash (Join-Path $Root 'watch.sh') } | Out-Null
+        $out = Get-Content -Raw -LiteralPath $log -ErrorAction SilentlyContinue
+        $err = Get-Content -Raw -LiteralPath $errLog -ErrorAction SilentlyContinue
+        $sawCreated = ($out -match 'created_b')
+        $sawDeleted = ($out -match 'created_a')
+        $updates = ([regex]::Matches($out, 'elapsed')).Count
+        Add-Check ([ordered]@{
+                kind   = 'watch'
+                step   = 'scan --watch 2 over a 50-file directory; two files created and one deleted while it ran'
+                detail = "updates=$updates saw_created_b=$sawCreated saw_created_a=$sawDeleted full_rescan=$($out -match 'full')"
+                output = (($out -replace '\s+', ' ').Trim())
+                stderr = (($err -replace '\s+', ' ').Trim())
+            })
+        Write-Log ("admin: watch updates={0} created_seen={1} deleted_seen={2}" -f $updates, $sawCreated, $sawDeleted)
+    }
+    catch { Write-Log ("section 3 failed: " + $_) }
 }
 
 # ---------------------------------------------------------------- 4. cold cache (question 1)
 if (-not $SkipCold) {
-    foreach ($target in @('tree1m', 'flat100k')) {
-        $p = Join-Path $Root $target
-        $warm = Measure-Median { & $Bin scan $p --threads 16 } $Runs
-        $cold = @()
-        for ($i = 0; $i -lt $Runs; $i++) {
-            Purge-Cache
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            Native { & $Bin scan $p --threads 16 } | Out-Null
-            $sw.Stop()
-            $cold += $sw.Elapsed.TotalMilliseconds
+    Write-Log 'section 4: cold cache'
+    try {
+        foreach ($target in @('tree1m', 'flat100k')) {
+            $p = Join-Path $Root $target
+            $warm = Measure-Median { & $Bin scan $p --threads 16 } $Runs
+            $cold = @()
+            for ($i = 0; $i -lt $Runs; $i++) {
+                Purge-Cache
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                Native { & $Bin scan $p --threads 16 } | Out-Null
+                $sw.Stop()
+                $cold += $sw.Elapsed.TotalMilliseconds
+            }
+            $coldSorted = $cold | Sort-Object
+            $coldMs = [math]::Round($coldSorted[[int]($coldSorted.Count / 2)], 1)
+            Add-Row ([ordered]@{ case = "scan-cold-$target"; section = 'enumeration'; cache = 'cold'; role = 'primary'; tool = 'dusage'; command = "dusage scan $p --threads 16 after a standby-list purge"; median_ms = $coldMs; min_ms = [math]::Round($coldSorted[0], 1); max_ms = [math]::Round($coldSorted[$coldSorted.Count - 1], 1); runs = $Runs })
+            Add-Check ([ordered]@{ kind = 'cold'; case = $target; warm_ms = $warm; cold_ms = $coldMs; runs = $Runs })
+            Write-Log ("admin: cold {0}: warm {1} ms, cold {2} ms" -f $target, $warm, $coldMs)
         }
-        $coldSorted = $cold | Sort-Object
-        $coldMs = [math]::Round($coldSorted[[int]($coldSorted.Count / 2)], 1)
-        Add-Row ([ordered]@{ case = "scan-cold-$target"; section = 'enumeration'; cache = 'cold'; role = 'primary'; tool = 'dusage'; command = "dusage scan $p --threads 16 after a standby-list purge"; median_ms = $coldMs; min_ms = [math]::Round($coldSorted[0], 1); max_ms = [math]::Round($coldSorted[$coldSorted.Count - 1], 1); runs = $Runs })
-        Add-Check ([ordered]@{ kind = 'cold'; case = $target; warm_ms = $warm; cold_ms = $coldMs; runs = $Runs })
-        Write-Output ("admin: cold {0}: warm {1} ms, cold {2} ms" -f $target, $warm, $coldMs)
     }
+    catch { Write-Log ("section 4 failed: " + $_) }
 }
 
 # ------------------------------------- 5. FAT32 and ReFS FileId behaviour (question 6)
 # Two small VHDX files under -Root, attached, formatted, probed and detached. The script
 # never selects a physical disk, so nothing outside these two files can be touched.
 if (-not $SkipVolumes) {
-    $vhdDir = Join-Path $Root 'vhds'
-    New-Item -ItemType Directory -Force -Path $vhdDir | Out-Null
-    foreach ($spec in @(@{ fs = 'FAT32'; size = 512; letter = 'W' }, @{ fs = 'ReFS'; size = 4096; letter = 'X' })) {
-        $file = Join-Path $vhdDir ("bench_{0}.vhdx" -f $spec.fs.ToLower())
-        $script = @(
-            "create vdisk file=`"$file`" maximum=$($spec.size) type=expandable",
-            "select vdisk file=`"$file`"",
-            'attach vdisk',
-            'create partition primary',
-            "format fs=$($spec.fs) label=DBENCH quick",
-            "assign letter=$($spec.letter)"
-        ) -join "`r`n"
-        $dp = $script | & diskpart.exe 2>&1
-        Start-Sleep -Seconds 2
-        $target = "$($spec.letter):\"
-        $check = [ordered]@{ kind = 'fileid-volume'; volume = $target; filesystem = $spec.fs }
-        if (Test-Path -LiteralPath $target) {
-            $probe = Join-Path $target 'probe.txt'
-            try {
-                [System.IO.File]::WriteAllText($probe, 'x')
-                $scan = Native { & $Bin scan $target --threads 1 } | Where-Object { $_ -match 'TOTAL' } | Select-Object -First 1
-                $check.dusage_scan = $scan
-                $check.file_id_supported = if ($scan -match 'files') { 'scan ok' } else { 'scan failed' }
-                $check.fsutil = (Native { & fsutil file queryFileID $probe 2>&1 }) -join ' '
-                $check.dusage_dedup = Native { & $Bin scan $target --threads 1 --dedup-hardlinks } | Where-Object { $_ -match 'TOTAL' } | Select-Object -First 1
+    Write-Log 'section 5: FAT32 and ReFS FileId'
+    try {
+        $vhdDir = Join-Path $Root 'vhds'
+        New-Item -ItemType Directory -Force -Path $vhdDir | Out-Null
+        foreach ($spec in @(@{ fs = 'FAT32'; size = 512; letter = 'W' }, @{ fs = 'ReFS'; size = 4096; letter = 'X' })) {
+            $file = Join-Path $vhdDir ("bench_{0}.vhdx" -f $spec.fs.ToLower())
+            $script = @(
+                "create vdisk file=`"$file`" maximum=$($spec.size) type=expandable",
+                "select vdisk file=`"$file`"",
+                'attach vdisk',
+                'create partition primary',
+                "format fs=$($spec.fs) label=DBENCH quick",
+                "assign letter=$($spec.letter)"
+            ) -join "`r`n"
+            $dp = $script | & diskpart.exe 2>&1
+            Start-Sleep -Seconds 2
+            $target = "$($spec.letter):\"
+            $check = [ordered]@{ kind = 'fileid-volume'; volume = $target; filesystem = $spec.fs }
+            if (Test-Path -LiteralPath $target) {
+                $probe = Join-Path $target 'probe.txt'
+                try {
+                    [System.IO.File]::WriteAllText($probe, 'x')
+                    $scan = Native { & $Bin scan $target --threads 1 } | Where-Object { $_ -match 'TOTAL' } | Select-Object -First 1
+                    $check.dusage_scan = $scan
+                    $check.file_id_supported = if ($scan -match 'files') { 'scan ok' } else { 'scan failed' }
+                    $check.fsutil = (Native { & fsutil file queryFileID $probe 2>&1 }) -join ' '
+                    $check.dusage_dedup = Native { & $Bin scan $target --threads 1 --dedup-hardlinks } | Where-Object { $_ -match 'TOTAL' } | Select-Object -First 1
+                }
+                catch { $check.error = $_.Exception.Message }
             }
-            catch { $check.error = $_.Exception.Message }
+            else { $check.error = 'volume did not mount: ' + ($dp -join ' ') }
+            Add-Check $check
+            # Detach and delete so nothing is left mounted.
+            $script = @(
+                "select vdisk file=`"$file`"",
+                'detach vdisk'
+            ) -join "`r`n"
+            $script | & diskpart.exe 2>&1 | Out-Null
+            Start-Sleep -Seconds 1
+            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+            Write-Log ("admin: {0} volume probed and removed" -f $spec.fs)
         }
-        else { $check.error = 'volume did not mount: ' + ($dp -join ' ') }
-        Add-Check $check
-        # Detach and delete so nothing is left mounted.
-        $script = @(
-            "select vdisk file=`"$file`"",
-            'detach vdisk'
-        ) -join "`r`n"
-        $script | & diskpart.exe 2>&1 | Out-Null
-        Start-Sleep -Seconds 1
-        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
-        Write-Output ("admin: {0} volume probed and removed" -f $spec.fs)
     }
+    catch { Write-Log ("section 5 failed: " + $_) }
 }
 
 # ---------------------------------------------------------------------------------- output
-$lines = $rows | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 6 }
-if ($lines) { [System.IO.File]::WriteAllLines($rowsOut, [string[]]$lines) }
-if ($checks.Count -gt 0) {
-    $existing = if (Test-Path $checksOut) { Get-Content -LiteralPath $checksOut } else { @() }
-    $newLines = $checks | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 6 }
-    [System.IO.File]::WriteAllLines($checksOut, [string[]]($existing + $newLines))
-}
-Write-Output ("admin: wrote {0} timing rows and {1} checks" -f $rows.Count, $checks.Count)
-Stop-Transcript | Out-Null
+Write-Log ("admin: wrote {0} timing rows and {1} checks" -f $rows.Count, $checks.Count)
+Write-Log 'admin: done'
+try { Stop-Transcript | Out-Null } catch { }
