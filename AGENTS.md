@@ -155,9 +155,11 @@ Open:
 - Validate the USN `--watch` path on a real volume in an elevated shell (the
   MFT backend is validated and benchmarked; see README).
 - Run the benchmark questions in `docs/ROADMAP.md` (no speedup is measured yet).
-- Measure the Linux backends properly: the thread sweep and the cold-cache numbers in
-  README were taken on a 2-vCPU container, and a `getdents64`-level enumerator (raw
-  syscall, no `read_dir` allocation) is unexplored.
+- Measure the Linux backends properly: the cold-cache numbers in README were taken on a
+  2-vCPU container. The raw `getdents64` enumerator is shipped (#45) and the thread sweep
+  is measured at 13 interleaved rounds on a 4-vCPU container (one thread per core is
+  fastest for `scan` and `search`; 4x cores costs 35-58%), so what remains is `io_uring`
+  batching, which the zero-dependency and read-only rules both argue against.
 - macOS: `unix/` would build except for inotify; a kqueue/FSEvents feed plus a guard list
   is the work, and the crate currently refuses to compile there on purpose.
 

@@ -11,6 +11,7 @@ pub mod du;
 pub mod prune;
 pub mod scan;
 pub mod search;
+pub mod tree;
 
 use std::process::exit;
 
@@ -24,6 +25,7 @@ pub enum FrontEnd {
     Find,
     Prune,
     Df,
+    Tree,
 }
 
 /// The flags a front end's parser accepts: the ones that take a value, then the switches.
@@ -38,6 +40,7 @@ pub fn accepted_flags(fe: FrontEnd) -> (&'static [&'static str], &'static [&'sta
         FrontEnd::Find => (search::FIND_VALUE_FLAGS, search::FIND_BOOL_FLAGS),
         FrontEnd::Prune => (prune::VALUE_FLAGS, prune::BOOL_FLAGS),
         FrontEnd::Df => (df::VALUE_FLAGS, df::BOOL_FLAGS),
+        FrontEnd::Tree => (tree::VALUE_FLAGS, tree::BOOL_FLAGS),
     }
 }
 
@@ -72,10 +75,12 @@ USAGE:
     dusage find <glob> [paths...] [OPTIONS]                file names and paths
     dusage prune <root> --age AGE [OPTIONS]                delete old entries (fastdel)
     dusage du [PATH...] [OPTIONS]                          du-compatible per-directory totals
+    dusage tree [PATH...] [OPTIONS]                        the tree, with on-disk and apparent sizes
     dusage df [PATH...] [OPTIONS]                          mounted filesystems and their usage
 
 Each subcommand has its own help: `dusage search --help`, `dusage find --help`,
-`dusage scan --help`, `dusage prune --help`, `dusage du --help`, `dusage df --help`.
+`dusage scan --help`, `dusage prune --help`, `dusage du --help`, `dusage tree --help`,
+`dusage df --help`.
 
 Run 'dusage --help' for the full list, or 'dusage <subcommand> --help'.";
 
@@ -114,6 +119,10 @@ pub fn dispatch(mut raw: Vec<String>) -> Result<(), Fail> {
         "df" => {
             raw.remove(0);
             df::run(raw)
+        }
+        "tree" => {
+            raw.remove(0);
+            tree::run(raw)
         }
         "-h" | "--help" | "help" => {
             // The full help: the subcommand map, then the options of the default command.
