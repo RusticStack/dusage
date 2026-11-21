@@ -12,12 +12,13 @@ with a memory pass, a cold-cache pass and a regression guard now lives in
 `bench/` and `docs/BENCHMARKS.md`; the section at the end lists what shipped,
 the numbers and the limits that are still open.
 
-**Status (macOS, x86_64).** The crate compiles for `x86_64-apple-darwin` and has a third
-platform module, `src/mac/`: enumeration over `readdir$INODE64`/`fstatat`, deletion over
-`unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed, a macOS guard, and mount points and
-`-fstype` names from the kernel's own mount table. CI runs a `macos-15-intel` leg on a real
-Mac and it is green (796 tests, 0 failures); arm64 is untested. The limits that come with it
-are in the macOS section at the end.
+**Status (macOS).** The crate compiles for `x86_64-apple-darwin` and `aarch64-apple-darwin`
+and has a third platform module, `src/mac/`: enumeration over `readdir$INODE64`/`fstatat`,
+deletion over `unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed, a macOS guard, and mount
+points and `-fstype` names from the kernel's own mount table. CI runs two macOS legs on real
+Macs — `macos-15-intel` and `macos-15` (Apple Silicon) — and both are green. The limits that
+come with the code are in the macOS section at the end; what comes with the runners is
+MRI-14.
 
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
@@ -393,7 +394,7 @@ at 0.58–0.60x with identical totals. The content row still behind is
 - `--stats` is one line today; a per-directory breakdown would make "why is this
   slow" answerable without a profiler.
 
-## macOS (x86_64), as running
+## macOS (x86_64 and arm64), as running
 
 **Status.** `lib.rs` accepts `target_os = "macos"` and aliases `src/mac/` as `crate::native`,
 the third arm beside `src/unix/` and `src/win/`. Two things prove it, in this order: a
@@ -402,9 +403,13 @@ cross-check for `x86_64-apple-darwin` from Linux — `cargo check`, `cargo check
 format, lint, test and release-build steps as the other platforms on a real Mac. That leg is
 green: 796 tests pass, 0 fail (634 unit, 162 across the seven integration suites). The
 cross-check proves the `cfg` wiring, the types and that the FFI declarations compile, and
-nothing about symbols or layouts; the runner is what proves those. arm64 is still untested —
-`macos-15-intel` is x86_64 only and every `$INODE64` alias is `cfg`-gated off for arm64,
-whose exports are already 64-bit wide.
+nothing about symbols or layouts; the runner is what proves those.
+
+**Both architectures are now verified by a run, and they are verified separately.** The
+`macos-15-intel` leg executes the `$INODE64` bindings; the `macos-15` Apple Silicon leg
+executes the plain ones, because `sys.rs` gates every alias to
+`not(target_arch = "aarch64")`. That second leg is the first test the plain names ever had,
+and it is why adding it was worth more than a fifth run of the Intel path.
 
 **Done.** Enumeration is `open` + `fdopendir` + `readdir$INODE64`, with `fstatat$INODE64`
 per entry against the open directory descriptor, so `alloc` is `st_blocks * 512` and
@@ -418,13 +423,14 @@ consequence it has for the next change here.
 
 - **A 64-bit caller must bind `$INODE64`, and `cargo check` cannot know it.** Darwin's
   headers resolve `readdir`, `stat`, `lstat`, `fdopendir`, `fstatat` and `getmntinfo` onto
-  suffixed symbols, and the suffixed and plain versions are not interchangeable: the plain
+  suffixed symbols on x86_64, and the suffixed and plain versions are not interchangeable: the plain
   `fdopendir` allocates the stream in the legacy 32-bit record format, so *every* listing
   came back empty — 52 of 629 tests on the first macOS run — and the plain `getmntinfo`
   fills the legacy `struct statfs` instead of `__DARWIN_STRUCT_STATFS64`, so the record count
   is right and every mount point and type name reads as zeroes. Two failures, one rule:
   symbols resolve at link time and nowhere earlier, so a new `extern "C"` name here is
-  verified by the CI leg or not at all.
+  verified by the CI leg or not at all. The Apple Silicon leg is what proves the other half
+  of that rule — that the plain names are correct where the aliases compile out.
 - **Refusing `/private` subtree-wide makes `$TMPDIR` unprunable.** macOS's `/var` and `/tmp`
   are `/private/var` and `/private/tmp`, and `$TMPDIR` lives at
   `/private/var/folders/<xx>/<hash>/T`, so a whole-subtree rule there produces a `prune`
@@ -450,9 +456,13 @@ consequence it has for the next change here.
   up as a whole. No issue is filed for raising the budget.
 - **FSEvents is deferred.** It needs CoreFoundation, which zero dependencies rules out for
   this port. kqueue is what shipped. No issue is filed for the FSEvents feed.
-- **arm64 is unverified, on a clock.** Nothing in this repository has run it: the
-  `macos-15-intel` label is Intel-only and GitHub retires x86_64 macOS runners in August
-  2027, so an arm64 answer is needed before then.
+- **The arm64 coverage is a runner label, and labels retire.** The platform itself is
+  verified: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
+  and `cargo build --release` all pass on Apple Silicon, on the `macos-15` arm64 image, and
+  `cargo clippy --target aarch64-apple-darwin` runs locally against the same `cfg` path. What
+  is not durable is the label: the arm64 macOS images GitHub offers change, and `macos-14`
+  was already gone when this leg was added (a job asking for it is cancelled with no runner
+  assigned). MRI-14 tracks the schedule.
 - **`struct statfs` is the header's layout, and the leg re-proves it.** The 2168-byte shape,
   with `f_fstypename` at 72 and `f_mntonname` at 88, is `__DARWIN_STRUCT_STATFS64` from
   Apple's `bsd/sys/mount.h`, which also declares `getmntinfo` as

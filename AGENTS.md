@@ -168,9 +168,10 @@ Open:
 - Measure the Linux backends properly: the thread sweep and the cold-cache numbers in
   README were taken on a 2-vCPU container, and a `getdents64`-level enumerator (raw
   syscall, no `read_dir` allocation) is unexplored.
-- Verify arm64 for macOS. x86_64 has built and run on a real Mac (the `macos-15-intel`
-  leg), which confirms the `$INODE64` bindings and the `struct` layouts; arm64 has not, and
-  it binds the plain symbols instead because Apple exports them at 64-bit width there.
+- Keep the macOS runner labels alive. Both architectures now build and test on real Macs —
+  `macos-15-intel` for the `$INODE64` bindings and `macos-15` for the plain ones arm64 uses —
+  and what is left is coverage: labels retire (`macos-14` was already gone when the arm64 leg
+  was added), and MRI-14 tracks the schedule.
   FSEvents is deferred (CoreFoundation against zero dependencies); the kqueue feed stops at
   4096 watched directories and gives up wholesale past that. Details in `docs/ROADMAP.md`.
 
