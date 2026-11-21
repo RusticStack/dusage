@@ -414,6 +414,14 @@ const _: () = {
 mod tests {
     use super::*;
 
+    fn tmp(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("dusage_fsevents_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::canonicalize(&root).unwrap()
+    }
+
     fn state() -> Arc<State> {
         Arc::new(State {
             buffer: Mutex::new(Buffer::default()),
@@ -428,10 +436,7 @@ mod tests {
     /// feed that silently never fires is the failure mode this module exists to avoid.
     #[test]
     fn a_written_file_is_reported() {
-        let root = std::env::temp_dir().join(format!("dusage_fsevents_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = tmp("probe");
         let mut feed = FsEvents::open(&root).expect("FSEvents stream did not start");
         std::fs::write(root.join("probe.txt"), b"x").unwrap();
         let changed = feed.poll(Duration::from_secs(2)).unwrap();
@@ -439,6 +444,39 @@ mod tests {
             changed.iter().any(|p| p.starts_with(&root)),
             "no event for a write inside the watched root: {changed:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A change directly in the root arrives as the root's own path, which names no entry
+    /// the engine can attribute: the feed has to answer with the root's children, as the
+    /// kqueue feed does.
+    #[test]
+    fn a_change_in_the_root_reports_its_children() {
+        let root = tmp("rootchurn");
+        let mut feed = FsEvents::open(&root).expect("FSEvents stream did not start");
+        std::fs::write(root.join("probe.txt"), b"x").unwrap();
+        let changed = feed.poll(Duration::from_secs(2)).unwrap();
+        assert!(
+            changed.contains(&root.join("probe.txt")),
+            "the new entry must be named: {changed:?}"
+        );
+        assert!(!changed.contains(&root), "the root is not an entry");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Dropping the feed frees the callback state: the stream's context holds the only
+    /// reference besides the feed's own, and gives it back when the stream is deallocated.
+    #[test]
+    fn dropping_the_feed_frees_its_state() {
+        let root = tmp("teardown");
+        let feed = FsEvents::open(&root).expect("FSEvents stream did not start");
+        let state = Arc::downgrade(&feed.state);
+        drop(feed);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.strong_count() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(state.strong_count(), 0, "the stream's context leaked");
         let _ = std::fs::remove_dir_all(&root);
     }
 
