@@ -91,6 +91,11 @@ OPTIONS:
     -I                     the same as --binary-files without-match
     -d, --directories A    recurse (default) or skip: whether to descend into directories
         --iglob PATTERN    the same, matched without case
+        --glob-case-insensitive
+                           match every -g/--glob (and --include, --exclude,
+                           --exclude-dir) without case, as if each were an --iglob
+        --no-glob-case-insensitive
+                           the opposite, and the last one given wins
     -t, --type NAME        include files of a type: rust, python, js, ts, c, cpp, go, java,
                            ruby, markdown, json, toml, yaml, sh, html, css, xml, txt, log, lock
     -T, --type-not NAME    exclude a type; repeatable
@@ -273,20 +278,18 @@ fn take_color_flag(raw: &mut Vec<String>) -> Option<String> {
     mode
 }
 
-/// `--heading` and `--no-heading` are one switch and the last spelling wins, which the
-/// shared parser cannot say: it keeps a set. Both are taken out here and read in order.
-fn take_heading(raw: &mut Vec<String>) -> Option<bool> {
+/// `--heading`/`--no-heading` and `--glob-case-insensitive`/`--no-glob-case-insensitive`
+/// are each one switch where the last spelling wins, which the shared parser cannot say:
+/// it keeps a set. Both spellings are taken out here and read in order.
+fn take_switch(raw: &mut Vec<String>, on: &str, off: &str) -> Option<bool> {
     let mut mode = None;
-    raw.retain(|t| match t.as_str() {
-        "--heading" => {
-            mode = Some(true);
+    raw.retain(|t| {
+        if t == on || t == off {
+            mode = Some(t == on);
             false
+        } else {
+            true
         }
-        "--no-heading" => {
-            mode = Some(false);
-            false
-        }
-        _ => true,
     });
     mode
 }
@@ -532,6 +535,8 @@ pub(super) const SEARCH_BOOL_FLAGS: &[&str] = &[
     "--no-ignore-parent",
     "--no-ignore-global",
     "--ignore-file-case-insensitive",
+    "--glob-case-insensitive",
+    "--no-glob-case-insensitive",
     "--no-ignore-files",
     "--follow",
     "-x",
@@ -850,7 +855,7 @@ fn take_dash_zero(raw: &mut Vec<String>) -> bool {
 /// that makes a pattern match a directory only, and `--iglob` is `--include` without case, an
 /// override like `-g`. Every front end reads them here, so the two `find` forms and `search`
 /// agree about which paths exist for them.
-fn walk_globs(a: &Args) -> (Vec<String>, Vec<String>) {
+fn walk_globs(a: &Args, icase: bool) -> (Vec<String>, Vec<String>) {
     let mut globs: Vec<String> = Vec::new();
     for g in ["-g", "--glob", "--include"] {
         globs.extend(a.values(g).iter().cloned());
@@ -861,7 +866,13 @@ fn walk_globs(a: &Args) -> (Vec<String>, Vec<String>) {
     for g in a.values("--exclude-dir") {
         globs.push(format!("!{g}/"));
     }
-    (globs, a.values("--iglob").to_vec())
+    let mut iglobs = a.values("--iglob").to_vec();
+    // `--glob-case-insensitive` reads every glob above as an `--iglob`, which is ripgrep's
+    // definition of it. The types (`-t`) are not globs the user wrote and keep their case.
+    if icase {
+        iglobs.splice(0..0, globs.drain(..));
+    }
+    (globs, iglobs)
 }
 
 /// The flags `dusage find` takes before its pattern or expression, and the ones that carry
@@ -929,7 +940,13 @@ pub(super) const FIND_BOOL_FLAGS: &[&str] = &[
 
 fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     let color_mode = take_color_flag(&mut raw);
-    let heading = take_heading(&mut raw);
+    let heading = take_switch(&mut raw, "--heading", "--no-heading");
+    let glob_icase = scope == Scope::Content
+        && take_switch(
+            &mut raw,
+            "--glob-case-insensitive",
+            "--no-glob-case-insensitive",
+        ) == Some(true);
     let dash_zero = take_dash_zero(&mut raw);
     let unrestricted = take_unrestricted(&mut raw);
     let found = if scope == Scope::Paths {
@@ -1094,7 +1111,7 @@ fn run_query(mut raw: Vec<String>, scope: Scope) -> Result<(), Fail> {
     }
 
     // `-t` and `--ext` only narrow the results; the glob filters come from `walk_globs`.
-    let (globs, iglobs) = walk_globs(&a);
+    let (globs, iglobs) = walk_globs(&a, glob_icase);
     let mut type_globs: Vec<String> = Vec::new();
     for t in a.values("-t").iter().chain(a.values("--type").iter()) {
         type_globs.extend(types.globs(t)?);
@@ -1796,7 +1813,7 @@ fn run_find_expression(
         roots,
     );
     o.scope = Scope::Paths;
-    let (globs, iglobs) = walk_globs(a);
+    let (globs, iglobs) = walk_globs(a, false);
     let mut type_globs: Vec<String> = Vec::new();
     for t in a.values("-t").iter().chain(a.values("--type").iter()) {
         type_globs.extend(types.globs(t)?);

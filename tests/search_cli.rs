@@ -3035,3 +3035,80 @@ fn macos_fstype_selects_by_the_type_the_kernel_reports() {
         saw(&o)
     );
 }
+
+#[test]
+fn glob_case_insensitive_applies_to_every_glob() {
+    let f = Fixture::new("globicase");
+    fs::write(f.root.join("keep.rs"), "needle\n").unwrap();
+    fs::write(f.root.join("drop.py"), "needle\n").unwrap();
+    let files = |args: &[&str]| {
+        let o = run(args, &f.root);
+        let out = stdout(&o);
+        (out.contains("keep.rs"), out.contains("drop.py"))
+    };
+
+    // A plain `-g` keeps its case: `*.RS` selects nothing here.
+    assert_eq!(
+        files(&["search", "-l", "-g", "*.RS", "needle"]),
+        (false, false)
+    );
+    assert_eq!(
+        files(&[
+            "search",
+            "-l",
+            "--glob-case-insensitive",
+            "-g",
+            "*.RS",
+            "needle"
+        ]),
+        (true, false)
+    );
+    // Negated globs and the grep spellings fold too.
+    assert_eq!(
+        files(&[
+            "search",
+            "-l",
+            "--glob-case-insensitive",
+            "-g",
+            "!*.RS",
+            "needle"
+        ]),
+        (false, true)
+    );
+    assert_eq!(
+        files(&[
+            "search",
+            "-l",
+            "--glob-case-insensitive",
+            "--exclude",
+            "*.PY",
+            "needle"
+        ]),
+        (true, false)
+    );
+    // The last spelling wins.
+    assert_eq!(
+        files(&[
+            "search",
+            "-l",
+            "--glob-case-insensitive",
+            "--no-glob-case-insensitive",
+            "-g",
+            "*.RS",
+            "needle"
+        ]),
+        (false, false)
+    );
+    assert_eq!(
+        files(&[
+            "search",
+            "-l",
+            "--no-glob-case-insensitive",
+            "--glob-case-insensitive",
+            "-g",
+            "*.RS",
+            "needle"
+        ]),
+        (true, false)
+    );
+}
