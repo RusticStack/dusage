@@ -50,10 +50,16 @@ impl ChangeSource {
     /// `None` when inotify is unavailable or the tree exceeds the watch limit; the
     /// caller then rescans the whole tree every interval.
     pub fn open(root: &Path) -> Option<Self> {
+        Self::open_err(root).ok()
+    }
+
+    /// Like `open`, but says why the feed is unusable: no inotify, or the per-user
+    /// watch limit was reached before the tree was covered.
+    pub fn open_err(root: &Path) -> io::Result<Self> {
         // SAFETY: inotify_init1 takes only flags and returns a new file descriptor.
         let fd = unsafe { sys::inotify_init1(sys::IN_NONBLOCK | sys::IN_CLOEXEC) };
         if fd < 0 {
-            return None;
+            return Err(io::Error::last_os_error());
         }
         // SAFETY: `fd` was just returned by inotify_init1 and is owned from here on.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -61,8 +67,8 @@ impl ChangeSource {
             fd,
             dirs: HashMap::new(),
         };
-        s.watch_tree(root).ok()?;
-        Some(s)
+        s.watch_tree(root)?;
+        Ok(s)
     }
 
     fn add(&mut self, dir: &Path) {
