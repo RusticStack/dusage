@@ -133,15 +133,18 @@ an argument is expression syntax (see "The expression form" after the table).
 | `--color[=WHEN]` | `ls --color`-ish | Colours the printed path only, in both forms. |
 | `-u`, `--unrestricted` | `rg -u` | `-u` drops the ignore rules, `-uu` also takes hidden paths (both measured on a tree holding `node_modules` and a `.gitignore`). `find` never reads contents, so the third `-u` has nothing to add. |
 | `--no-messages` | `rg --no-messages` | Drops the "path(s) could not be read" line. |
-| `--help`, `-V`, `--version` | — | `find -h` is rejected as an unknown option here, unlike `search`, where `-h` is `--no-filename`. |
+| `-h`, `--help`, `-V`, `--version` | — | `find -h` is help, unlike `search`, where `-h` is `--no-filename`. |
 
-**Advertised but rejected.** `find --help` still lists nine flags that the
-parser does not accept: `--include`, `--exclude`, `--exclude-dir`, `--pre`,
-`--pre-glob`, `--binary-files`, `-I`, `-d`/`--directories` and `--iglob`. Each
-is exit 2 (measured, one flag per run): eight with `unknown predicate`, and `-d`
-by starting an expression, which makes the `*` after it a misplaced path
-(`paths must precede expression`). Only `-g`/`--glob` and `-t`/`--type` narrow a
-globbing `find` walk; the rest of that block is a copy of the `search` help.
+**Search-only flags.** `find` matches paths, not contents, so `--pre`,
+`--pre-glob`, `--binary-files`, `-I` and `--directories` are not `find` flags:
+its help lists none of them as options and each is exit 2 with `unknown
+predicate` (measured, one flag per run). `-d` is not `search`'s `-d ACTION`
+here: it starts an expression as find's deprecated spelling of `-depth`, so
+`find . -d` lists depth-first with a warning, and `find '*' . -d skip` is exit 2
+(`paths must precede expression`). `--include`, `--exclude`, `--exclude-dir` and
+`--iglob` are walk filters `find` honours, next to `-g`/`--glob` and
+`-t`/`--type`. `tests/flag_coverage.rs` and
+`every_flag_the_find_help_names_is_accepted` keep the help and the parser in step.
 
 #### The expression form
 
@@ -864,11 +867,10 @@ here:
    prefix: the listing prints `big.txt` while `path` carries `./big.txt`. Both
    are measured above and both are intentional, but they are easy to confuse
    when a script switches between them.
-6. `find --help` still lists five flags it does not accept: `--pre`,
-   `--pre-glob`, `--binary-files`, `-I` and `-d` each exit 2 (four as `unknown
-   predicate`, `-d` as a misplaced expression). The block is a copy of the
-   `search` option list; the other four it used to carry (`--include`,
-   `--exclude`, `--exclude-dir`, `--iglob`) are now walk filters `find` honours.
+6. `find -d` is not `search -d ACTION`: it is find's deprecated `-depth` and
+   starts an expression. The content-search flags `--pre`, `--pre-glob`,
+   `--binary-files`, `-I` and `--directories` are refused by `find` (exit 2,
+   `unknown predicate`) and its help no longer lists them as options.
 
 Entries that used to sit here — bundled short flags, `-exec` with `-execdir` in
 one expression, `-F` with a single `-e`/`-f` pattern holding a regex

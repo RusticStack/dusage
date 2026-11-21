@@ -192,8 +192,10 @@ a message naming the expression spelling (-F, -i, --name, --full-path, --size, -
 silently ignoring them would print what they did not ask for.
 
 find matches paths, not contents, so the flags that say how bytes are read (--pre,
---pre-glob, --binary-files, -I) and how a directory tree is descended (-d/--directories) are
-unknown options here, not silently ignored; `dusage search` is the front end that takes them.
+--pre-glob, --binary-files, -I) and how a directory argument is treated (--directories) are
+refused here, not silently ignored; `dusage search` is the front end that takes them. -d is
+not search's -d ACTION either: it starts an expression, as find's deprecated spelling of
+-depth.
 
 OPTIONS:
     -F, --fixed            match the pattern as a substring of the path
