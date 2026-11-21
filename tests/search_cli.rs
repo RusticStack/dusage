@@ -2984,3 +2984,50 @@ fn macos_search_and_find_smoke() {
         saw(&o)
     );
 }
+
+/// `-fstype` asks the filesystem type table, which on macOS is one kernel call, and the
+/// assertion has to be able to fail in both directions: a name that is really mounted
+/// selects, one that is not rejects. The name is read from the same table the binary uses,
+/// keyed by the device `stat` reports for the fixture — the two halves agreeing is the
+/// test, since a table keyed by anything else would select nothing and reject everything.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_fstype_selects_by_the_type_the_kernel_reports() {
+    use std::os::unix::fs::MetadataExt;
+    let saw = |o: &Output| {
+        format!(
+            "status {:?}\nstderr: {}\nstdout: {}",
+            o.status.code(),
+            String::from_utf8_lossy(&o.stderr),
+            String::from_utf8_lossy(&o.stdout)
+        )
+    };
+    let f = Fixture::new("macos_fstype");
+    let dev = fs::metadata(&f.root).unwrap().dev();
+    let types = dusage::native::enumerate::filesystem_types();
+    let name = types
+        .get(&dev)
+        .unwrap_or_else(|| panic!("no filesystem type for device {dev}: {types:?}"))
+        .clone();
+
+    let o = find_at(&f.root, &["-fstype", name.as_str(), "-type", "f"]);
+    assert!(o.status.success(), "find -fstype {name}: {}", saw(&o));
+    let out = stdout(&o);
+    assert!(
+        out.contains("main.rs"),
+        "-fstype {name} kept main.rs: {}",
+        saw(&o)
+    );
+
+    let o = find_at(&f.root, &["-fstype", "no_such_filesystem", "-type", "f"]);
+    assert!(
+        o.status.success(),
+        "find -fstype no_such_filesystem: {}",
+        saw(&o)
+    );
+    assert!(
+        stdout(&o).is_empty(),
+        "an unmounted type selected something: {}",
+        saw(&o)
+    );
+}

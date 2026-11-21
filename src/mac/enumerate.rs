@@ -22,10 +22,10 @@ use super::sys;
 use crate::model::{ErrorCounts, Kind, Stat};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::ffi::{c_int, CStr, CString, OsStr, OsString};
+use std::ffi::{c_char, c_int, CStr, CString, OsStr, OsString};
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -645,11 +645,72 @@ pub fn dev_of(path: &Path) -> io::Result<u64> {
 
 /// Filesystem type names by device, for `-fstype`.
 ///
-/// Darwin answers this from `getmntinfo`, whose `struct statfs` this layer does not bind
-/// yet, so the map is empty and `-fstype` matches nothing — the same answer Windows gives,
-/// and an honest one: no names is not the same as a wrong name.
+/// Darwin keys a filesystem by `f_fsid`, which is not a `dev_t`, so the device comes from
+/// `stat`ing each mount point: the same number `Entry::dev` and `dev_of` report, which is
+/// what the caller indexes the table with. A mount whose point cannot be stat-ed (a dead
+/// network mount, a stale entry) simply contributes nothing, the way a device missing from
+/// Linux's `/proc/self/mountinfo` does.
 pub fn filesystem_types() -> HashMap<u64, String> {
-    HashMap::new()
+    let mut out = HashMap::new();
+    for (point, name) in mounts() {
+        if let Ok(dev) = dev_of(&point) {
+            out.insert(dev, name);
+        }
+    }
+    out
+}
+
+/// Every mount point the kernel reports, for the guard's volume roots.
+///
+/// Reading `/Volumes` was the previous answer and covers only the mounts a person or
+/// `hdiutil` put there: a filesystem mounted anywhere else (`mount -t nfs ... /srv/data`,
+/// a volume under `/private/var/folders` mounted by a test harness) was invisible. The
+/// kernel's own table has no such blind spot.
+pub fn mount_roots() -> Vec<PathBuf> {
+    mounts().into_iter().map(|(point, _)| point).collect()
+}
+
+/// The mount table: mount point and filesystem type name, in the order the kernel lists
+/// them.
+///
+/// `getmntinfo` hands back a pointer to an array it keeps and overwrites on the next call,
+/// so the records are copied out here and nothing below holds the pointer.
+/// `MNT_NOWAIT` keeps a dead mount from blocking the query.
+fn mounts() -> Vec<(PathBuf, String)> {
+    let mut buf: *mut sys::StatFs = std::ptr::null_mut();
+    // SAFETY: `getmntinfo` writes exactly one pointer into `buf`. A non-positive return is
+    // an error, checked before `buf` is read.
+    let n = unsafe { sys::getmntinfo(&mut buf, sys::MNT_NOWAIT) };
+    if n <= 0 || buf.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: the kernel returned `n` consecutive records at `buf`, valid until the next
+    // `getmntinfo` call, and the fresh slice does not outlive this copy.
+    let records = unsafe { std::slice::from_raw_parts(buf, n as usize) };
+    records
+        .iter()
+        .filter_map(|fs| {
+            let point = c_field(&fs.f_mntonname)?;
+            let kind = c_field(&fs.f_fstypename)?;
+            Some((
+                PathBuf::from(OsString::from_vec(point.to_vec())),
+                String::from_utf8_lossy(kind).into_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// One fixed-width C string field, cut at its NUL.
+///
+/// Like a directory name, the length is never taken from anything but the terminator: a
+/// field with no NUL in its width is not a name this layer can trust, so it yields `None`
+/// rather than a truncated guess.
+fn c_field<const N: usize>(field: &[c_char; N]) -> Option<&[u8]> {
+    // SAFETY: `field` is a live array of exactly `N` bytes, and the slice borrows it for
+    // no longer than `field` itself lives.
+    let raw = unsafe { std::slice::from_raw_parts(field.as_ptr() as *const u8, N) };
+    let nul = raw.iter().position(|&b| b == 0)?;
+    Some(&raw[..nul])
 }
 
 /// True when `e` lives on a different filesystem than `root_dev` (a mount point).
@@ -1186,6 +1247,86 @@ mod tests {
                 io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData
             ),
             "{kind:?}"
+        );
+    }
+
+    /// The mount table is the only source for volume roots and `-fstype`, and this is the
+    /// assertion that fails if `struct statfs` is bound at the wrong offsets: a field read
+    /// four bytes early yields a mount point that is not a path at all.
+    #[test]
+    fn the_mount_records_are_read_at_the_right_offsets() {
+        let mut buf: *mut sys::StatFs = std::ptr::null_mut();
+        // SAFETY: `getmntinfo` writes one pointer; the count gates the read below.
+        let n = unsafe { sys::getmntinfo(&mut buf, sys::MNT_NOWAIT) };
+        assert!(n > 0, "getmntinfo returned {n}");
+        assert!(!buf.is_null(), "getmntinfo returned a null pointer");
+        // SAFETY: `n` consecutive records at `buf`, as above.
+        let records = unsafe { std::slice::from_raw_parts(buf, n as usize) };
+        for fs in records {
+            let point = c_field(&fs.f_mntonname).expect("a mount point with no terminator");
+            assert!(
+                point.starts_with(b"/"),
+                "mount point {:?} is not absolute",
+                String::from_utf8_lossy(point)
+            );
+            let kind = c_field(&fs.f_fstypename).expect("a type name with no terminator");
+            assert!(
+                !kind.is_empty(),
+                "{:?} has no type name",
+                String::from_utf8_lossy(point)
+            );
+            assert!(
+                kind.iter().all(u8::is_ascii_alphanumeric),
+                "type name {:?} is not a filesystem name",
+                String::from_utf8_lossy(kind)
+            );
+            // A block size is a power of two of at least 512 bytes on every filesystem
+            // this tool could meet; the field is the first in the struct, so a wrong
+            // offset shows up here rather than as a plausible-looking path.
+            assert!(
+                fs.f_bsize >= 512 && fs.f_bsize.is_power_of_two(),
+                "block size {} for {:?}",
+                fs.f_bsize,
+                String::from_utf8_lossy(point)
+            );
+        }
+    }
+
+    #[test]
+    fn the_mount_table_names_the_root_filesystem() {
+        let mounts = mounts();
+        assert!(!mounts.is_empty(), "the kernel reported no mounts");
+        let (_, kind) = mounts
+            .iter()
+            .find(|(p, _)| p == Path::new("/"))
+            .expect("no mount for the root filesystem");
+        assert!(!kind.is_empty(), "the root filesystem has no type name");
+    }
+
+    #[test]
+    fn the_type_table_is_keyed_by_the_device_stat_reports() {
+        let types = filesystem_types();
+        assert!(
+            !types.is_empty(),
+            "no filesystem types: `-fstype` would match nothing"
+        );
+        let dev = dev_of(Path::new("/")).expect("stat the root");
+        let name = types
+            .get(&dev)
+            .unwrap_or_else(|| panic!("the root device {dev} has no type name"));
+        assert!(
+            !name.is_empty(),
+            "the root device {dev} has an empty type name"
+        );
+    }
+
+    #[test]
+    fn every_mount_root_is_listed_as_its_own_path() {
+        let roots = mount_roots();
+        assert!(!roots.is_empty(), "the kernel reported no mount points");
+        assert!(
+            roots.iter().any(|p| p == Path::new("/")),
+            "the root is missing from {roots:?}"
         );
     }
 }

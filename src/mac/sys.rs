@@ -96,7 +96,49 @@ pub struct Dirent {
     pub d_name: [u8; DIRENT_NAME_MAX],
 }
 
-// struct stat, struct dirent and the layout the parser relies on. These are the
+/// `MFSTYPENAMELEN` (mount.h): the width of `f_fstypename`, terminator included.
+pub const MFSTYPENAMELEN: usize = 16;
+
+/// `MAXPATHLEN` (sys/param.h): the width of `f_mntonname` and `f_mntfromname`.
+pub const MAXPATHLEN: usize = 1024;
+
+/// `MNT_NOWAIT` (mount.h): answer from the mount table the kernel already has, instead of
+/// waking every filesystem to refresh it. A dead network mount cannot then hang a walk
+/// that only wanted to know what is mounted.
+pub const MNT_NOWAIT: c_int = 2;
+
+/// `struct statfs` (mount.h), the 64-bit Darwin layout.
+///
+/// This is how macOS answers "what is mounted, and of what type": there is no `/proc` to
+/// read. It is also why a device-keyed table needs a `stat` per mount — see
+/// [`StatFs::f_fsid`].
+#[repr(C)]
+pub struct StatFs {
+    pub f_bsize: u32,
+    pub f_iosize: i32,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    /// A filesystem id, *not* a device number: Darwin's mount table has no `st_dev`. Two
+    /// mounts of the same filesystem share it, and it is not comparable with `dev_of`.
+    pub f_fsid: [i32; 2],
+    pub f_owner: u32,
+    pub f_type: u32,
+    pub f_flags: u32,
+    pub f_fssubtype: u32,
+    /// NUL-terminated type name (`apfs`, `hfs`, `nfs`, ...), `MFSTYPENAMELEN` bytes.
+    pub f_fstypename: [c_char; MFSTYPENAMELEN],
+    /// NUL-terminated mount point, `MAXPATHLEN` bytes.
+    pub f_mntonname: [c_char; MAXPATHLEN],
+    /// NUL-terminated name of the mounted device or source, `MAXPATHLEN` bytes.
+    pub f_mntfromname: [c_char; MAXPATHLEN],
+    pub f_flags_ext: u32,
+    pub f_reserved: [u32; 7],
+}
+
+// struct stat, struct dirent, struct statfs and the layout the parser relies on. These are the
 // documented 64-bit Darwin layouts; the values are asserted so a declaration that drifts
 // from them fails a cross-check rather than at runtime on a Mac.
 const _: () = {
@@ -131,6 +173,16 @@ const _: () = {
     assert!(offset_of!(Dirent, d_type) == 20);
     assert!(offset_of!(Dirent, d_name) == 21);
     assert!(offset_of!(Dirent, d_name) + DIRENT_NAME_MAX <= size_of::<Dirent>());
+    assert!(size_of::<StatFs>() == 2168, "struct statfs is 2168 bytes");
+    assert!(offset_of!(StatFs, f_fsid) == 48);
+    assert!(offset_of!(StatFs, f_owner) == 56);
+    assert!(offset_of!(StatFs, f_type) == 60);
+    assert!(offset_of!(StatFs, f_flags) == 64);
+    assert!(offset_of!(StatFs, f_fssubtype) == 68);
+    assert!(offset_of!(StatFs, f_fstypename) == 72);
+    assert!(offset_of!(StatFs, f_mntonname) == 88);
+    assert!(offset_of!(StatFs, f_mntfromname) == 1112);
+    assert!(offset_of!(StatFs, f_flags_ext) == 2136);
 };
 
 extern "C" {
@@ -164,6 +216,13 @@ extern "C" {
     pub fn lstat(path: *const c_char, buf: *mut StatBuf) -> c_int;
     #[cfg_attr(not(target_arch = "aarch64"), link_name = "stat$INODE64")]
     pub fn stat(path: *const c_char, buf: *mut StatBuf) -> c_int;
+    /// `int getmntinfo(struct statfs **, int)`: fills `*mntbufp` with a pointer to an array
+    /// the kernel owns, and returns how many records it holds.
+    ///
+    /// No `$INODE64` alias: nothing in `struct statfs` is inode-sized, so unlike `stat`,
+    /// `lstat` and `readdir` the plain symbol is what a 64-bit caller binds on both
+    /// architectures.
+    pub fn getmntinfo(mntbufp: *mut *mut StatFs, flags: c_int) -> c_int;
 }
 
 /// The filesystem cannot serve a per-directory detail (or the whole feature).
@@ -205,6 +264,9 @@ mod tests {
         assert_eq!(std::mem::offset_of!(StatBuf, st_blocks), 104);
         assert_eq!(std::mem::offset_of!(Dirent, d_type), 20);
         assert_eq!(std::mem::offset_of!(Dirent, d_name), 21);
+        assert_eq!(std::mem::size_of::<StatFs>(), 2168);
+        assert_eq!(std::mem::offset_of!(StatFs, f_fstypename), 72);
+        assert_eq!(std::mem::offset_of!(StatFs, f_mntonname), 88);
     }
 
     #[test]
