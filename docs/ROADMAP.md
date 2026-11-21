@@ -175,11 +175,31 @@ it: `bench/windows/admin.ps1` section 3, `bench/windows/usn_probe.py`, rows in
   counts.
 - **Fallback.** On any read error (purged records, deleted journal) the caller does a full
   rescan, reopens the journal, and never rescans faster than the interval.
-- **Unverified.** Journal purging from write pressure on a real busy volume: forcing it safely
-  would mean shrinking C:'s journal (`Lowest Valid Usn` is currently 0, so nothing has ever been
-  purged here). The code path is the same `Err` arm that the delete/recreate experiment
-  exercised, but the 1181 case itself is not measured. Extended record version 3 was not
-  observed in these journals either; both report "maximum record version 4" and emit V2.
+- **Purge, measured.** When the records a slow watch has not read are trimmed out of the
+  journal, the next read fails with `ERROR_JOURNAL_ENTRY_DELETED` (1181) and the watch does what
+  it should: it reports `change journal reset (...); full rescan`, rescans everything, reopens
+  the journal, and its totals still match a full scan. Measured on the same 512 MB VHD, whose
+  journal is the 1 MB it gets at format time, with the same 20,000 files written two ways —
+  `bench/windows/usn_purge.ps1`, rows in `bench/windows/purge-results.jsonl`:
+
+  | case | written | poll | updates | `changed:` lines | reset lines | totals equal |
+  | --- | --- | --- | ---: | ---: | ---: | --- |
+  | burst | 20,000 files in 2026 ms | 10 s | 2 | 0 | **1** | true |
+  | paced | the same 20,000 files, 2,000 per round over 12,939 ms | 1 s | 15 | 14 | **0** | true |
+
+  The trigger is the journal's maximum size against the records written between two polls, not
+  the volume's size: a 1 MB journal loses a burst of ~5.8 MB of records (20,000 creates at the
+  measured three records and ~96 bytes each, read as 60,000 records in one poll when it does
+  catch up), while the same burst is roughly a fifth of C:'s 32 MB journal. C:'s journal was not
+  shrunk and no purge was forced there, per the owner's instruction; the 32 MB and 1 MB
+  geometries are both `fsutil usn queryjournal` output.
+- **Journal geometry is fixed at format time on this build.** `fsutil usn createjournal
+  m=0x4000000 a=0x800000` on a freshly formatted volume returns 0 and leaves `Maximum Size` at
+  `0x100000` (1 MB) with a 256 KB delta, so the small-journal-versus-large-journal comparison
+  this item originally wanted cannot be set up with that command here. The purge experiment
+  instead varies what the watch actually consumes between polls.
+- **Unverified.** Extended record version 3 was not observed in any journal here; C: and the VHD
+  both report "maximum record version 4" and emit V2 records.
 
 ### 10. Elevated whole-volume fast path (USN enumeration plus MFT parsing)
 

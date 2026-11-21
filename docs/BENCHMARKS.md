@@ -343,6 +343,18 @@ rather than to any single number:
   bookkeeping per entry; on the cold pass it is 0.97x, which is the same tie from
   the other side. `df` at 1.12x is 0.3 ms on a command that takes 2.5 ms — see
   the row below it.
+- **`-U` with Unicode semantics is a tie that costs 66% more instructions.** On the
+  same tree the row pays 517.3M instructions where `ripgrep` pays 311.8M: 107.5M in
+  the mandatory-literal prefilter, 165.0M in the byte VM run from `floor` to
+  recover each match's leftmost-first start (85.5M of that building the initial
+  thread list), 37.5M in the forward DFA. Two interleaved pairs measured it at
+  1.01x and 1.11x while the table has read 1.15x and 0.99x on different passes, so
+  the ratio is unresolved here and the instruction count is the finding. Answering
+  the candidate lines instead was tried twice and cost more both times - 833M with
+  the character program per line, 705M with the byte program, because the price is
+  per VM restart rather than per byte. `bench/records/20261121-uni-investigation.md`
+  has all three attempts with their numbers, and the reverse automaton that would
+  recover the start without the VM as the next cut.
 - **`tree` is ahead of the tool it replaces.** 1224.0 ms against plain `tree`'s
   1745.0 ms (0.70x), and 1157.3 ms against `tree -s`'s 1692.2 ms cold (0.68x).
   The work is one batched enumeration per directory handing both size columns
@@ -636,7 +648,34 @@ The journal account of those changes, from bench/windows/usn_probe.py:
 | 2 | DATA_EXTEND+CLOSE |
 | 2 | RENAME_OLD_NAME |
 | 2 | RENAME_NEW_NAME |
-| 2 | RENAME_NEW_NAME+CLOSE |```
+| 2 | RENAME_NEW_NAME+CLOSE |
+
+### What a purged journal does
+
+The one case the watch row above cannot reach on a system volume: a journal whose unread
+records are trimmed away before the watch gets to them. `bench/windows/usn_purge.ps1` creates
+its own 512 MB NTFS VHD (whose journal is the 1 MB it gets at format time) and writes the same
+20,000 files two ways. Verbatim `MEAS:`/stderr lines from `%TEMP%\dusage_usn_purge\purge.log`,
+console output, 2026-11-21, DOOMBRINGER, elevated:
+
+```console
+MEAS: scratch volume W: size=535752704 format=NTFS
+MEAS: createjournal m=0x4000000 a=0x800000 exit=0 out= max_before='' max_after='0x0000000000100000 (  1,0 MB)'
+STEP: burst wrote 20000 files in 2026 ms
+MEAS: burst journal_max=0x0000000000100000 (  1,0 MB) flood=20000 ms=2026 updates=2 changed=0 reset=1 totals_equal=True
+dusage: change journal reset (A entrada de diário foi eliminada do diário. (os error 1181)); full rescan
+STEP: paced wrote 20000 files in 12939 ms across 10 paced rounds
+MEAS: paced journal_max=0x0000000000100000 (  1,0 MB) flood=20000 ms=12939 updates=15 changed=14 reset=0 totals_equal=True
+MEAS: verdict burst_resets=1 paced_resets=0 burst_totals_equal=True paced_totals_equal=True paced_updates=15 burst_updates=2
+```
+
+The reset line is the host's Windows display language; the number that matters is
+`os error 1181`, `ERROR_JOURNAL_ENTRY_DELETED`. `updates` counts printed reports, so the burst
+case's 2 is the initial scan plus the reset rescan, and its `changed=0` is the point: with the
+records gone there is nothing to name, and correctness comes from the full rescan (both cases
+end with totals equal to a full scan). `fsutil usn createjournal` returning 0 while leaving the
+geometry at 1 MB is what stopped this from being a small-journal-versus-large-journal
+comparison; the variable that does decide the outcome is unread records per poll.
 
 ### What the twelve questions came to
 
@@ -714,7 +753,9 @@ volume against the batched backend and `robocopy /L /E /XJ`. The watch row above
 ground-truth version of that check: twelve known changes in four groups produce **four** update
 lines and **28** journal records that the probe accounts for reason by reason (three per
 create, two per extend, three per rename, one per delete), and the last update's totals equal a
-full scan of the same tree exactly. A watch that re-emitted records would show more update
+full scan of the same tree exactly. The purge section below covers the case a system volume
+cannot reach: a journal that drops unread records fails the read with 1181, and the fallback
+that follows still lands on the right totals. A watch that re-emitted records would show more update
 lines than groups; one that lost a change would show fewer, or totals that differ. Both
 counters are in the row so either failure is visible without reading the output.
 
