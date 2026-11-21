@@ -68,6 +68,11 @@ pub struct Flags {
     pub multi_line: bool,
     /// `.` matches any byte, including `\n`.
     pub dot_matches_newline: bool,
+    /// `--no-unicode`: the pattern never gets a character program, so `.`, `\w`, `\d`,
+    /// `\s`, `\b`, negated classes and `-i` keep their byte (ASCII) meanings on every
+    /// haystack. A character outside ASCII is its UTF-8 bytes; `\p{..}` and a non-ASCII
+    /// class member are errors.
+    pub ascii_only: bool,
 }
 
 /// A match: byte offsets into the haystack, `start..end`.
@@ -2775,7 +2780,7 @@ impl<'a> Parser<'a> {
         Ok(Parsed {
             node,
             folded: p.folded,
-            unicode: p.needs_unicode,
+            unicode: p.needs_unicode && !flags.ascii_only,
             groups: p.groups - 1,
         })
     }
@@ -2961,6 +2966,11 @@ impl<'a> Parser<'a> {
                 let ch = self.next_char()?;
                 if ch.is_ascii() {
                     return Ok(self.literal_node(ch as u8));
+                }
+                if self.flags.ascii_only {
+                    let mut buf = [0u8; 4];
+                    let bytes = ch.encode_utf8(&mut buf).bytes();
+                    return Ok(Node::Concat(bytes.map(Node::Byte).collect()));
                 }
                 // A character outside ASCII is one code point on the character path, so
                 // the pattern needs Unicode semantics. Under `-i` it becomes the class of
@@ -3208,8 +3218,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn no_unicode_check(&self, what: &str) -> Result<(), String> {
+        match self.flags.ascii_only {
+            true => Err(self.err_at(&format!("{what} needs Unicode (--no-unicode)"), self.at)),
+            false => Ok(()),
+        }
+    }
+
     /// `\p{Name}` or `\p{N}`: a Unicode general category, with a leading `^` negating.
     fn property_class(&mut self, start: usize) -> Result<CharClass, String> {
+        self.no_unicode_check("a Unicode property class")?;
         let name = if self.peek() == Some(b'{') {
             self.at += 1;
             let rest = &self.src[self.at..];
@@ -3295,6 +3313,7 @@ impl<'a> Parser<'a> {
                 } else {
                     let ch = self.next_char()?;
                     if !ch.is_ascii() {
+                        self.no_unicode_check("a non-ASCII class member")?;
                         self.needs_unicode = true;
                         wide = true;
                     }
@@ -3330,6 +3349,7 @@ impl<'a> Parser<'a> {
             } else {
                 let h = self.next_char()?;
                 if !h.is_ascii() {
+                    self.no_unicode_check("a non-ASCII class member")?;
                     self.needs_unicode = true;
                     wide = true;
                 }
