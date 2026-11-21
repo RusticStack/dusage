@@ -3019,15 +3019,19 @@ fn macos_fstype_selects_by_the_type_the_kernel_reports() {
         saw(&o)
     );
 
+    // Nothing matched, so the documented contract (docs/ARCHITECTURE.md, "Search exit
+    // codes": 0 = something matched, 1 = nothing did, 2 = bad) says 1 — not success.
+    // Emptiness is the substantive half: it catches a predicate that matches everything.
     let o = find_at(&f.root, &["-fstype", "no_such_filesystem", "-type", "f"]);
-    assert!(
-        o.status.success(),
-        "find -fstype no_such_filesystem: {}",
-        saw(&o)
-    );
+    assert_eq!(code(&o), 1, "find -fstype no_such_filesystem: {}", saw(&o));
     assert!(
         stdout(&o).is_empty(),
         "an unmounted type selected something: {}",
+        saw(&o)
+    );
+    assert!(
+        stderr(&o).is_empty(),
+        "an unmounted type was reported as an error: {}",
         saw(&o)
     );
 }
