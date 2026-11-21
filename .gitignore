@@ -1,2 +1,7 @@
 /target
 bench/results.json
+bench/windows/results.json
+bench/windows/admin-results.jsonl
+bench/windows/.rows*
+bench/windows/admin.log
+bench/windows/.*.log
