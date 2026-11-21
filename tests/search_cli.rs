@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 struct Fixture {
     root: PathBuf,
@@ -10,8 +11,14 @@ struct Fixture {
 
 impl Fixture {
     fn new(tag: &str) -> Self {
-        let base =
-            std::env::temp_dir().join(format!("dusage_search_cli_{tag}_{}", std::process::id()));
+        // A counter, not just the tag: two tests that ask for the same tag run in parallel in
+        // one process, and a shared directory means one Drop deletes the other's fixture.
+        static N: AtomicU32 = AtomicU32::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "dusage_search_cli_{tag}_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&base);
         let root = base.join("root");
         fs::create_dir_all(root.join("src/deep")).unwrap();
@@ -57,6 +64,30 @@ fn run_with_env(args: &[&str], root: &Path, env: &[(&str, &str)]) -> Output {
         c.env(k, v);
     }
     c.output().unwrap()
+}
+
+/// Create a file symlink, or say why it cannot be made here.
+///
+/// Windows needs SeCreateSymbolicLinkPrivilege — an elevated shell, or Developer Mode — and
+/// without it the call fails with ERROR_PRIVILEGE_NOT_HELD (1314). The cases that need a link
+/// to exercise `-lname` and `-ls` have nothing to assert in that state, so they report the
+/// reason and return instead of failing: a red test for a missing privilege hides the red that
+/// means something.
+fn file_symlink(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(target, link);
+    match made {
+        Ok(()) => true,
+        Err(e) if e.raw_os_error() == Some(1314) => {
+            eprintln!(
+                "skipped: creating a file symlink needs SeCreateSymbolicLinkPrivilege (error 1314) or Developer Mode"
+            );
+            false
+        }
+        Err(e) => panic!("symlink {} -> {}: {e}", link.display(), target.display()),
+    }
 }
 
 fn stdout(o: &Output) -> String {
@@ -2836,10 +2867,9 @@ fn find_ls_prints_finds_columns_and_a_link_target() {
     let (_f, dir) = expr_tree("expr_ls");
     let target = dir.join("b.md");
     let link = dir.join("link.md");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &link).unwrap();
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&target, &link).unwrap();
+    if !file_symlink(&target, &link) {
+        return;
+    }
 
     let out = stdout(&find_at(&dir, &["-name", "a.rs", "-ls"]));
     let line = out.lines().next().unwrap_or_default();
@@ -2909,10 +2939,9 @@ fn find_lname_matches_the_link_target() {
     let (_f, dir) = expr_tree("expr_lname");
     let target = dir.join("b.md");
     let link = dir.join("link.md");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &link).unwrap();
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_file(&target, &link).unwrap();
+    if !file_symlink(&target, &link) {
+        return;
+    }
 
     let hit = stdout(&find_at(&dir, &["-lname", "*.md"]));
     assert!(hit.contains(&shown(&dir, "link.md")), "{hit}");

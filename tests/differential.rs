@@ -26,6 +26,31 @@ enum Tools {
 enum Expect {
     Agree,
     Known(&'static str),
+    /// The same catalogue entry, but it cannot hold against Git's grep on Windows: that grep
+    /// is an MSYS binary reading files in text mode, so it strips the CR of a CRLF line the way
+    /// dusage does and the two agree. Measured 2026-11-21 on `^crlf` over a CRLF fixture: grep
+    /// prints `crlf needle`, ripgrep (native) prints `crlf needle` and a carriage return.
+    /// Against grep on Windows the case must therefore *agree*, so a real regression still
+    /// fails here.
+    KnownExceptWindowsGrep(&'static str),
+}
+
+impl Expect {
+    /// Does this case expect dusage to disagree with `other` in this run?
+    fn expects_difference(self, other: &str) -> bool {
+        match self {
+            Expect::Agree => false,
+            Expect::Known(_) => true,
+            Expect::KnownExceptWindowsGrep(_) => !(cfg!(windows) && other == "grep"),
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Expect::Agree => "",
+            Expect::Known(id) | Expect::KnownExceptWindowsGrep(id) => id,
+        }
+    }
 }
 
 struct Case {
@@ -95,7 +120,7 @@ const fn sep_case(
     }
 }
 
-use Expect::{Agree, Known};
+use Expect::{Agree, Known, KnownExceptWindowsGrep};
 use Tools::{Both, Grep, Rg};
 
 fn corpus() -> Vec<Case> {
@@ -628,7 +653,7 @@ fn corpus() -> Vec<Case> {
         ),
         case(
             "crlf_start_anchor",
-            Known("crlf-strip"),
+            KnownExceptWindowsGrep("crlf-strip"),
             Both,
             "crlf",
             ".",
@@ -639,7 +664,7 @@ fn corpus() -> Vec<Case> {
         ),
         case(
             "crlf_plain_line",
-            Known("crlf-strip"),
+            KnownExceptWindowsGrep("crlf-strip"),
             Both,
             "crlf",
             ".",
@@ -650,7 +675,7 @@ fn corpus() -> Vec<Case> {
         ),
         case(
             "crlf_end_anchor",
-            Known("crlf-anchor"),
+            KnownExceptWindowsGrep("crlf-anchor"),
             Both,
             "crlf",
             ".",
@@ -1137,6 +1162,158 @@ fn tool_present(tool: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// A reference tool, driven in a way that leaves its arguments alone.
+///
+/// Git for Windows ships `grep`, `find` and `du` as MSYS binaries, and a Cygwin/MSYS binary
+/// started by a native Windows process rewrites its own argv: `-name "*.txt"` arrives as the
+/// directory listing (`find: paths must precede expression: 'digits.txt'`) and `[0-9]{2,3}`
+/// arrives as two words (`grep: [0-9]3: No such file or directory`). Started by an MSYS parent
+/// it does not, so on Windows every reference tool runs through `bash` with the arguments
+/// quoted here. On other platforms there is no such rewrite and the tool is run directly.
+/// ripgrep is a native binary everywhere and is never run through the shell.
+struct Ref {
+    shell: Option<PathBuf>,
+}
+
+/// Single-quote one argument for bash, which is the only thing that stops the rewrite.
+fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str(r"'\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+impl Ref {
+    /// `Err` with a reason when the reference tools cannot be driven faithfully here.
+    fn detect() -> Result<Ref, String> {
+        #[cfg(windows)]
+        {
+            match bash() {
+                Some(sh) => Ok(Ref { shell: Some(sh) }),
+                None => Err(
+                    "no bash.exe to drive the MSYS reference tools without argv rewriting"
+                        .to_string(),
+                ),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(Ref { shell: None })
+        }
+    }
+
+    fn run(&self, prog: &Path, dir: &Path, args: &[&str]) -> Output {
+        let mut c = match &self.shell {
+            Some(sh) => {
+                let mut line = quote(&prog.to_string_lossy());
+                for a in args {
+                    line.push(' ');
+                    line.push_str(&quote(a));
+                }
+                let mut c = Command::new(sh);
+                c.arg("-c").arg(line);
+                c
+            }
+            None => {
+                let mut c = Command::new(prog);
+                c.args(args);
+                c
+            }
+        };
+        c.current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("running {} {args:?}: {e}", prog.display()))
+    }
+}
+
+/// The `bash.exe` that ships with the MSYS tools these comparisons use.
+///
+/// Windows only: it exists to stop the argv rewriting above, which is a property of MSYS
+/// binaries started by a native process.
+#[cfg(windows)]
+fn bash() -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for var in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+        if let Some(p) = std::env::var_os(var) {
+            roots.push(PathBuf::from(p));
+        }
+    }
+    // A per-user or custom install: take the tree whatever bash.exe came from.
+    if let Ok(o) = Command::new("where").arg("bash.exe").output() {
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            if let Some(bin) = Path::new(line.trim()).parent() {
+                if let Some(usr) = bin.parent() {
+                    roots.push(usr.parent().map(Path::to_path_buf).unwrap_or_default());
+                }
+            }
+        }
+    }
+    for root in roots {
+        for rel in [
+            "Git/usr/bin/bash.exe",
+            "usr/bin/bash.exe",
+            "Git/bin/bash.exe",
+        ] {
+            let cand = root.join(rel);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// The GNU `find` this suite compares against, when it can be identified.
+///
+/// Windows ships `C:\Windows\System32\find.exe`, a text-search tool that shares the name, and
+/// PATH order decides which one `Command::new("find")` gets; Git for Windows' GNU findutils
+/// lives in `<git>\usr\bin`. Comparing against the wrong one is worse than not comparing, so
+/// this resolves the GNU binary and says which one it found.
+fn gnu_find() -> Option<PathBuf> {
+    let mut probe = Command::new("find");
+    probe.arg("--version");
+    if let Ok(o) = probe.output() {
+        if o.status.success() && String::from_utf8_lossy(&o.stdout).contains("GNU findutils") {
+            return Some(PathBuf::from("find"));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        for var in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+            if let Some(p) = std::env::var_os(var) {
+                roots.push(PathBuf::from(p));
+            }
+        }
+        // A per-user or custom install: take the tree whatever bash.exe came from.
+        if let Ok(o) = Command::new("where").arg("bash.exe").output() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                if let Some(bin) = Path::new(line.trim()).parent() {
+                    if let Some(usr) = bin.parent() {
+                        roots.push(usr.parent().map(Path::to_path_buf).unwrap_or_default());
+                    }
+                }
+            }
+        }
+        for root in roots {
+            for rel in ["Git/usr/bin/find.exe", "usr/bin/find.exe"] {
+                let cand = root.join(rel);
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn run(prog: &str, dir: &Path, args: &[&str]) -> Output {
     Command::new(prog)
         .args(args)
@@ -1145,7 +1322,27 @@ fn run(prog: &str, dir: &Path, args: &[&str]) -> Output {
         .unwrap_or_else(|e| panic!("running {prog} {args:?}: {e}"))
 }
 
-/// Sorted stdout with the leading `./` removed; `--` group separators are dropped unless
+/// One output line with its path field made separator-neutral.
+///
+/// On Windows dusage prints `.\ascii.txt` where grep and rg print `./ascii.txt`: the same
+/// answer in different notation. The suite compares text, so the notation is levelled before
+/// the bytes are. Only the path field is rewritten — the part before the first `:` that cannot
+/// be a drive letter — because matched text can contain a backslash of its own, and rewriting
+/// that would hide a difference rather than remove one.
+fn comparable(l: &str) -> String {
+    let cut = l
+        .char_indices()
+        .skip_while(|(i, _)| *i < 2)
+        .find(|(_, ch)| *ch == ':')
+        .map(|(i, _)| i)
+        .unwrap_or(l.len());
+    let (head, tail) = l.split_at(cut);
+    let head = head.strip_prefix("./").unwrap_or(head);
+    let head = head.strip_prefix(".\\").unwrap_or(head);
+    format!("{}{}", head.replace('\\', "/"), tail)
+}
+
+/// Sorted, separator-neutral stdout; `--` group separators are dropped unless
 /// `keep_separators` is set (dusage prints them between any two non-adjacent matches).
 fn lines(o: &Output, keep_separators: bool) -> Vec<String> {
     // Splitting on raw `\n` keeps a trailing `\r`, which is the whole point of the CRLF
@@ -1154,13 +1351,7 @@ fn lines(o: &Output, keep_separators: bool) -> Vec<String> {
         .stdout
         .split(|b| *b == b'\n')
         .filter(|l| !l.is_empty())
-        .map(|l| {
-            let l = String::from_utf8_lossy(l).into_owned();
-            match l.strip_prefix("./") {
-                Some(rest) => rest.to_string(),
-                None => l,
-            }
-        })
+        .map(|l| comparable(&String::from_utf8_lossy(l)))
         .filter(|l| keep_separators || l != SEPARATOR)
         .collect();
     v.sort();
@@ -1171,33 +1362,42 @@ fn code(o: &Output) -> i32 {
     o.status.code().unwrap_or(-1)
 }
 
-fn check(
-    name: &str,
-    expect: Expect,
-    got: &[String],
-    want: &[String],
-    gcode: i32,
-    wcode: i32,
-    other: &str,
-) {
-    match expect {
-        Agree => {
-            assert_eq!(
-                (got, gcode),
-                (want, wcode),
-                "case {name}: dusage differs from {other}\n  dusage: {got:#?}\n  {other}: {want:#?}"
-            );
-        }
-        Known(id) => {
-            assert!(
-                got != want || gcode != wcode,
-                "case {name}: known difference {id} is gone; retire it from scripts/README.md"
-            );
-        }
+/// The tool's own complaint, kept for the failure message: when a comparison fails because
+/// the reference tool refused the invocation, the message should say so.
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// One side of a comparison: what a tool printed, what it exited with, and what it complained
+/// about — the last one kept because a failure is often the reference tool refusing the
+/// invocation rather than the two disagreeing.
+struct Side<'a> {
+    lines: &'a [String],
+    code: i32,
+    err: &'a str,
+}
+
+fn check(name: &str, expect: Expect, got: Side<'_>, want: Side<'_>, other: &str) {
+    if expect.expects_difference(other) {
+        assert!(
+            got.lines != want.lines || got.code != want.code,
+            "case {name}: known difference {} is gone; retire it from scripts/README.md",
+            expect.id()
+        );
+    } else {
+        assert_eq!(
+            (got.lines, got.code),
+            (want.lines, want.code),
+            "case {name}: dusage differs from {other}\n  dusage: {:#?}\n  {other}: {:#?}\n  dusage stderr: {:?}\n  {other} stderr: {:?}",
+            got.lines,
+            want.lines,
+            got.err,
+            want.err
+        );
     }
 }
 
-fn run_case(f: &Fixture, c: &Case, have_rg: bool, have_grep: bool) -> Option<()> {
+fn run_case(f: &Fixture, c: &Case, have_rg: bool, have_grep: bool, r: &Ref) -> Option<()> {
     let dir = f.root.join(c.tree);
     let mut dargs = vec!["search"];
     dargs.extend_from_slice(c.dusage);
@@ -1215,14 +1415,21 @@ fn run_case(f: &Fixture, c: &Case, have_rg: bool, have_grep: bool) -> Option<()>
         rargs.extend_from_slice(c.rg);
         rargs.push(c.pattern);
         rargs.push(c.target);
-        let r = run("rg", &dir, &rargs);
+        let rg = run("rg", &dir, &rargs);
+        let want = lines(&rg, c.keep_separators);
         check(
             c.name,
             c.expect,
-            &dlines,
-            &lines(&r, c.keep_separators),
-            code(&d),
-            code(&r),
+            Side {
+                lines: &dlines,
+                code: code(&d),
+                err: &stderr(&d),
+            },
+            Side {
+                lines: &want,
+                code: code(&rg),
+                err: &stderr(&rg),
+            },
             "rg",
         );
         compared += 1;
@@ -1235,14 +1442,21 @@ fn run_case(f: &Fixture, c: &Case, have_rg: bool, have_grep: bool) -> Option<()>
         gargs.extend_from_slice(c.grep);
         gargs.push(c.pattern);
         gargs.push(c.target);
-        let g = run("grep", &dir, &gargs);
+        let g = r.run(Path::new("grep"), &dir, &gargs);
+        let want = lines(&g, c.keep_separators);
         check(
             c.name,
             c.expect,
-            &dlines,
-            &lines(&g, c.keep_separators),
-            code(&d),
-            code(&g),
+            Side {
+                lines: &dlines,
+                code: code(&d),
+                err: &stderr(&d),
+            },
+            Side {
+                lines: &want,
+                code: code(&g),
+                err: &stderr(&g),
+            },
             "grep",
         );
         compared += 1;
@@ -1261,10 +1475,17 @@ fn differential_against_rg_and_grep() {
         );
         return;
     }
+    let r = match Ref::detect() {
+        Ok(r) => r,
+        Err(why) => {
+            eprintln!("skipping differential tests: {why}");
+            return;
+        }
+    };
     let f = Fixture::build("search");
     let mut skipped = Vec::new();
     for c in corpus() {
-        if run_case(&f, &c, have_rg, have_grep).is_none() {
+        if run_case(&f, &c, have_rg, have_grep, &r).is_none() {
             skipped.push(c.name);
         }
     }
@@ -1276,10 +1497,20 @@ fn differential_against_rg_and_grep() {
 
 #[test]
 fn differential_find_against_find() {
-    if !tool_present("find") {
-        eprintln!("skipping find differential tests: no find(1)");
+    let Some(find) = gnu_find() else {
+        eprintln!(
+            "skipping find differential tests: no GNU find(1) found; the System32 find.exe is \
+             a text-search tool and does not answer --version"
+        );
         return;
-    }
+    };
+    let r = match Ref::detect() {
+        Ok(r) => r,
+        Err(why) => {
+            eprintln!("skipping find differential tests: {why}");
+            return;
+        }
+    };
     let f = Fixture::build("find");
     for c in find_corpus() {
         let dir = f.root.join(c.tree);
@@ -1291,7 +1522,7 @@ fn differential_find_against_find() {
         if fargs.is_empty() {
             fargs.push(".");
         }
-        let g = run("find", &dir, &fargs);
+        let g = r.run(&find, &dir, &fargs);
         assert_eq!(
             lines(&d, false),
             lines(&g, false),
