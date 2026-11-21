@@ -585,7 +585,9 @@ real tree gets slower: `scan-t*-Windows` runs 2448, 1518, 899, 752, 755, 795 and
 hardware threads are available and the eighth worker already reaches the wall — which is
 what the default now encodes: one worker per core clamped to 4..8 on Windows
 (`native::MAX_WORKERS`), the same throughput as the old 4..16 clamp with half the workers.
-Linux keeps 16 because nothing wider than a 2-vCPU box has been swept there.
+Linux keeps its old 4..16 clamp because nothing wider than a 2-vCPU box has ever been
+swept there — that 16 is inherited, **not** measured, and the only Linux sweep in this
+document (2 vCPUs, `threads-scan-*`) says a small box is already past its own plateau.
 
 **3. Real-time protection.** Measured only, by the elevated half of the harness: the same
 scan and the same delete with Defender watching and with the fixture root excluded, and the
@@ -646,6 +648,10 @@ and deleted under it, whose printed update is compared with what a full rescan w
   cold pass purges the standby list and working sets
   (`NtSetSystemInformation(SystemMemoryListInformation)`), which needs
   `SeProfileSingleProcessPrivilege`.
+- **The Linux clamp is not a measurement.** 4..16 on Linux is the number this repository
+  already shipped; the sweep below it was taken on a 2-vCPU container. Windows is the only
+  platform where the plateau has been measured, so 8 there is a result and 16 on Linux is a
+  default nobody has checked on hardware wide enough to test it.
 - **No peak RSS on Windows.** The Linux tables take it from `/usr/bin/time -v` or a `VmHWM`
   sampler; this harness has neither, so the column is empty rather than guessed.
 - **`robocopy` is the oracle, with the limits the roadmap already records.** `/XJ` excludes

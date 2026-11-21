@@ -180,8 +180,9 @@ record and the caveats. Re-run the harness rather than trusting this list if the
    workers, and past that the directory-heavy real tree is slower: 752 ms at 8 threads, 755 at
    16, 795 at 24, 850 at 32. That is a latency ceiling, not a CPU one — 24 hardware threads
    exist and the eighth worker already reaches the wall. `native::MAX_WORKERS` is now 8 on
-   Windows, so the default keeps the throughput and halves the workers; Linux keeps 16 because
-   nothing wider than a 2-vCPU box has been swept there. The "4x cores" hypothesis is dead.
+   Windows, so the default keeps the throughput and halves the workers; Linux keeps its
+   inherited 4..16 clamp, which is unswept above 2 vCPUs rather than measured. The
+   "4x cores" hypothesis is dead.
 3. **Protection effect. Measured in the elevated half of the harness.** `admin.ps1` runs the
    same scan and the same delete with real-time protection on and with the fixture root
    excluded, and removes the exclusion before it returns. Measurement only: nothing here
