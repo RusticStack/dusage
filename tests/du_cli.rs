@@ -605,6 +605,40 @@ fn alloc_of(path: &Path) -> u64 {
     fs::symlink_metadata(path).unwrap().blocks() * 512
 }
 
+/// The rendering `-h` and `--si` promise, derived from the rule `src/cmd/du.rs` documents:
+/// one decimal below ten, none above, always rounded up, carrying into the next unit at the
+/// base. Written out here rather than read off one fixture's byte count, so a volume that
+/// charges a sparse file in full does not turn the assertion into a claim about the volume.
+#[cfg(unix)]
+fn human_rendering(bytes: u64, base: u64) -> String {
+    const BIN: [&str; 7] = ["", "K", "M", "G", "T", "P", "E"];
+    const SI: [&str; 7] = ["", "k", "M", "G", "T", "P", "E"];
+    let units = if base == 1000 { SI } else { BIN };
+    if bytes < base {
+        return bytes.to_string();
+    }
+    let mut idx = 0;
+    let mut v = bytes as f64;
+    while v >= base as f64 && idx < units.len() - 1 {
+        v /= base as f64;
+        idx += 1;
+    }
+    let mut left = if v < 10.0 {
+        (v * 10.0).ceil() / 10.0
+    } else {
+        v.ceil()
+    };
+    if left >= base as f64 && idx < units.len() - 1 {
+        left /= base as f64;
+        idx += 1;
+    }
+    if left < 10.0 {
+        format!("{left:.1}{}", units[idx])
+    } else {
+        format!("{left:.0}{}", units[idx])
+    }
+}
+
 /// The bytes `dir` and everything under it occupies, itself included.
 #[cfg(unix)]
 fn tree_alloc(dir: &Path) -> u64 {
@@ -726,10 +760,23 @@ fn default_counts_allocated_blocks_and_matches_du() {
         alloc_of(&sparse).div_ceil(1024),
         "{r:?}"
     );
-    assert!(
-        value(&r, "sparse") * 1024 < fs::metadata(&sparse).unwrap().len(),
-        "the hole must not be charged: {r:?}"
-    );
+    // A volume that materialises holes charges them, and then there is no hole to assert
+    // about here — say that rather than call the tool wrong, the way
+    // `a_file_of_only_holes_costs_nothing` does. Every other assertion below is unaffected.
+    let claimed = fs::metadata(&sparse).unwrap().len();
+    if alloc_of(&sparse) >= claimed {
+        eprintln!(
+            "this filesystem materialises holes ({} allocated of {} claimed); \
+             skipping the hole assertion",
+            alloc_of(&sparse),
+            claimed
+        );
+    } else {
+        assert!(
+            value(&r, "sparse") * 1024 < claimed,
+            "the hole must not be charged: {r:?}"
+        );
+    }
     for dir in ["root", "sub"] {
         let want = match dir {
             "root" => tree_alloc(&root),
@@ -886,19 +933,13 @@ fn human_and_si_follow_the_allocated_base() {
     let h = rows(&du(&["-a", "-h", root.to_str().unwrap()]));
     let b = rows(&du(&["-a", "-h", "-b", root.to_str().unwrap()]));
     assert_eq!(size(&b, "sparse"), "1.1M", "{b:?}");
-    assert_eq!(
-        size(&h, "sparse"),
-        format!(
-            "{:.1}K",
-            (alloc_of(&root.join("sparse")) as f64 / 1024.0 * 10.0).ceil() / 10.0
-        ),
-        "{h:?}"
-    );
+    // Both expectations come from the rule, not from a hardcoded `K` rendering: a volume
+    // that charges the hole in full makes the sparse file a megabyte, and the rule renders
+    // that `1.1M` where 8 KiB renders `8.2K`.
+    let alloc = alloc_of(&root.join("sparse"));
+    assert_eq!(size(&h, "sparse"), human_rendering(alloc, 1024), "{h:?}");
     let si = rows(&du(&["-a", "--si", root.to_str().unwrap()]));
-    assert!(
-        size(&si, "sparse").ends_with('k') && size(&si, "sparse") != "1.0k",
-        "{si:?}"
-    );
+    assert_eq!(size(&si, "sparse"), human_rendering(alloc, 1000), "{si:?}");
     if let Some(want) = system_du(&["-a", "-h", root.to_str().unwrap()]) {
         assert_human_rows_match(h, want);
     }

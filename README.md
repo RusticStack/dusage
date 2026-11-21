@@ -16,7 +16,7 @@ A fast disk-usage scanner, a content and path search, and a safe parallel pruner
   <a href="https://github.com/RusticStack/dusage/releases/latest"><img src="https://img.shields.io/github/v/release/RusticStack/dusage?style=flat-square&label=latest&color=CC420C" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-2A2A30?style=flat-square" alt="Windows 10 and 11">
   <img src="https://img.shields.io/badge/Linux-x86__64-2A2A30?style=flat-square&logo=linux&logoColor=white" alt="Linux x86_64">
-  <img src="https://img.shields.io/badge/macOS-x86__64%20(arm64%20unverified)-2A2A30?style=flat-square&logo=apple&logoColor=white" alt="macOS x86_64; arm64 unverified">
+  <img src="https://img.shields.io/badge/macOS-x86__64%20%2B%20arm64-2A2A30?style=flat-square&logo=apple&logoColor=white" alt="macOS x86_64 and arm64">
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2A2A30?style=flat-square" alt="MIT OR Apache-2.0"></a>
   <a href="https://github.com/RusticStack/dusage/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/RusticStack/dusage/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
   <img src="https://img.shields.io/badge/dependencies-0-2A2A30?style=flat-square" alt="Zero dependencies">
@@ -168,12 +168,13 @@ you want for `dusage /`. Windows mount points are reparse points and are always 
 | `--one-filesystem` | no-op (mount points are links) | skips other devices | skips other devices |
 | Protected `fastdel` roots | volume roots, `Windows`, `Program Files`, `ProgramData`, profile | `/`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/proc`, `/sys`, `/dev`, `/run`, `/var`, `/opt`, `/srv`, `/root`, `/home`, `$HOME` | `/`, the `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/Applications`, `/cores` and `/dev` subtrees, `/Users`, `$HOME`, `/opt`, `/Volumes`, `/private/tmp`, `/private/var` and every mount root `getmntinfo` reports |
 
-macOS is cross-checked for `x86_64-apple-darwin` from Linux and CI runs the full suite on a
-real Intel Mac (`macos-15-intel`), which is what confirms the Darwin
-`struct stat`, `struct dirent`, `struct kevent` and the `$INODE64` symbol aliases that the
-compile-time `size_of`/`offset_of` assertions pin. Apple-silicon `arm64` is a different
-target with different bindings and is **unverified**: nothing in this repository has run it.
-MRI-14 carries that work and the runner schedule.
+macOS is cross-checked for `x86_64-apple-darwin` and `aarch64-apple-darwin` from Linux, and
+CI runs the full suite on both architectures on real Macs: `macos-15-intel` binds the
+`$INODE64` symbols, and `macos-15` (Apple Silicon) binds the plain ones, because the aliases
+are `cfg`-gated off there. The Darwin `struct stat`, `struct dirent`, `struct kevent`,
+`struct statfs` and the symbol aliases are pinned by compile-time `size_of`/`offset_of`
+assertions, which a cross-check executes but cannot prove against libSystem; the two macOS
+legs are what confirm them.
 
 The macOS legs are not there to re-prove the port; they are there so that a change cannot
 land without being built for this platform. The port was the first code written against

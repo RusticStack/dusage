@@ -326,11 +326,12 @@ mutates mid-read is reported as the kernel streamed it.
 `struct stat` (144 bytes), `struct dirent`, `struct kevent` and `struct statfs` (2168 bytes,
 `__DARWIN_STRUCT_STATFS64` from Apple's `bsd/sys/mount.h`, `f_fstypename` at 72) are declared
 in `src/mac/sys.rs` and pinned by `const` `size_of`/`offset_of` assertions. Those execute in a
-cross-check and prove only that the declaration is self-consistent; the macOS CI leg is what
-proves it against libSystem, and the mount-record test is the one that catches a `struct
-statfs` bound at the wrong offset. The `$INODE64` link names are what Darwin's headers resolve
-`readdir`, `stat`, `lstat`, `fstatat`, `statfs` and `getmntinfo` to, the plain symbols filling
-the legacy structs of the same names instead; `open` is variadic, as in C, because rustc
+cross-check and prove only that the declaration is self-consistent; the macOS legs are what
+prove it against libSystem, and the mount-record test is the one that catches a `struct statfs`
+bound at the wrong offset. The `$INODE64` link names are what Darwin's headers resolve
+`readdir`, `stat`, `lstat`, `fstatat`, `statfs` and `getmntinfo` to on x86_64, the plain
+symbols filling the legacy structs of the same names instead; on arm64 those aliases compile
+out and the plain names are the 64-bit ones. `open` is variadic, as in C, because rustc
 rejects a fixed-arity declaration of it on Darwin.
 
 `sys::mounts()` is the mount table: `getmntinfo$INODE64`, queried with `MNT_NOWAIT` so a dead

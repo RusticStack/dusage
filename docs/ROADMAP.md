@@ -20,12 +20,12 @@ filesystem through `statvfs` and `/proc/self/mounts` on Linux and `GetDiskFreeSp
 volume list on Windows. Both are measured against the tools they replace in
 `docs/BENCHMARKS.md`; the last section records what the numbers say and what is still open.
 
-**Status (macOS, x86_64).** The crate compiles for `x86_64-apple-darwin` and has a third
+**Status (macOS).** The crate compiles for `x86_64-apple-darwin` and `aarch64-apple-darwin`, and has a third
 platform module, `src/mac/`: enumeration over `readdir$INODE64`/`fstatat`, deletion over
 `unlink`/`rmdir`, a kqueue `EVFILT_VNODE` change feed, a macOS guard, and volume roots and
 `-fstype` names from the kernel's own mount table. It is cross-checked from Linux and has run
-in CI on a real x86_64 Mac; arm64 has not been run yet. The limits that come with it are in
-the macOS section at the end, and MRI-14 carries the runner schedule.
+in CI on real Intel and Apple Silicon Macs. The limits that come with it are in the macOS
+section at the end, and MRI-14 carries the runner schedule.
 
 **Status 0.4.0 (Linux).** The whole tool set now runs on Linux. Enumeration, deletion, the
 protected-root guard, `--one-filesystem` and an inotify change feed are implemented and
@@ -521,18 +521,22 @@ smaller than that; `docs/BENCHMARKS.md` says so in its noise bullet and the
 - `--stats` is one line today; a per-directory breakdown would make "why is this
   slow" answerable without a profiler.
 
-## macOS (x86_64), as running
+## macOS (x86_64 and arm64), as running
 
 **Status.** `lib.rs` accepts `target_os = "macos"` and aliases `src/mac/` as `crate::native`,
 the third arm beside `src/unix/` and `src/win/`. Two things prove it, in this order: a
-cross-check for `x86_64-apple-darwin` from Linux — `cargo check`, `cargo check --tests` and
-`cargo clippy --all-targets -D warnings` — and a `macos-15-intel` CI leg that runs the same
-format, lint, test and release-build steps as the other platforms on a real Mac. That leg is
-green, so the symbols resolve and the layouts hold on x86_64: everything the cross-check
-could not prove, the runner proved. Cross-checking remains the fast gate — it proves the
-`cfg` wiring, the types and that the FFI declarations compile — and arm64 is still unrun,
-with its own bindings, so nothing here speaks for it; MRI-14 carries that work and the runner
-schedule.
+cross-check from Linux for `x86_64-apple-darwin` and `aarch64-apple-darwin` — `cargo check`,
+`cargo check --tests` and `cargo clippy --all-targets -D warnings` — and two CI legs that run
+the same format, lint, test and release-build steps on real Macs: `macos-15-intel` and
+`macos-15` (Apple Silicon). Both are green, so the symbols resolve and the layouts hold on
+both architectures: everything the cross-check could not prove, the runners proved.
+
+**Both architectures are verified by a run, and they are verified separately.** The Intel leg
+executes the `$INODE64` bindings; the Apple Silicon leg executes the plain ones, because
+`sys.rs` gates every alias to `not(target_arch = "aarch64")`. That second leg is the first
+test the plain names ever had, and it is why adding it was worth more than a fifth run of the
+Intel path. Cross-checking remains the fast gate — it proves the `cfg` wiring, the types and
+that the FFI declarations compile — and the runner is what proves symbols and layouts.
 
 **Done.** Enumeration is `open` + `fdopendir` + `readdir$INODE64`, with `fstatat$INODE64`
 per entry against the open directory descriptor, so `alloc` is `st_blocks * 512` and
@@ -596,9 +600,13 @@ consequence it has for the next change here.
   is what caught the missing `fdopendir$INODE64` alias. Those assertions stay: they are the
   guard against a layout drifting silently, and the mount-record test dumps the record when
   one drifts.
-- **CI is on a clock, and the schedule lives in MRI-14.** The `macos-15-intel` runner label
-  is Intel-only and GitHub retires x86_64 macOS images; MRI-14 carries the date and the arm64
-  answer that outlives them, so this file does not restate either.
+- **The coverage is a runner label, and labels retire.** Both architectures are verified:
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and
+  `cargo build --release` all pass on Intel and on Apple Silicon, and
+  `cargo clippy --target aarch64-apple-darwin` runs locally against the same `cfg` path. What
+  is not durable is the label: the macOS images GitHub offers change, and `macos-14` was
+  already gone when the arm64 leg was added (a job asking for it is cancelled with no runner
+  assigned). MRI-14 tracks the schedule.
 
 **What the legs are for.** Four times now, a change has landed on `main` that no macOS build
 could see, and three of those came *after* the port existed: `tree` gated its own

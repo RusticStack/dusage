@@ -32,13 +32,37 @@ jobs:
             target/release/fastdel.exe
           if-no-files-found: error
 
-  # Intel macOS. The label is the Intel-specific image: `macos-15-intel` runs on x86_64,
-  # which is the target the crate is cross-checked against from Linux, and Apple-silicon
-  # arm64 is a different target that nothing here exercises. The label itself is on a
-  # clock — GitHub retires x86_64 macOS runners in August 2027 — so this leg stops being
-  # available then and the port needs an arm64 answer before it does.
+  # Intel macOS. The label is the Intel-specific image, so this leg runs on x86_64, which is
+  # also the target the crate is cross-checked against from Linux. The label is
+  # x86_64-specific and time-limited: GitHub is retiring its x86_64 macOS runners, and MRI-14
+  # tracks the schedule. The arm64 leg below is the answer that outlives it.
   macos:
     runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Build release
+        run: cargo build --release
+
+  # Apple-silicon macOS. Not redundant with the leg above: `src/mac/sys.rs` gates every
+  # `$INODE64` alias to `not(target_arch = "aarch64")`, so on arm64 the *plain* Darwin
+  # symbols are the ones that get bound — a different set of calls, exercised only here.
+  #
+  # `macos-15` rather than an older arm64 image because it is the same OS generation as the
+  # Intel leg, so a difference between the two is attributable to the architecture. The
+  # arm64 labels GitHub still offers are `macos-latest`, `macos-15`, `macos-26` and
+  # `xcode-27`; `macos-14` is no longer one of them, and a job asking for it is cancelled
+  # with no runner assigned.
+  macos-arm64:
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
