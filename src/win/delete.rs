@@ -98,37 +98,55 @@ fn clear_readonly(h: &OwnedHandle) -> io::Result<()> {
 /// Delete one entry *without following* it: a junction/symlink is removed as a link.
 /// A non-empty directory yields `ERROR_DIR_NOT_EMPTY`.
 pub fn delete_entry(path: &Path) -> io::Result<()> {
+    delete_entry_with(path, true)
+}
+
+/// The one delete call, with the disposition chosen by the caller: POSIX semantics
+/// (`FILE_DISPOSITION_FLAG_POSIX_SEMANTICS`) or the classic delete-on-close. POSIX carries
+/// the readonly override and a one-step rename; classic needs the attribute cleared first.
+/// `examples/win_del_perf.rs` measures the two against each other.
+pub fn delete_entry_with(path: &Path, posix: bool) -> io::Result<()> {
     let h = sys::open(
         path,
         sys::DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
     )?;
-    let ex = FileDispositionInfoEx {
-        flags: FILE_DISPOSITION_FLAG_DELETE
-            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
-            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
-    };
-    match set_info(&h, FILE_DISPOSITION_INFO_EX_CLASS, &ex) {
-        Ok(()) => Ok(()),
-        Err(e)
-            if matches!(
-                e.raw_os_error(),
-                Some(sys::ERROR_INVALID_PARAMETER) | Some(sys::ERROR_NOT_SUPPORTED)
-            ) =>
-        {
-            clear_readonly(&h)?;
-            set_info(
-                &h,
-                FILE_DISPOSITION_INFO_CLASS,
-                &FileDispositionInfo { delete_file: 1 },
-            )
+    if posix {
+        let ex = FileDispositionInfoEx {
+            flags: FILE_DISPOSITION_FLAG_DELETE
+                | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+                | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        };
+        match set_info(&h, FILE_DISPOSITION_INFO_EX_CLASS, &ex) {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(sys::ERROR_INVALID_PARAMETER) | Some(sys::ERROR_NOT_SUPPORTED)
+                ) => {}
+            Err(e) => return Err(e),
         }
-        Err(e) => Err(e),
     }
+    clear_readonly(&h)?;
+    set_info(
+        &h,
+        FILE_DISPOSITION_INFO_CLASS,
+        &FileDispositionInfo { delete_file: 1 },
+    )
 }
 
-fn del(p: &Path, errs: &mut ErrorCounts, deleted: &mut u64) {
-    match delete_entry(p) {
+/// Recursive serial delete through `delete_entry` under one disposition, counting the
+/// entries removed and classifying every failure. Pairs with `remove_tree`'s parallel
+/// caller in `examples/win_del_perf.rs`.
+pub fn remove_tree_with(path: &Path, posix: bool) -> (u64, ErrorCounts) {
+    let mut deleted = 0u64;
+    let mut errs = ErrorCounts::default();
+    remove_tree_inner(path, posix, &mut deleted, &mut errs);
+    (deleted, errs)
+}
+
+fn del(p: &Path, posix: bool, errs: &mut ErrorCounts, deleted: &mut u64) {
+    match delete_entry_with(p, posix) {
         Ok(()) => *deleted += 1,
         Err(e) => {
             errs.record(&e);
@@ -146,17 +164,21 @@ fn is_reparse(m: &std::fs::Metadata) -> bool {
 pub fn remove_tree(path: &Path) -> (u64, ErrorCounts) {
     let mut deleted = 0u64;
     let mut errs = ErrorCounts::default();
+    remove_tree_inner(path, true, &mut deleted, &mut errs);
+    (deleted, errs)
+}
 
+fn remove_tree_inner(path: &Path, posix: bool, deleted: &mut u64, errs: &mut ErrorCounts) {
     let root_meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) => {
             errs.record(&e);
-            return (0, errs);
+            return;
         }
     };
     if !root_meta.is_dir() || is_reparse(&root_meta) {
-        del(path, &mut errs, &mut deleted);
-        return (deleted, errs);
+        del(path, posix, errs, deleted);
+        return;
     }
 
     // (dir, children_already_handled)
@@ -165,11 +187,11 @@ pub fn remove_tree(path: &Path) -> (u64, ErrorCounts) {
     let mut ents = Vec::new();
     while let Some((dir, done)) = stack.pop() {
         if done {
-            del(&dir, &mut errs, &mut deleted);
+            del(&dir, posix, errs, deleted);
             continue;
         }
         ents.clear();
-        if let Err(e) = reader.read(&dir, &mut ents, &mut errs) {
+        if let Err(e) = reader.read(&dir, &mut ents, errs) {
             errs.record(&e);
             continue;
         }
@@ -179,11 +201,10 @@ pub fn remove_tree(path: &Path) -> (u64, ErrorCounts) {
             if ent.is_dir() && !ent.is_reparse() {
                 stack.push((p, false));
             } else {
-                del(&p, &mut errs, &mut deleted);
+                del(&p, posix, errs, deleted);
             }
         }
     }
-    (deleted, errs)
 }
 
 #[cfg(test)]

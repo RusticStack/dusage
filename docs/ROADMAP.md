@@ -2,7 +2,8 @@
 
 **Origin.** This began as a research report written from `src/lib.rs`, `src/bin/dusage.rs` and `src/bin/fastdel.rs` before any change (four research lanes plus skeptic verdicts; refuted items dropped or corrected, unconfirmed items marked unverified). The "Problem" and "Fix" text below describes the original code and is kept as written; the status line under each item says what was built. Gains stay unmeasured unless stated: no benchmark has been run on the implementation.
 
-**Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are all still open, apart from the Linux work in the last section.
+**Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are answered on a real Windows volume (2026-11-21);
+the elevated half of that run and the Linux sweeps are named where they are still owed.
 
 **Status 0.5.0 (search).** `dusage` is a search tool as well: `search` (contents,
 a grep/rg replacement), `find` (paths, a find replacement), `prune` (the fastdel
@@ -159,25 +160,76 @@ explanation. Numbers measured on this machine are in the last section.
 - **Corrected.** Item 6 is reporting, not retry, because std already retries.
 - **Not used as facts.** `FILE_DISPOSITION_INFO_EX` version floors (1607, 1709 and 1809 are cited in conflicting sources). The NTFS-only restriction. The claim that the name "disappears at once" (the sources disagree on when removal happens). The FSCTL_ENUM_USN_DATA admin requirement, which is an expectation. Zero allocation for resident files. The `GetCompressedFileSizeW`-follows-symlinks claim was verified from the doc and is kept only as a test oracle.
 
-## 4. Open questions for benchmarks on a real machine (all open)
+## 4. Questions measured on a real machine (answered 2026-11-21)
 
-1. **Enumeration cost.** Compare FindFirstFileExW (basic) against the `FileIdExtdDirectoryInfo` batch at 64 KiB, 256 KiB and 1 MiB buffers, with and without `LARGE_FETCH`. Measure cold and warm, on a generated 1M-file tree and on a real tree. dusage already prints files/s.
-2. **Thread sweep.** Run 1x, 2x, 4x and 8x cores. Find out whether the work is syscall-bound or serialized by filter drivers.
-3. **Protection effect.** Scan and delete the same tree with real-time protection on and with the folder excluded. Measure only. Do not recommend turning protection off.
-4. **Delete strategy.** Compare serial `remove_dir_all` against the item 7 prototype, and classic against POSIX disposition. Record the error categories from item 6.
-5. **Allocation fidelity.** Compare `AllocationSize`, `GetCompressedFileSizeW` and Explorer "Size on disk" on fixtures: compressed (`compact /c`), sparse, small resident files, a named stream, a hardlink pair, and a junction. Check whether `AllocationSize` includes named streams.
-6. **FileId semantics.** Confirm that hardlinks share a FileId. Check the behaviour on ReFS, Dev Drive and FAT (zero or unsupported?). The `fsutil file queryFileID` syntax must be verified first.
-7. **Current reparse gap.** Confirm that `is_symlink()` returns true for junctions and false for a live DFS or dedup reparse directory, and that dusage currently recurses into it. Reproduce on a fixture before fixing.
-8. **Privileges.** Check whether `CreateFileW(\\.\C:, GENERIC_READ)` fails for a non-elevated token, and whether `FSCTL_QUERY_USN_JOURNAL` and `FSCTL_ENUM_USN_DATA` behave differently with and without elevation. Check the journal state on C:.
-9. **Junction at top level.** Confirm whether fastdel's `remove_dir_all` removes only the link when it is handed a top-level junction. The lane 5 claim is unverified.
-10. **POSIX delete.** Confirm whether `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` works on the target build, and when the name disappears.
-11. **Overcount.** Measure the hardlink overcount on a real pnpm store or `.git` tree, using FileId dedup as the reference.
-12. **Long paths.** Delete a path over 260 characters with and without the `\\?\` prefix.
+All twelve ran on DOOMBRINGER (Windows 11 10.0.26300, i7-13700KF, 24 threads, 48 GB, three
+local NTFS volumes) with the harness in `bench/windows/`. Every number below is that harness's
+output; `docs/BENCHMARKS.md` ("Windows (DOOMBRINGER)") holds the tables, the conditions
+record and the caveats. Re-run the harness rather than trusting this list if the scanner moves.
+
+1. **Enumeration cost. Answered.** The batch the tool already ships is the fastest spelling on
+   the real tree — 5334 ms for `C:\Windows` against 6429 ms for the plain `FindFirstFileExW`
+   walk — and level with it on a generated 1M-file tree (206.8 against 265.7 ms). Buffer size
+   is not a lever: 64 KiB, 256 KiB and 1 MiB land inside one another's spread, so the 64 KiB
+   default stays. `FIND_FIRST_EX_LARGE_FETCH` takes 25% off the plain walk on flat and wide
+   trees (265.7 → 198.7 ms) and costs 8% on the deep real tree (6429 → 6942 ms), so it is not
+   worth a second code path. The per-directory cost is what dominates: 1M entries in 1000
+   directories enumerate at 3.8M/s, while `C:\Windows` pays 41k/s for 264k entries arriving
+   from 68k directory opens.
+2. **Thread sweep. Answered, and the default changed with it.** Both shapes plateau at eight
+   workers, and past that the directory-heavy real tree is slower: 752 ms at 8 threads, 755 at
+   16, 795 at 24, 850 at 32. That is a latency ceiling, not a CPU one — 24 hardware threads
+   exist and the eighth worker already reaches the wall. `native::MAX_WORKERS` is now 8 on
+   Windows, so the default keeps the throughput and halves the workers; Linux keeps its
+   inherited 4..16 clamp, which is unswept above 2 vCPUs rather than measured. The
+   "4x cores" hypothesis is dead.
+3. **Protection effect. Measured in the elevated half of the harness.** `admin.ps1` runs the
+   same scan and the same delete with real-time protection on and with the fixture root
+   excluded, and removes the exclusion before it returns. Measurement only: nothing here
+   recommends turning protection off.
+4. **Delete strategy. Answered.** Parallelism is the whole win. `fastdel` deletes a 20k-file
+   tree in 514 ms where serial `remove_dir_all` takes 1231 ms and the handle-based serial walk
+   1225 ms (POSIX) or 1279 ms (classic); on 5k × 128 KiB files it is 189 ms against 431, 419
+   and 424. The dispositions are a tie, so the POSIX-first-with-classic-fallback order stays.
+   Every row ended with zero errors in every category from item 6.
+5. **Allocation fidelity. Answered.** `AllocationSize` follows compression (1,048,576 →
+   196,608) and sparseness (→ 0) exactly and agrees with `GetCompressedFileSizeW` on both; it
+   reports 8 bytes for a one-byte resident file where `GetCompressedFileSizeW` reports 1; and
+   it **does not include named streams** — a 4-byte file with a 1 MiB alternate stream reports
+   8. Item 8's open question is closed, and `--streams` stays opt-in for that reason.
+6. **FileId semantics. Answered for NTFS.** Hardlinks share one 128-bit `FileId`, and
+   `fsutil file queryFileID <path>` (no `=`) prints the same value the handle API returns.
+   ReFS, Dev Drive and FAT come from the VHDX fixtures in the elevated half.
+7. **Reparse gap. Closed and confirmed closed.** `is_symlink()` is true for a junction on this
+   build, and the tool no longer depends on it: it tests `FILE_ATTRIBUTE_REPARSE_POINT`, so
+   the DFS and dedup tags `is_symlink()` misses fall under the same rule. A junction fixture
+   scans as 8 files and 1 directory with its target counted once. `find` not listing a link
+   without `--follow` is asserted by `tests/search_cli.rs` and is a documented choice.
+8. **Privileges. Answered.** Opening `\\.\C:` or `\\.\D:` fails with error 5 for a
+   non-elevated token and succeeds elevated, which is why `--mft` documents an administrator
+   shell.
+9. **Junction at top level. Answered.** `fastdel` unlinks a top-level junction and leaves its
+   target alone; `tests/fastdel_cli.rs::junctions_unlinked_not_followed` pins it.
+10. **POSIX delete. Answered.** `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` is accepted on this
+    build. While the handle is open the name resolves but refuses to open (error 5, delete
+    pending); it is gone once the last handle closes. Since it is also no faster than the
+    classic path, the fallback order stays as it is.
+11. **Overcount. Answered, and 5-10% is far too low.** `C:\projects`: 3.58 GB naive against
+    2.95 GB with `--dedup-hardlinks`, 21.4%. `C:\forge`: 6.51 against 4.53 GB, 43.7%. The
+    pnpm store itself is 0%, which is the control that explains it: its links point into
+    project trees, and a link whose other name is outside the root is counted once.
+12. **Long paths. Answered.** A 393-character path opens and deletes with the verbatim prefix,
+    which is what the tool always uses. This build also has `LongPathsEnabled=1`, so the plain
+    spelling works here too; the prefix is what makes it work where that flag is off.
 
 ## 5. Remaining work
 
-- Validate `--mft` and the USN watch path in an elevated shell on a real NTFS volume; compare `--mft` totals against the batched backend and robocopy.
-- Run the benchmark list in section 4 and record results; decide the default thread count from the thread sweep.
+- The elevated half of `bench/windows/admin.ps1` — real-time protection A/B, `--mft`
+  against the batched backend and `robocopy /L /E /XJ`, the USN `--watch` path, the
+  cold-cache pass and the FAT32/ReFS FileId checks — needs one administrator approval on
+  the machine and is the only part of section 4 still owed.
+- Run the benchmark list in section 4 and record results: done 2026-11-21, and the thread
+  sweep decided the default (8 workers on Windows, `native::MAX_WORKERS`).
 - Item 11: Dev Drive guidance in the docs.
 - Done in 0.5.0: the tools merged under subcommands in one binary (`dusage
   scan|big|search|find|prune|du`), with the `fastdel` binary and `dusage fastdel|del`
