@@ -9,7 +9,7 @@
 #
 # Environment: DUSAGE_BENCH_ROWS, DUSAGE_BENCH_RESULTS, DUSAGE_BENCH_ROOT,
 # DUSAGE_BENCH_REAL_ROOT, DUSAGE_BENCH_RUNS, DUSAGE_BENCH_DELETE_RUNS,
-# DUSAGE_BENCH_ADMIN_ROWS.
+# DUSAGE_BENCH_ADMIN_ROWS, DUSAGE_BENCH_GENERATED (the UTC stamp to record; defaults to now).
 
 set -u
 
@@ -38,7 +38,9 @@ CPUS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)
 RUSTC=$(rustc --version 2>/dev/null || echo unknown)
 WINVER=$(cmd /c ver 2>/dev/null | tr -d '\r' | sed -n 's/.*Version \(.*\)]/\1/p')
 [ -z "$WINVER" ] && WINVER=unknown
-GENERATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Rebuilding a record from rows that were measured earlier must not restamp it with the time
+# of the rebuild, or an archived record would claim to describe a run it did not.
+GENERATED=${DUSAGE_BENCH_GENERATED:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 
 {
     printf '{\n'
