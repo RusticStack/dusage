@@ -155,6 +155,10 @@ enqueued via `push`. It stops when the queue is empty and nothing is active.
   VHD: 3 per create (create, data write, close), 2 per data extend, 3 per rename (old name,
   new name, close), 1 per delete. `USN_REASON_CLOSE` is in nearly every one of them, so
   `--watch` masks it out and only a close-only record is dropped.
+- Journal geometry is fixed when the volume is formatted: 1 TB C: gets 32 MB / 8 MB,
+  a 512 MB VHD gets 1 MB / 256 KB, and `fsutil usn createjournal m=... a=...` returns 0
+  afterwards without changing either. A purge therefore needs unread records to exceed the
+  journal, which on C: means hundreds of thousands of records between two polls.
 
 ## Roadmap status (details in `docs/ROADMAP.md`)
 
@@ -179,8 +183,9 @@ not prove.
 
 Open:
 - Validate the USN `--watch` path on a real volume in an elevated shell — done 2026-11-21 on
-  DOOMBRINGER: 12 changes gave 4 update lines and 28 journal records, and the incremental
-  totals equalled a full scan. Journal purging under write pressure is still unmeasured.
+  DOOMBRINGER: 12 changes gave 4 update lines and 28 journal records, the incremental totals
+  equalled a full scan, and a purged journal (a 20,000-file burst against the 1 MB journal a
+  small volume gets) fails the read with 1181 and still lands on the right totals.
 - Run the benchmark questions in `docs/ROADMAP.md` (no speedup is measured yet).
 - Measure the Linux backends properly: the cold-cache numbers in README were taken on a
   2-vCPU container. The raw `getdents64` enumerator is shipped (#45) and the thread sweep
