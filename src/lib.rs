@@ -12,6 +12,7 @@ pub mod archive_zstd;
 pub mod bytes;
 pub mod cli;
 pub mod cmd;
+pub mod encoding_tables;
 pub mod encodings;
 pub mod findexpr;
 pub mod glob;

@@ -1,4 +1,5 @@
-//! Encoding detection and transcoding for content search (UTF-8, UTF-16LE/BE, Latin-1).
+//! Encoding detection and transcoding for content search (UTF-8, UTF-16LE/BE, Latin-1 and
+//! the single-byte encodings of the WHATWG Encoding Standard).
 //!
 //! The searcher matches byte patterns against UTF-8, but files written by Windows tools
 //! (Notepad "Unicode", PowerShell `>` redirection, `reg export`, MSBuild logs) are often
@@ -13,6 +14,8 @@
 //! and a byte offset inside it maps back to the original by encoding: identity for UTF-8 and
 //! Latin-1 (plus the stripped BOM length), and `2 * utf16 unit index` for UTF-16.
 
+use crate::encoding_tables::{Label, LABELS, SINGLE_BYTE};
+
 /// A text encoding the searcher can match against after transcoding to UTF-8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
@@ -20,6 +23,18 @@ pub enum Encoding {
     Utf16Le,
     Utf16Be,
     Latin1,
+    /// A single-byte encoding of the WHATWG standard: an index into `SINGLE_BYTE`.
+    SingleByte(u8),
+    /// The standard's `replacement` encoding: non-empty input decodes to one U+FFFD.
+    Replacement,
+}
+
+/// Why a `--encoding` name was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelError {
+    Unknown,
+    /// A label of the standard whose (multi-byte) encoding, named here, has no decoder.
+    Unsupported(&'static str),
 }
 
 const BOM_UTF8: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -29,32 +44,55 @@ const BOM_UTF16BE: &[u8] = &[0xFE, 0xFF];
 const REPLACEMENT: &[u8] = &[0xEF, 0xBF, 0xBD];
 
 impl Encoding {
-    /// Parse a CLI name: "auto", "utf-8"/"utf8", "utf-16"/"utf-16le"/"utf16le",
-    /// "utf-16be", "latin1"/"latin-1"/"iso-8859-1". `None` for anything else.
+    /// Parse a CLI name. `None` for anything [`Encoding::lookup`] refuses.
+    pub fn from_name(s: &str) -> Option<Encoding> {
+        Encoding::lookup(s).ok()
+    }
+
+    /// Parse a CLI name: "auto", the names dusage has always taken ("utf-8"/"utf8",
+    /// "utf-16"/"utf-16le"/"utf16le", "utf-16be", "latin1"/"latin-1"/"iso-8859-1"), then
+    /// every label of the WHATWG Encoding Standard, which is the set ripgrep accepts.
     ///
     /// Names are matched case-insensitively. "auto" yields [`Encoding::Utf8`], the passthrough
     /// state meaning "no forced encoding": a caller that accepted "auto" must then use
     /// [`detect`] on the buffer instead of trusting that `Utf8`.
-    pub fn from_name(s: &str) -> Option<Encoding> {
+    ///
+    /// The five Latin-1 spellings stay true ISO-8859-1 (0x80..=0x9F are the C1 controls),
+    /// where the standard, and so ripgrep, reads them as windows-1252. The standard's other
+    /// labels for that encoding ("ascii", "cp1252", "l1", ...) do mean windows-1252.
+    pub fn lookup(s: &str) -> Result<Encoding, LabelError> {
         let n = s.trim().to_ascii_lowercase();
         match n.as_str() {
-            "auto" | "utf-8" | "utf8" => Some(Encoding::Utf8),
-            "utf-16" | "utf-16le" | "utf16" | "utf16le" => Some(Encoding::Utf16Le),
-            "utf-16be" | "utf16be" => Some(Encoding::Utf16Be),
+            "auto" | "utf-8" | "utf8" => return Ok(Encoding::Utf8),
+            "utf-16" | "utf-16le" | "utf16" | "utf16le" => return Ok(Encoding::Utf16Le),
+            "utf-16be" | "utf16be" => return Ok(Encoding::Utf16Be),
             "latin1" | "latin-1" | "iso-8859-1" | "iso8859-1" | "iso_8859_1" => {
-                Some(Encoding::Latin1)
+                return Ok(Encoding::Latin1)
             }
-            _ => None,
+            _ => {}
+        }
+        let i = LABELS
+            .binary_search_by(|(label, _)| (*label).cmp(n.as_str()))
+            .map_err(|_| LabelError::Unknown)?;
+        match LABELS[i].1 {
+            Label::Utf8 => Ok(Encoding::Utf8),
+            Label::Utf16Le => Ok(Encoding::Utf16Le),
+            Label::Utf16Be => Ok(Encoding::Utf16Be),
+            Label::Replacement => Ok(Encoding::Replacement),
+            Label::SingleByte(t) => Ok(Encoding::SingleByte(t)),
+            Label::Unsupported(name) => Err(LabelError::Unsupported(name)),
         }
     }
 
-    /// Canonical CLI name, the inverse of [`Encoding::from_name`] for the four real encodings.
+    /// Canonical CLI name, the inverse of [`Encoding::from_name`].
     pub fn name(self) -> &'static str {
         match self {
             Encoding::Utf8 => "utf-8",
             Encoding::Utf16Le => "utf-16le",
             Encoding::Utf16Be => "utf-16be",
             Encoding::Latin1 => "latin1",
+            Encoding::SingleByte(t) => SINGLE_BYTE[t as usize].0,
+            Encoding::Replacement => "replacement",
         }
     }
 }
@@ -145,6 +183,27 @@ pub fn to_utf8(bytes: &[u8], e: Encoding) -> Vec<u8> {
         }
         Encoding::Utf16Le => decode_utf16(body, true),
         Encoding::Utf16Be => decode_utf16(body, false),
+        Encoding::SingleByte(t) => {
+            let table = &SINGLE_BYTE[t as usize].1;
+            let mut out = Vec::with_capacity(body.len() * 3);
+            for &b in body {
+                match b {
+                    0..=0x7F => out.push(b),
+                    _ => match table[(b - 0x80) as usize] {
+                        0 => out.extend_from_slice(REPLACEMENT),
+                        cp => push_code_point(&mut out, cp as u32),
+                    },
+                }
+            }
+            out
+        }
+        Encoding::Replacement => {
+            if body.is_empty() {
+                Vec::new()
+            } else {
+                REPLACEMENT.to_vec()
+            }
+        }
     }
 }
 
@@ -153,7 +212,7 @@ fn strip_bom(bytes: &[u8], e: Encoding) -> &[u8] {
         Encoding::Utf8 => BOM_UTF8,
         Encoding::Utf16Le => BOM_UTF16LE,
         Encoding::Utf16Be => BOM_UTF16BE,
-        Encoding::Latin1 => return bytes,
+        Encoding::Latin1 | Encoding::SingleByte(_) | Encoding::Replacement => return bytes,
     };
     bytes.strip_prefix(bom).unwrap_or(bytes)
 }
@@ -275,11 +334,9 @@ mod tests {
             "utf-32",
             "utf32",
             "utf-16le-bom",
-            "latin2",
-            "latin9",
-            "cp1252",
-            "iso-8859-15",
-            "ascii",
+            "latin11",
+            "cp1259",
+            "iso-8859-12",
             "binary",
             "utf",
             "-",
@@ -593,5 +650,73 @@ mod tests {
             "4 MiB UTF-16LE -> UTF-8: {} ms",
             elapsed.as_secs_f64() * 1000.0
         );
+    }
+
+    #[test]
+    fn whatwg_labels_are_sorted_and_all_resolve() {
+        assert!(LABELS.windows(2).all(|w| w[0].0 < w[1].0));
+        for (label, kind) in LABELS {
+            let got = Encoding::lookup(&label.to_ascii_uppercase());
+            match kind {
+                Label::Unsupported(name) => assert_eq!(got, Err(LabelError::Unsupported(name))),
+                _ => assert!(got.is_ok(), "{label}"),
+            }
+        }
+        assert_eq!(Encoding::lookup("klingon"), Err(LabelError::Unknown));
+        assert_eq!(
+            Encoding::lookup("sjis"),
+            Err(LabelError::Unsupported("Shift_JIS"))
+        );
+    }
+
+    #[test]
+    fn whatwg_labels_keep_the_names_dusage_already_took() {
+        assert_eq!(Encoding::lookup("latin1"), Ok(Encoding::Latin1));
+        assert_eq!(Encoding::lookup("iso-8859-1"), Ok(Encoding::Latin1));
+        assert_eq!(Encoding::lookup("unicode"), Ok(Encoding::Utf16Le));
+        assert_eq!(Encoding::lookup("unicodefffe"), Ok(Encoding::Utf16Be));
+        assert_eq!(Encoding::lookup("unicode11utf8"), Ok(Encoding::Utf8));
+        assert_eq!(Encoding::lookup("replacement"), Ok(Encoding::Replacement));
+        for label in ["ascii", "cp1252", "l1", "windows-1252"] {
+            assert_eq!(Encoding::lookup(label).unwrap().name(), "windows-1252");
+        }
+        assert_eq!(Encoding::lookup("latin2").unwrap().name(), "iso-8859-2");
+        assert_eq!(Encoding::lookup("visual").unwrap().name(), "iso-8859-8");
+        assert_eq!(Encoding::lookup("logical").unwrap().name(), "iso-8859-8-i");
+        for (name, _) in SINGLE_BYTE.iter() {
+            assert_eq!(Encoding::lookup(name).unwrap().name(), *name);
+        }
+    }
+
+    #[test]
+    fn single_byte_tables_decode_known_bytes() {
+        let dec = |label: &str, bytes: &[u8]| {
+            String::from_utf8(to_utf8(bytes, Encoding::lookup(label).unwrap())).unwrap()
+        };
+        assert_eq!(
+            dec("windows-1252", b"\x80 caf\xE9 \x93x\x94"),
+            "\u{20AC} café \u{201C}x\u{201D}"
+        );
+        assert_eq!(dec("windows-1251", b"\xCF\xF0\xE8\xE2\xE5\xF2"), "Привет");
+        assert_eq!(dec("koi8-r", b"\xF0\xD2\xC9\xD7\xC5\xD4"), "Привет");
+        assert_eq!(dec("cp866", b"\x8F\xE0\xA8\xA2\xA5\xE2"), "Привет");
+        assert_eq!(dec("iso-8859-2", b"\xA3\xF3d\xBC"), "Łódź");
+        assert_eq!(dec("iso-8859-7", b"\xE1\xE2\xE3"), "αβγ");
+        assert_eq!(dec("iso-8859-15", b"\xA4"), "€");
+        assert_eq!(dec("windows-1255", b"\xF9\xEC\xE5\xED"), "שלום");
+        assert_eq!(dec("windows-874", b"\xA1\xA2"), "กข");
+        assert_eq!(dec("macintosh", b"caf\x8E"), "café");
+        assert_eq!(dec("x-user-defined", b"a\x80\xFF"), "a\u{F780}\u{F7FF}");
+        // An unmapped byte is one U+FFFD, and no single-byte encoding has a BOM to strip.
+        assert_eq!(dec("windows-1253", b"\xAA"), "\u{FFFD}");
+        assert_eq!(dec("windows-1252", b"\xEF\xBB\xBFa"), "ï»¿a");
+        assert_eq!(dec("replacement", b"anything"), "\u{FFFD}");
+        assert_eq!(dec("replacement", b""), "");
+        for (t, (name, _)) in SINGLE_BYTE.iter().enumerate() {
+            let all: Vec<u8> = (0..=255).collect();
+            let out = to_utf8(&all, Encoding::SingleByte(t as u8));
+            assert!(std::str::from_utf8(&out).is_ok(), "{name}");
+            assert_eq!(&out[..128], &all[..128]);
+        }
     }
 }

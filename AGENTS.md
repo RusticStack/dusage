@@ -23,7 +23,8 @@ src/regex.rs          Pike VM over a Thompson NFA (no backtracking)
 src/glob.rs           gitignore-style glob matcher
 src/ignore.rs         builtin caches + .gitignore/.ignore layers + -g filters
 src/bytes.rs          memmem, case folding, word boundaries
-src/encodings.rs      UTF-8/UTF-16/Latin-1 detection and transcoding
+src/encodings.rs      UTF-8/UTF-16/Latin-1/single-byte detection and transcoding
+src/encoding_tables.rs  generated: WHATWG labels and single-byte tables (scripts/gen_encoding_tables.py)
 src/win/sys.rs        shared FFI decls and helpers
 src/win/enumerate.rs  batched directory enumeration, readdir fallback, reparse/stream helpers
 src/win/delete.rs     handle-based delete that never follows reparse points
