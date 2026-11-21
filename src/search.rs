@@ -164,6 +164,8 @@ pub struct SearchOptions {
     /// Stop reading a file at the first line that does not match once one has
     /// (`--stop-on-nonmatch`).
     pub stop_on_nonmatch: bool,
+    /// Wrap printed paths in terminal hyperlinks of this shape (`--hyperlink-format`).
+    pub hyperlink: Option<crate::hyperlink::HyperlinkFormat>,
     /// The byte printed wherever a path holds a separator (`--path-separator`).
     pub path_separator: Option<u8>,
     /// Between the fields of a matching line (`--field-match-separator`), `:` by default.
@@ -261,6 +263,7 @@ impl SearchOptions {
             vimgrep: false,
             trim: false,
             stop_on_nonmatch: false,
+            hyperlink: None,
             path_separator: None,
             field_match_sep: b":".to_vec(),
             field_context_sep: b"-".to_vec(),

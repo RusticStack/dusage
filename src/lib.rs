@@ -16,6 +16,7 @@ pub mod encodings;
 pub mod findexpr;
 pub mod glob;
 pub mod guard;
+pub mod hyperlink;
 pub mod ignore;
 pub mod model;
 pub mod pattern;
