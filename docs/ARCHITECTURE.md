@@ -31,6 +31,8 @@ src/cmd/mod.rs        subcommand dispatch and the Fail(exit code, message) type
 src/cmd/scan.rs       scan / big
 src/cmd/search.rs     search / find, their help text
 src/cmd/du.rs         du: per-directory totals
+src/cmd/tree.rs       tree: the tree with on-disk and apparent sizes, its help text
+src/cmd/df.rs         df: mounted filesystems; row selection, columns, units, JSON
 src/cmd/prune.rs      prune / fastdel, its help text
 src/model.rs          cross-platform surface: Kind (file..block), Stat, Totals, ErrorCounts
 src/win/sys.rs        shared FFI decls + open()/wide_verbatim()/check()
@@ -38,10 +40,12 @@ src/win/enumerate.rs  batched enumeration, readdir fallback, reparse/file_id/str
 src/win/delete.rs     handle-based delete, never follows reparse points
 src/win/usn.rs        USN journal + file-reference resolution
 src/win/mft.rs        raw MFT reader
+src/win/df.rs         GetDiskFreeSpaceExW + the volume list for `df`
 src/win/watch.rs      change feed for --watch (USN journal)
 src/unix/sys.rs       errno table + inotify/poll declarations
 src/unix/enumerate.rs getdents64 enumeration, statx fields, symlink and mount helpers
 src/unix/delete.rs    unlink/rmdir delete, never follows symlinks
+src/unix/df.rs        statvfs + /proc/self/mounts for `df`
 src/unix/watch.rs     change feed for --watch (inotify)
 src/mac/sys.rs        Darwin struct layouts, kqueue/stat/unlink declarations
 src/mac/enumerate.rs  readdir$INODE64 + fstatat enumeration, symlink and mount helpers
@@ -217,6 +221,19 @@ pub fn os_from_bytes(b: &[u8]) -> OsString;
 
 pub mod delete { pub fn delete_entry(path: &Path) -> io::Result<()>;
                  pub fn remove_tree(path: &Path) -> (u64, ErrorCounts); }
+
+pub mod df {
+    pub struct FsUsage {
+        pub filesystem: String,      // "/dev/root", "tmpfs", "C:"
+        pub fs_type: Option<String>, // "ext4", "NTFS", ... None when the platform will not say
+        pub mount: PathBuf,
+        pub size: u64, pub used: u64, pub available: u64,
+        pub inodes: Option<u64>, pub inodes_used: Option<u64>, pub inodes_free: Option<u64>,
+        pub device: u64,             // st_dev on Linux; 0 on Windows (rows keyed by name)
+    }
+    pub fn filesystems() -> io::Result<Vec<FsUsage>>;       // every mount, mount order
+    pub fn usage_of(path: &Path) -> io::Result<FsUsage>;    // the mount holding path
+}
 
 pub mod watch {
     pub fn resolve_root(root: &Path) -> PathBuf;   // canonicalise: feeds report real paths
@@ -555,3 +572,64 @@ grow the output without bound.
 pattern those files have; Latin-1 is never inferred, only forced with `--encoding latin1`.
 Line numbers are counted after transcoding, and match spans are mapped back to the original
 byte offsets.
+
+### tree and df (0.6.0)
+
+`dusage tree` and `dusage df` replace the last two tools a disk investigation reaches for.
+Both are front ends over the same two surfaces every other command uses — the walk and
+`crate::native` — so neither adds a filesystem path of its own.
+
+**tree.** One deterministic depth-first walk through `native::enumerate::DirReader`, the
+same batched enumerator `du` uses, so each entry arrives with both its apparent and its
+allocated size from one syscall. The walk fills an arena rather than printing: one `Node`
+per entry holding a name range into a shared byte arena, `u32` child indexes, its own two
+sizes and its subtree's two, plus a `parent` index and a `depth`. Running the totals is one
+reverse pass over the arena (children always follow their parents); sorting is one pass over
+the directory nodes; rendering is two pre-order passes, the first measuring the two size
+columns and the second printing them. Nothing is printed during the walk, which is what
+makes `--sort size` and right-aligned columns possible; the cost is one record per entry
+against tree(1)'s streaming, and `docs/BENCHMARKS.md` records both numbers side by side.
+
+The filters are `search`'s, not a second copy of them: `IgnoreRules` is built the way
+`search::walk_rules`/`root_rules` build it, pushed per directory as the walk descends and
+popped on the way out, and `allow()` repeats the three steps of `search::allow` in the same
+order (hidden rule, ignore layers, `-g` globs). A positive `-g` therefore switches the ignore
+files off here exactly as it does there. A reparse point is printed as `name -> target` and
+never entered — the walk never asks the kernel to follow one, the same rule as everywhere
+else — and its own blocks are charged, which is what `du` charges it. A directory's apparent
+contribution is zero (GNU's `-b` rule); its allocated blocks are counted.
+
+Directory rows carry subtree totals, so the two passes and the arena are the design; a file
+row is its own size. `--json` writes the same records in print order as one object, streamed
+into the writer rather than assembled into a string.
+
+**df.** `src/cmd/df.rs` holds every decision — which rows print, the three filters GNU df
+applies (a zero-size filesystem, a dummy type, a second mount of one device), column widths,
+units, the percent rule — and contains no `#[cfg(target_os)]`. The platform layer answers two
+questions: `filesystems()` for the mount list with each mount's numbers, and `usage_of(path)`
+for the filesystem holding one path.
+
+Linux reads `statvfs` behind a `#[repr(C)]` struct asserted against `bits/statvfs.h` (112
+bytes: `f_bsize` at 0, `f_blocks` at 16, `f_fsid` at 64, `f_namemax` at 80, `f_type` at 88)
+and parses `/proc/self/mounts` — the table GNU df itself reads — with the four octal escapes
+undone, because a mount point with a space in it is otherwise unparseable. Rows are keyed by
+`st_dev` (`enumerate::dev_of`), the number `same_filesystem` already compares, which is what
+keeps three `tmpfs` mounts three rows while collapsing one filesystem mounted twice.
+`used` is `(f_blocks - f_bfree) * f_frsize`, and `available` is `f_bavail * f_frsize`: the
+reserved blocks are used but not available, which is why Use% is computed against
+`used + available` and rounded up.
+
+Windows has no mount table file. `GetLogicalDrives` lists letters, `GetDriveTypeW` says which
+are ready, `GetDiskFreeSpaceExW` answers the numbers, `GetVolumeInformationW` the type, and
+`FindFirstVolumeW`/`GetVolumePathNamesForVolumeNameW` cover volumes mounted in folders so one
+volume mounted twice is one row. `usage_of` resolves a path to its volume root with
+`GetVolumePathNameW`. Inodes do not exist there and are `None`, not zero.
+
+## Invariants the two commands keep
+
+- Zero dependencies: `statvfs` and the Win32 calls are `extern` declarations, not crates.
+- Read-only: neither writes, and neither opens a file.
+- Never follow: tree prints a link and stops; df asks the kernel about a filesystem, never
+  walks one.
+- One platform surface: `cmd/tree.rs` and `cmd/df.rs` contain no platform branch, and every
+  `unsafe` block sits under `src/unix/df.rs` or `src/win/df.rs` with a `SAFETY:` comment.

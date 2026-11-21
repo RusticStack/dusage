@@ -55,6 +55,14 @@ A fast disk-usage scanner, a content and path search, and a safe parallel pruner
 - **`dusage du` speaks du.** The same per-directory report GNU `du` prints, allocated
   blocks by default, with the totals byte-identical on the trees measured (see
   [Benchmarks](#benchmarks)).
+- **`dusage tree` is `tree` with the sizes tree cannot print.** The familiar connectors and
+  the same file/directory counts, plus two columns per row — bytes on disk and bytes
+  claimed — and a directory row that carries its whole subtree the way `tree --du` does. It
+  honours the same ignore rules as `find`, so a checkout lists what `find` would return.
+- **`dusage df` is `df`.** One row per mounted filesystem with size, used, available, use
+  percent and mount point, `-h`/`--si`, `-i` inodes, `-T` filesystem type, `--json`, and
+  the same row selection GNU `df` makes. It reads `statvfs` and `/proc/self/mounts` on Linux
+  and `GetDiskFreeSpaceExW` on Windows.
 - **Safe by design.** Volume roots, Windows, Program Files, ProgramData and your profile are
   refused in every spelling, and on Linux the filesystem root, the system directories, `/home`
   and `$HOME`. Junctions, symlinks and other reparse points are never followed, and a delete
@@ -100,6 +108,8 @@ dusage <root> [OPTIONS]
 dusage scan <root> [OPTIONS]                              (same thing, named)
 dusage big <root> [OPTIONS]                               largest files only
 dusage du [PATH...] [OPTIONS]                             du totals per directory
+dusage tree [PATH...] [OPTIONS]                           the tree, with on-disk and apparent sizes
+dusage df [PATH...] [OPTIONS]                             mounted filesystems and their usage
 dusage <root> [min_big] [threads] [top_n]      (positional form, still supported)
 ```
 
@@ -383,15 +393,18 @@ one big subtree, or one huge flat folder, across every worker.
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) holds the generated tables from `bash bench/run.sh`
 plus `bash bench/summary.sh` — warm and cold passes, peak RSS per row, `scan` against `du` and
 `find`, `search` against `rg` and `grep` across literal, regex, `-c`, `-o`, `-U`, `-l` and
-`-z` cases, `find` against `find -name`, `du` against GNU `du`, and the thread sweep that
-justifies the 4..16 default. `bash scripts/perf-guard.sh` is the 25% regression check.
+`-z` cases, `find` against `find -name`, `du` against GNU `du`, `tree` against `tree -s`,
+`df` against GNU `df`, and the thread sweep that justifies the 4..16 default. `bash scripts/perf-guard.sh` is the 25% regression check.
 
-As of the commit those tables were last generated at (`main`@`323bf88`, 2 vCPUs, warm cache):
-every content case is ahead of its reference — a general regex at 0.90× ripgrep, `-o` at
-0.84× `grep -rIo`, `-z` at 0.25×, the frequent literal at 0.76× `grep -rI` — with the one
-exception of `-U` under Unicode semantics at 1.15×. `find`'s glob form is 0.71×
-`find -name`, its expression form 0.99×, and both `du` rows are ahead of GNU `du` with
-byte-identical totals. Delete
+As of the run those tables were last generated from (`main`@`1f3331e`, 4 vCPUs, warm
+cache, medians of seven alternating runs): the metadata rows are far ahead — `scan` at 0.28×
+`du -sb`, both `du` rows at 0.29-0.30× GNU `du` with byte-identical totals, `find` at
+0.44-0.65× `find -name`, and `tree` at 0.70× `tree` while holding 70 MiB against its 5,
+because sorted column-aligned subtree totals cost one record per entry. The cases that print
+a lot are clearly ahead too — `-c` 0.58× `rg -c`, `-l` 0.62×, `-U` 0.69×, the frequent literal
+0.74×, `-o` 0.75× `rg -o`, `-z` 0.39× — and the plain content rows are level with `ripgrep`
+(0.89-1.07×). `df` is a tie at 2.8 ms against 2.5 ms. One row is genuinely behind:
+`find`'s expression walk at 1.13×, the sequential walk `-prune` and `-depth` force. Delete
 timings are not in that suite: the only recorded figure is the 0.4.0 container measurement,
 50,301 entries in **0.36 s** against 0.60 s for `rm -rf` on the same tree.
 
