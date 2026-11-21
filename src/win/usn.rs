@@ -97,6 +97,9 @@ extern "system" {
     fn GetFinalPathNameByHandleW(h: HANDLE, buf: *mut u16, len: u32, flags: u32) -> u32;
 }
 
+/// `USN_REASON_CLOSE`: a close-only record repeats a change already recorded.
+const USN_REASON_CLOSE: u32 = 0x8000_0000;
+
 const USN_REC_MIN_V2: usize = 60;
 const USN_REC_MIN_V3: usize = 76;
 
@@ -310,6 +313,11 @@ impl Volume {
     /// FSCTL_READ_USN_JOURNAL from `start` until no further records; returns the
     /// records and the next start USN. A purged start USN surfaces as
     /// ERROR_JOURNAL_ENTRY_DELETED (1181); callers treat any error as "full rescan".
+    ///
+    /// The reason mask drops `USN_REASON_CLOSE` (0x8000_0000) alone: NTFS records a
+    /// second, otherwise empty record when the handle closes, which names the same
+    /// change again. A record that carries CLOSE alongside a real reason still
+    /// matches through that bit, so nothing is lost.
     pub fn read(&self, journal_id: u64, start: i64) -> io::Result<(Vec<UsnRecord>, i64)> {
         let mut recs = Vec::new();
         let mut next = start;
@@ -317,7 +325,7 @@ impl Volume {
         loop {
             let req = READ_USN_JOURNAL_DATA_V1 {
                 start_usn: next,
-                reason_mask: u32::MAX,
+                reason_mask: !USN_REASON_CLOSE,
                 return_only_on_close: 0,
                 timeout: 0,
                 bytes_to_wait_for: 0,

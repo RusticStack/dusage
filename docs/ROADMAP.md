@@ -48,7 +48,7 @@ explanation. Numbers measured on this machine are in the last section.
 | 6 | fastdel: classify and report final error categories | Done: `model::ErrorCounts`, `prune` | Diagnosability | No | S | None |
 | 7 | fastdel: parallel removal inside large subtrees | Done: `prune` (chunked `Work::Files`), `win::delete`; speedup unmeasured | Speed on skewed trees; unmeasured | No | M | Medium-high |
 | 8 | Opt-in named-stream (ADS) accounting | Done: `--streams`, `enumerate::named_stream_bytes` | Accuracy for ADS-heavy trees | No | S-M | Low |
-| 9 | USN change journal for incremental `--watch` | Partial: `win::usn` + `scan::watch`; not validated on a real journal (admin) | Feature; faster repeat scans | Expected yes (unverified) | L | Medium |
+| 9 | USN change journal for incremental `--watch` | Done: `win::usn` + `scan::watch`, validated on a real journal (elevated, 2026-11-21); the unelevated fallback was an unpaced rescan loop and is fixed | Incremental rescans; 4 update lines for 12 changes, totals equal to a full scan | Yes (measured) | L | Medium |
 | 10 | Elevated whole-volume fast path (USN enum plus MFT parsing) | Done: `win::mft` + `--mft`, validated against the batched backend on two real volumes | Whole-drive scan 6.2x faster (10.6 s vs 65.8 s) | Yes (measured) | L | High |
 | 11 | Dev Drive guidance for scratch trees (docs only) | Open: docs only, not written | Unmeasured | Setup only | S | None |
 
@@ -129,13 +129,57 @@ explanation. Numbers measured on this machine are in the last section.
 
 ### 9. USN change journal for incremental `--watch`
 
-**Status: Partially done.** `win::usn` (query/read, V2/V3 records, path by reference) drives `--watch` rescans of changed top-level entries, with full-rescan fallback. Admin behaviour and journal invalidation are untested on a real volume.
+**Status: Done.** `win::usn` (query/read, V2/V3 records, path by reference) drives `--watch`
+rescans of changed top-level entries, with full-rescan fallback. Validated on a real journal in
+an elevated shell on DOOMBRINGER, 2026-11-21 (C:, 1 TB NTFS, journal id `0x01dd3a7d013d1acb`,
+first USN `0x166b800000`, 32 MB maximum), and on a throwaway 512 MB VHD formatted NTFS, whose
+journal contains only the experiment's own records. Record shape and the harness that reproduces
+it: `bench/windows/admin.ps1` section 3, `bench/windows/usn_probe.py`, rows in
+`bench/windows/admin-results.jsonl` and `bench/windows/checks.json`.
 
-- **APIs.** `DeviceIoControl` on `\\.\X:` with `FSCTL_QUERY_USN_JOURNAL` and `FSCTL_READ_USN_JOURNAL`. The `USN_RECORD_V2` layout is verified: a 60-byte header, `RecordLength` for stepping, and `FileNameOffset`/`FileNameLength` in bytes (https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-usn_record_v2).
-- **Unverified.** Journal ID invalidation rules, the `ERROR_JOURNAL_ENTRY_DELETED` behaviour, and the privilege needed for query and read. The legacy page that covers these was not fetched.
-- **Fallback.** On journal truncation, do a full rescan.
-- **FFI.** Kernel32 `DeviceIoControl`. FSCTL values should be computed with a `CTL_CODE` const fn and checked against winioctl.h.
-- **Effort.** L. **Admin.** Expected yes, unverified. **Risk.** Medium. NTFS only.
+- **What the feed reports.** A 38-file fixture (3 subdirectories), 12 changes in 4 groups two
+  seconds apart: 4 creates at the root, 2 data extends plus 1 create in a subdirectory, 2
+  renames, 3 deletes. The watch reported exactly **4** update lines, naming exactly the touched
+  top-level entries (`new1.bin, new2.bin, new3.bin, new4.bin` / `a, b, c` / `a, f1.txt, f1r.txt` /
+  `c, f2.txt, f3.txt`), and 144 stdout lines in total — five reports of a 38-entry tree.
+- **The journal's own account of those 12 changes is 28 records**, verified twice: by
+  `bench/windows/usn_probe.py` and by `fsutil usn readjournal` over the same USN range. The
+  histogram is the accounting: 5 `FILE_CREATE` + 5 `DATA_EXTEND+FILE_CREATE` +
+  5 `DATA_EXTEND+FILE_CREATE+CLOSE` (3 records per create, because NTFS journals the create, the
+  data write and the close), 2 `DATA_EXTEND` + 2 `DATA_EXTEND+CLOSE` (2 per extend), 2
+  `RENAME_OLD_NAME` + 2 `RENAME_NEW_NAME` + 2 `RENAME_NEW_NAME+CLOSE` (3 per rename), 3
+  `FILE_DELETE+CLOSE` (1 per delete). Identical histogram on the clean volume, where no other
+  process can contribute a record.
+- **Incremental equals full.** After the run, the last update's totals and every top-level
+  total matched a fresh full scan of the same tree exactly (`{"bytes":6704,"alloc":6848,
+  "files":40,"dirs":3}`).
+- **Nothing is re-read from the beginning.** `DUSAGE_WATCH_TRACE=1` prints one line per poll
+  (`N records, usn A..B`); the spans are contiguous, strictly advancing, and start at the USN
+  captured before the initial scan.
+- **Fallback, measured.** Deleting the journal under a running watch produced
+  `change journal reset (ERROR_JOURNAL_NOT_ACTIVE (1179)); full rescan`, then
+  `no change feed (...); full rescan` once per interval, and the watch recovered by itself when
+  the journal was recreated, reporting the next change. A non-elevated run has no feed at all:
+  opening the volume device `\\.\X:` fails with error 5, which is now reported as
+  `no change feed (Access is denied. (os error 5)); full rescan`.
+- **The over-reporting this item was opened for was the fallback, not the journal.** Both
+  fallback arms rescanned and printed **without sleeping**, so a non-elevated `--watch` ran at
+  the speed of its own rescans: the same script, fixture and host measured **142,929 stdout
+  lines from 5,063 full rescans in 14 s** on the previous build against **370 lines from 12
+  rescans** on this one, and the twelve known changes still produce four update lines when the
+  feed is available. A watch that looks like it is flooding is a watch whose feed never opened.
+- **Reason mask.** `USN_REASON_CLOSE` is out of the mask, so a close-only record cannot trigger
+  a rescan; a record that carries CLOSE beside a real reason still arrives through that bit. On
+  this workload the mask measured identical (28 records either way) because every close came
+  bundled with its change — the exclusion removes a class of no-op, it does not change these
+  counts.
+- **Fallback.** On any read error (purged records, deleted journal) the caller does a full
+  rescan, reopens the journal, and never rescans faster than the interval.
+- **Unverified.** Journal purging from write pressure on a real busy volume: forcing it safely
+  would mean shrinking C:'s journal (`Lowest Valid Usn` is currently 0, so nothing has ever been
+  purged here). The code path is the same `Err` arm that the delete/recreate experiment
+  exercised, but the 1181 case itself is not measured. Extended record version 3 was not
+  observed in these journals either; both report "maximum record version 4" and emit V2.
 
 ### 10. Elevated whole-volume fast path (USN enumeration plus MFT parsing)
 
@@ -239,9 +283,11 @@ record and the caveats. Re-run the harness rather than trusting this list if the
 ## 5. Remaining work
 
 - The elevated half of `bench/windows/admin.ps1` — real-time protection A/B, `--mft`
-  against the batched backend and `robocopy /L /E /XJ`, the USN `--watch` path, the
-  cold-cache pass and the FAT32/ReFS FileId checks — needs one administrator approval on
-  the machine and is the only part of section 4 still owed.
+  against the batched backend and `robocopy /L /E /XJ`, the cold-cache pass and the FAT32/ReFS
+  FileId checks — needs one administrator approval on the machine and is the only part of
+  section 4 still owed. Its USN `--watch` section is done: it now records the ground-truth
+  experiment from item 9 (twelve known changes, the journal's own record count as an oracle,
+  totals against a full scan) instead of counting a stdout stream.
 - Run the benchmark list in section 4 and record results: done 2026-11-21, and the thread
   sweep decided the default (8 workers on Windows, `native::MAX_WORKERS`).
 - Item 11: Dev Drive guidance in the docs.

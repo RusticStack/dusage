@@ -11,8 +11,10 @@
 #   2. MFT against the batched backend and robocopy, on the volumes named in -Volumes.
 #      One volume is the default because three whole-volume passes over a large volume take
 #      longer than a person leaves an elevated window open; add 'E:' for a second data point.
-#   3. The USN --watch path: a watch is started, files are created and deleted under it, and
-#      the update it prints is compared with a full rescan so a silent full rescan shows up.
+#   3. The USN --watch path: 12 known changes in 4 groups under a running watch must print 4
+#      updates, the journal's own record count for that window is read as an independent
+#      oracle (bench/windows/usn_probe.py), and the last update's totals must equal a full
+#      scan of the same tree.
 #   4. A cold-cache pass: the standby list and working sets are purged between runs, which
 #      is the only honest cold measurement on Windows and needs SeProfileSingleProcess.
 #   5. FAT32 and ReFS volume behaviour for FileId, by attaching small VHDX files under
@@ -242,59 +244,155 @@ if (-not $SkipMft) {
 }
 
 # --------------------------------------------------------- 3. USN --watch on a real volume (q11)
+#
+# Ground truth, not an impression: a 38-file fixture (3 subdirectories) is scanned, then
+# exactly twelve changes are made in four groups two seconds apart (4 creates at the root,
+# 2 data extends plus 1 create in a subdirectory, 2 renames, 3 deletes). The watch polls
+# every second, so each group lands in a poll of its own: four changed lines are the truthful
+# answer, and bench/windows/usn_probe.py reads the same journal window as an independent
+# oracle for how many records those twelve changes produced and why.
+#
+# The last update's totals are compared with a full scan of the same tree: a watch whose
+# incremental rescan drifts shows up as totals_equal=false, which is the failure this
+# section exists to catch. Run it from an elevated shell, or no journal is opened at all
+# (error 5) and every tick is a full rescan instead.
 if (-not $SkipWatch) {
     Write-Log 'section 3: USN --watch'
     try {
         $watchRoot = Join-Path $Root 'watch'
-        Remove-Item -LiteralPath $watchRoot -Recurse -Force -ErrorAction SilentlyContinue
-        New-Item -ItemType Directory -Force -Path $watchRoot | Out-Null
-        for ($i = 0; $i -lt 50; $i++) { [System.IO.File]::WriteAllText((Join-Path $watchRoot "seed$i.txt"), 'x') }
-        $log = Join-Path $Root 'watch.log'
         $errLog = Join-Path $Root 'watch.err'
-        $bash = (Get-Command bash.exe -ErrorAction SilentlyContinue).Source
-        if (-not $bash) { $bash = 'C:\Program Files\Git\bin\bash.exe' }
-        $binBash = $Bin.Replace('\', '/')
-        $rootBash = $watchRoot.Replace('\', '/')
-        $logBash = $log.Replace('\', '/')
-        $errBash = $errLog.Replace('\', '/')
-        # The watch runs for twelve seconds; two files are created and one is deleted inside
-        # that window, then the watch is stopped and its whole output is read back.
-    $script = @"
-"$binBash" scan "$rootBash" --watch 2 > "$logBash" 2> "$errBash" &
-WPID=`$!
-sleep 4
-printf 'y' > "$rootBash/created_a.txt"
-printf 'y' > "$rootBash/created_b.txt"
-sleep 2
-rm -f "$rootBash/created_a.txt"
-sleep 6
-kill `$WPID 2>/dev/null
-wait `$WPID 2>/dev/null
-exit 0
-"@
-        $script | Out-File -Encoding ascii -FilePath (Join-Path $Root 'watch.sh')
-        Native { & $bash (Join-Path $Root 'watch.sh') } | Out-Null
-        $out = Get-Content -Raw -LiteralPath $log -ErrorAction SilentlyContinue
+        $probe = Join-Path $repo 'bench\windows\usn_probe.py'
+        $letter = $watchRoot.Substring(0, 1)
+
+        # 38 files over three subdirectories: small enough that one report is a few lines,
+        # deep enough that a change two levels down still maps to a changed top-level entry.
+        $reset = {
+            param([string]$dir)
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            foreach ($d in 'a', 'b', 'c') { $null = New-Item -ItemType Directory -Force -Path (Join-Path $dir $d) }
+            for ($i = 1; $i -le 20; $i++) { [System.IO.File]::WriteAllText((Join-Path $dir "f$i.txt"), ('x' * 100)) }
+            foreach ($d in 'a', 'b', 'c') {
+                for ($i = 1; $i -le 6; $i++) { [System.IO.File]::WriteAllText((Join-Path $dir "$d\$d$i.txt"), ('y' * 200)) }
+            }
+        }
+
+        $changes = {
+            param([string]$dir)
+            Write-Log 'watch: group 1 (4 creates at the root)'
+            for ($i = 1; $i -le 4; $i++) { [System.IO.File]::WriteAllText((Join-Path $dir "new$i.bin"), ('z' * 300)) }
+            Start-Sleep -Seconds 2
+            Write-Log 'watch: group 2 (2 extends, 1 create in c\)'
+            Add-Content -LiteralPath (Join-Path $dir 'a\a1.txt') -Value ('m' * 50)
+            Add-Content -LiteralPath (Join-Path $dir 'b\b1.txt') -Value ('m' * 50)
+            [System.IO.File]::WriteAllText((Join-Path $dir 'c\inner.txt'), ('i' * 120))
+            Start-Sleep -Seconds 2
+            Write-Log 'watch: group 3 (2 renames)'
+            [System.IO.File]::Move((Join-Path $dir 'f1.txt'), (Join-Path $dir 'f1r.txt'))
+            [System.IO.File]::Move((Join-Path $dir 'a\a2.txt'), (Join-Path $dir 'a\a2r.txt'))
+            Start-Sleep -Seconds 2
+            Write-Log 'watch: group 4 (3 deletes)'
+            foreach ($f in 'f2.txt', 'f3.txt', 'c\c3.txt') { Remove-Item -LiteralPath (Join-Path $dir $f) -Force }
+        }
+
+        $journalUsn = {
+            param([string]$vol)
+            if (-not (Test-Path $probe)) { return $null }
+            $q = Native { & python $probe query --volume $vol 2>$null }
+            if (-not $q) { return $null }
+            return [int64](($q | ConvertFrom-Json).next_usn)
+        }
+
+        & $reset $watchRoot
+        $usnBefore = & $journalUsn $letter
+        $rep = Join-Path $Root 'watch.json'
+        $p = Start-Process -FilePath $Bin -ArgumentList @('scan', $watchRoot, '--watch', '1', '--json') `
+            -RedirectStandardOutput $rep -RedirectStandardError $errLog -PassThru -NoNewWindow
+        Start-Sleep -Milliseconds 2500
+        & $changes $watchRoot
+        Start-Sleep -Seconds 4
+        if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+        Start-Sleep -Milliseconds 300
+        $usnAfter = & $journalUsn $letter
+
+        $out = Get-Content -Raw -LiteralPath $rep -ErrorAction SilentlyContinue
         $err = Get-Content -Raw -LiteralPath $errLog -ErrorAction SilentlyContinue
-        # A watch that wrote nothing is a result, not a null reference.
         if (-not $out) { $out = '' }
         if (-not $err) { $err = '' }
-        $sawCreated = ($out -match 'created_b')
-        $sawDeleted = ($out -match 'created_a')
-        $updates = ([regex]::Matches($out, 'elapsed')).Count
-        # The watch prints a line per event; keep the count and a sample, not a megabyte.
-        $snippet = if ($out.Length -gt 1500) { $out.Substring(0, 1500) } else { $out }
-        $errSnippet = if ($err.Length -gt 1500) { $err.Substring(0, 1500) } else { $err }
-        Add-Check ([ordered]@{
-                kind   = 'watch'
-                step   = 'scan --watch 2 over a 50-file directory; two files created and one deleted while it ran'
-                detail = "updates=$updates saw_created_b=$sawCreated saw_created_a=$sawDeleted full_rescan=$($out -match 'full')"
-                output = (($snippet -replace '\s+', ' ').Trim())
-                output_chars = $out.Length
-                stderr = (($errSnippet -replace '\s+', ' ').Trim())
-                stderr_chars = $err.Length
+
+        # One JSON document per update: the initial scan plus one per poll that saw a change.
+        $docs = @(($out -split "`n") | Where-Object { $_.Trim().StartsWith('{') })
+        $updates = $docs.Count
+        $changedLines = ([regex]::Matches($err, 'changed:')).Count
+        $paced = ([regex]::Matches($err, 'no change feed|full rescan')).Count
+
+        # Independent oracle: the journal records this run wrote, and why.
+        $journalRecords = $null
+        $journalHist = ''
+        if ($null -ne $usnBefore -and $null -ne $usnAfter -and $usnAfter -gt $usnBefore) {
+            $st = Native { & python $probe stats --volume $letter --start "$usnBefore" --end "$usnAfter" --under $watchRoot 2>$null }
+            if ($st) {
+                $head = ($st | Select-Object -First 1)
+                if ($head -match 'records=(\d+)') { $journalRecords = [int]$Matches[1] }
+                $journalHist = (($st | Select-Object -Skip 1) -join '; ').Trim()
+            }
+        }
+
+        # Same tree, full scan: the incremental totals must match exactly.
+        $full = Native { & $Bin scan $watchRoot --json } | Out-String
+        $totalsEqual = $false
+        $watchTotal = ''
+        $fullTotal = ''
+        if ($docs.Count -gt 0 -and $full) {
+            try {
+                $w = $docs[-1] | ConvertFrom-Json
+                $f = $full.Trim() | ConvertFrom-Json
+                $watchTotal = ($w.total | ConvertTo-Json -Compress)
+                $fullTotal = ($f.total | ConvertTo-Json -Compress)
+                $topsEqual = (($w.tops | ConvertTo-Json -Compress -Depth 5) -eq ($f.tops | ConvertTo-Json -Compress -Depth 5))
+                $totalsEqual = ($watchTotal -eq $fullTotal) -and $topsEqual
+            }
+            catch { Write-Log ("watch: totals compare failed: " + $_) }
+        }
+
+        # Twelve changes over four groups: four changed lines, and no fallback rescan at all.
+        $truthful = ($changedLines -eq 4) -and $totalsEqual -and ($paced -eq 0)
+
+        $errSample = if ($err.Length -gt 2000) { $err.Substring(0, 2000) } else { $err }
+        Add-Row ([ordered]@{
+                schema          = 1
+                case            = 'watch'
+                volume          = "${letter}:"
+                files           = 38
+                changes         = 12
+                groups          = 4
+                updates         = $updates
+                changed_lines   = $changedLines
+                fallback_lines  = $paced
+                journal_usn     = "$usnBefore..$usnAfter"
+                journal_records = $journalRecords
+                journal_reasons = $journalHist
+                watch_total     = $watchTotal
+                full_total      = $fullTotal
+                totals_equal    = $totalsEqual
+                truthful        = $truthful
             })
-        Write-Log ("admin: watch updates={0} created_seen={1} deleted_seen={2}" -f $updates, $sawCreated, $sawDeleted)
+        Add-Check ([ordered]@{
+                kind            = 'watch'
+                step            = 'scan --watch 1 over a 38-file tree; 12 changes in 4 groups while it ran'
+                changes         = 12
+                groups          = 4
+                updates         = $updates
+                changed_lines   = $changedLines
+                fallback_lines  = $paced
+                journal_records = $journalRecords
+                journal_reasons = $journalHist
+                totals_equal    = $totalsEqual
+                truthful        = $truthful
+                detail          = "updates=$updates changed_lines=$changedLines fallback=$paced journal_records=$journalRecords totals_equal=$totalsEqual truthful=$truthful"
+                output          = (($errSample -replace '\s+', ' ').Trim())
+                output_chars    = $err.Length
+            })
+        Write-Log ("admin: watch updates={0} changed_lines={1} journal_records={2} totals_equal={3} truthful={4}" -f $updates, $changedLines, $journalRecords, $totalsEqual, $truthful)
     }
     catch { Write-Log ("section 3 failed: " + $_) }
 }

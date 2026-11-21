@@ -33,6 +33,18 @@ takes a backend name as its third argument for exactly this reason: `cargo run -
 measures one backend in a fresh process. Repeat with the arguments in a different order and
 check that the answers do not depend on it.
 
+## 3. A watch with no feed looks like a watch that is flooding
+
+`--watch` falls back to a full rescan per tick when the change feed cannot be opened, and the
+only thing that separates the two modes is whether the process holds an administrator token:
+`CreateFileW` on `\\.\X:` fails with error 5 without one. `fsutil usn queryjournal` works
+either way, so it does not tell you whether the watch itself has a feed. Before the fallback
+was paced, an unelevated `--watch 1` over a 38-file directory printed 142,929 lines in 14 s;
+with the feed open and the same twelve changes it prints four update lines. Read the stderr
+label on each update — `changed: ...` means the journal, `no change feed (...)` means every
+tick is a full rescan — and `DUSAGE_WATCH_TRACE=1` prints the record count and USN span of
+each poll.
+
 ## The rest of the rules this harness follows
 
 - Warm and cold are different questions and only the elevated half can measure cold properly

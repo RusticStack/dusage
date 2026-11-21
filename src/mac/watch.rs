@@ -137,10 +137,16 @@ impl ChangeSource {
     /// `None` when kqueue is unavailable or the tree is larger than the watch budget; the
     /// caller then rescans the whole tree every interval.
     pub fn open(root: &Path) -> Option<Self> {
+        Self::open_err(root).ok()
+    }
+
+    /// Like `open`, but says why the feed is unusable: no kqueue, or the watch budget ran
+    /// out before the tree was covered.
+    pub fn open_err(root: &Path) -> io::Result<Self> {
         // SAFETY: `kqueue` takes no arguments and returns a new descriptor or -1.
         let raw = unsafe { kqueue() };
         if raw < 0 {
-            return None;
+            return Err(io::Error::last_os_error());
         }
         // SAFETY: `raw` was just returned by `kqueue` and is owned from here on.
         let kq = unsafe { OwnedFd::from_raw_fd(raw) };
@@ -151,9 +157,9 @@ impl ChangeSource {
             root: root.to_path_buf(),
         };
         if !s.watch_tree(root) {
-            return None;
+            return Err(io::Error::other("kqueue watch budget exhausted"));
         }
-        Some(s)
+        Ok(s)
     }
 
     /// Register one directory. False when the budget is spent.

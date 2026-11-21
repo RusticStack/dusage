@@ -678,29 +678,42 @@ pub fn watch(
         return Ok(());
     }
     loop {
-        let (only, what) = match changes.as_mut().map(|c| c.poll(interval)) {
-            Some(Ok(changed)) if changed.is_empty() => continue,
-            Some(Ok(changed)) => {
-                let set = changed_tops(&root, &changed);
-                if set.is_empty() {
-                    continue;
+        let (only, what) = match changes.as_mut() {
+            Some(c) => match c.poll(interval) {
+                Ok(changed) if changed.is_empty() => continue,
+                Ok(changed) => {
+                    let set = changed_tops(&root, &changed);
+                    if set.is_empty() {
+                        continue;
+                    }
+                    let mut names: Vec<&str> = set.values().map(String::as_str).collect();
+                    names.sort_unstable();
+                    let what = format!("changed: {}", names.join(", "));
+                    if src == Source::Mft {
+                        (None, format!("{what} (full MFT rescan)"))
+                    } else {
+                        (Some(set.keys().cloned().collect()), what)
+                    }
                 }
-                let mut names: Vec<&str> = set.values().map(String::as_str).collect();
-                names.sort_unstable();
-                let what = format!("changed: {}", names.join(", "));
-                if src == Source::Mft {
-                    (None, format!("{what} (full MFT rescan)"))
-                } else {
-                    (Some(set.keys().cloned().collect()), what)
+                Err(e) => {
+                    // Deleted journal or purged records: rescan everything, but never
+                    // faster than the interval, and reopen so the next tick can follow
+                    // the new journal id.
+                    std::thread::sleep(interval);
+                    changes = ChangeSource::open(&root);
+                    (None, format!("change journal reset ({e}); full rescan"))
                 }
-            }
-            Some(Err(_)) => {
-                changes = ChangeSource::open(&root);
-                (None, "change journal unavailable; full rescan".to_string())
-            }
+            },
             None => {
-                changes = ChangeSource::open(&root);
-                (None, "change journal unavailable; full rescan".to_string())
+                // No feed at all (no journal on this volume, or not elevated): every
+                // tick is a full rescan, paced by the interval like a polled feed.
+                std::thread::sleep(interval);
+                let (next, what) = match ChangeSource::open_err(&root) {
+                    Ok(c) => (Some(c), "change feed restored; full rescan".to_string()),
+                    Err(e) => (None, format!("no change feed ({e}); full rescan")),
+                };
+                changes = next;
+                (None, what)
             }
         };
         let (only, what) = rescan_scope(o2.dedup_hardlinks, only, what);
@@ -1043,5 +1056,36 @@ mod tests {
         .unwrap();
         assert_eq!(seen[0].1, "initial scan");
         assert_eq!(seen[1].0, seen[0].0 + 100, "{:?}", seen[1].1);
+    }
+
+    /// Without a change feed (a non-elevated Windows run; inotify always opens on
+    /// Linux, so this skips there) every tick is a full rescan, which must still be
+    /// paced by the interval instead of spinning.
+    #[test]
+    fn fallback_rescan_is_interval_paced() {
+        let f = Fixture::new("pace");
+        f.file("a.txt", 4);
+        let root = crate::native::watch::resolve_root(&f.0);
+        if crate::native::watch::ChangeSource::open_err(&root).is_ok() {
+            eprintln!("skipped: change feed available, fallback not exercised");
+            return;
+        }
+        let o = opts(&f, Backend::Batched);
+        let mut ticks = 0;
+        let t = Instant::now();
+        watch(&o, Duration::from_millis(100), &mut |_, what| {
+            if what != "initial scan" {
+                assert!(what.contains("no change feed"), "{what}");
+                ticks += 1;
+            }
+            ticks < 3
+        })
+        .unwrap();
+        assert_eq!(ticks, 3);
+        assert!(
+            t.elapsed() >= Duration::from_millis(200),
+            "{:?} for 3 ticks",
+            t.elapsed()
+        );
     }
 }

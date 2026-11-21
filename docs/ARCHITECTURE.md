@@ -240,6 +240,7 @@ pub mod watch {
     pub struct ChangeSource;
     impl ChangeSource {
         pub fn open(root: &Path) -> Option<ChangeSource>;   // None => full rescans
+        pub fn open_err(root: &Path) -> io::Result<ChangeSource>;  // same, with the reason
         /// Wait up to `interval` for changes; the affected entry paths.
         pub fn poll(&mut self, interval: Duration) -> io::Result<Vec<PathBuf>>;
     }
@@ -252,7 +253,10 @@ with `IN_Q_OVERFLOW` mapped to Err) and kqueue `EVFILT_VNODE` on macOS (one watc
 directory, up to `MAX_WATCHED_DIRS`; a tree past that gets `None`, and `EV_ERROR` or
 `NOTE_REVOKE` becomes Err mid-stream). All three return paths, and `scan::top_for` decides
 which top-level entry each one belongs to. In every case `Err` and `None` mean the same
-thing to the caller: reopen the feed and rescan everything.
+thing to the caller: reopen the feed and rescan everything, paced by the interval. `open_err`
+exists so the reason can be printed: on Windows the whole difference between a feed and no
+feed is whether the process holds an administrator token, and
+"no change feed (Access is denied)" says so.
 
 `Stat`, `Kind` and `POSIX_FIELDS`'s consumer live above the platform layer in
 `src/model.rs`; `POSIX_FIELDS` is how a caller tells "no mode bits" from "mode 0", which is
@@ -450,7 +454,13 @@ explanation on Linux. With `one_filesystem`, a directory on another device is co
 `ScanResult::skipped_mounts` instead of being scanned. `plan` refuses protected roots and
 non-directory or reparse roots (`InvalidInput`); `execute` never errors (failures are in the report).
 `watch` calls `on_update` with the initial scan and then after each rescan that changed something;
-returning false stops it.
+returning false stops it. Every tick is paced by `interval`, including the ticks that fall back
+to a full rescan: with no change feed (no journal, or no elevation) or after a journal reset, the
+loop sleeps first and then rescans, so a watch never spins. A tick whose feed is gone reports why
+(`no change feed (...); full rescan`, `change journal reset (...); full rescan`) and reopens the
+feed, so a journal that comes back is picked up without restarting the watch. Set
+`DUSAGE_WATCH_TRACE` to log one stderr line per poll (`N records, usn A..B`) when the feed needs
+debugging.
 
 #### Deviations recorded by the lanes
 
@@ -476,7 +486,9 @@ returning false stops it.
   to the drive they name before the protected-set comparison; other local `$` shares
   (`ADMIN$`, `IPC$`) fail closed. Unknown aliases of the machine are not detected.
 - **Watch mode.** The USN journal path comparison uses the canonicalized root (junction and
-  `subst` safe). Partial rescans keep untouched top-level entries as last scanned, so a
+  `subst` safe). Records are read incrementally from the last returned USN (never re-read from
+  the start), with `USN_REASON_CLOSE` out of the reason mask so a close-only record cannot
+  trigger a rescan; a record that carries CLOSE beside a real reason still arrives. Partial rescans keep untouched top-level entries as last scanned, so a
   hardlink with names in a rescanned and a kept top may be counted per name until the next
   full rescan. With `--dedup-hardlinks` (per-run dedup state) every rescan is therefore full.
   `on_update` fires only when something changed, not on quiet ticks.

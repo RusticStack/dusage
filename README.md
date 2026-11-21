@@ -144,7 +144,10 @@ files (`$MFT`, `$LogFile`, `$Extend`) that a directory walk cannot see.
 rescans only those: the NTFS change journal in an elevated shell on Windows, inotify on
 Linux, kqueue on macOS. When the feed is unavailable (`--watch` without admin rights on
 Windows, an exceeded inotify watch limit, or a tree larger than the kqueue watch budget)
-every tick is a full rescan. An update is printed only when something changed.
+every tick is a full rescan, paced by the interval and labelled with the reason. An update is
+printed only when something changed. `DUSAGE_WATCH_TRACE=1` adds one stderr line per poll with
+the record count and the journal's USN span. Validated on a real journal 2026-11-21: twelve
+changes in four groups printed four updates, and the incremental totals matched a full scan.
 
 **Mount points.** A scan follows them by default, like `du`. `-x`/`--one-filesystem` stops at
 a directory on another device and counts it in the "skipped mount points" note, which is what
