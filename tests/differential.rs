@@ -1234,47 +1234,40 @@ impl Ref {
 }
 
 /// The `bash.exe` that ships with the MSYS tools these comparisons use.
+///
+/// Windows only: it exists to stop the argv rewriting above, which is a property of MSYS
+/// binaries started by a native process.
+#[cfg(windows)]
 fn bash() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        let mut roots: Vec<PathBuf> = Vec::new();
-        for var in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
-            if let Some(p) = std::env::var_os(var) {
-                roots.push(PathBuf::from(p));
-            }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for var in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+        if let Some(p) = std::env::var_os(var) {
+            roots.push(PathBuf::from(p));
         }
-        if let Ok(o) = Command::new("where").arg("bash.exe").output() {
-            for line in String::from_utf8_lossy(&o.stdout).lines() {
-                if let Some(bin) = Path::new(line.trim()).parent() {
-                    if let Some(parent) = bin.parent() {
-                        roots.push(parent.to_path_buf());
-                    }
-                }
-                if let Some(bin) = Path::new(line.trim()).parent() {
-                    if let Some(usr) = bin.parent().and_then(Path::parent) {
-                        roots.push(usr.to_path_buf());
-                    }
-                }
-            }
-        }
-        for root in roots {
-            for rel in [
-                "Git/usr/bin/bash.exe",
-                "usr/bin/bash.exe",
-                "Git/bin/bash.exe",
-            ] {
-                let cand = root.join(rel);
-                if cand.is_file() {
-                    return Some(cand);
-                }
-            }
-        }
-        None
     }
-    #[cfg(not(windows))]
-    {
-        Some(PathBuf::from("bash"))
+    // A per-user or custom install: take the tree whatever bash.exe came from.
+    if let Ok(o) = Command::new("where").arg("bash.exe").output() {
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            if let Some(bin) = Path::new(line.trim()).parent() {
+                if let Some(usr) = bin.parent() {
+                    roots.push(usr.parent().map(Path::to_path_buf).unwrap_or_default());
+                }
+            }
+        }
     }
+    for root in roots {
+        for rel in [
+            "Git/usr/bin/bash.exe",
+            "usr/bin/bash.exe",
+            "Git/bin/bash.exe",
+        ] {
+            let cand = root.join(rel);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
 }
 
 /// The GNU `find` this suite compares against, when it can be identified.
