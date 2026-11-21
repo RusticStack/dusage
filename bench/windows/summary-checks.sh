@@ -185,9 +185,29 @@ function table_end() {
         table_end()
         print "USN change feed (elevated): " field("step") "."
         print ""
-        print "| field | value |"
-        print "| --- | --- |"
-        printf "| detail | %s |\n", dash(field("detail"))
+        print "| changes made | update lines | journal records | fallback rescans | totals equal a full scan | truthful |"
+        print "| ---: | ---: | ---: | ---: | --- | --- |"
+        printf "| %s in %s groups | %s | %s | %s | %s | %s |\n",
+            dash(field("changes")), dash(field("groups")), dash(field("changed_lines")),
+            dash(field("journal_records")), dash(field("fallback_lines")),
+            dash(field("totals_equal")), dash(field("truthful"))
+        print ""
+        print "The journal account of those changes, from bench/windows/usn_probe.py:"
+        print ""
+        print "| records | reasons |"
+        print "| ---: | --- |"
+        n = split(field("journal_reasons"), parts, ";")
+        for (i = 1; i <= n; i++) {
+            line = parts[i]
+            gsub(/^[ \t]+/, "", line)
+            gsub(/[ \t]+$/, "", line)
+            if (line !~ /^[0-9]+[ \t]/) continue
+            count = line
+            sub(/[ \t].*$/, "", count)
+            rest = line
+            sub(/^[0-9]+[ \t]+/, "", rest)
+            printf "| %s | %s |\n", count, rest
+        }
         print ""
         next
     }
