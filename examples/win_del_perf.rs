@@ -8,8 +8,6 @@
 //! every row, so the clock never includes the copy. The parallel chunked path is
 //! `fastdel` itself and is timed by the same driver.
 
-use std::time::Instant;
-
 #[cfg(not(windows))]
 fn main() {
     eprintln!("win_del_perf drives the Windows delete paths only");
@@ -19,6 +17,7 @@ fn main() {
 fn main() {
     use dusage::model::ErrorCounts;
     use dusage::win::delete::remove_tree_with;
+    use std::time::Instant;
     let mut args = std::env::args().skip(1);
     let root: std::path::PathBuf = args
         .next()
