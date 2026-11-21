@@ -504,7 +504,8 @@ src/
 ```
 
 More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (module contracts),
-[docs/ROADMAP.md](docs/ROADMAP.md) (research and open work) and [AGENTS.md](AGENTS.md)
+[docs/ROADMAP.md](docs/ROADMAP.md) (research and open work),
+[docs/DEV_DRIVE.md](docs/DEV_DRIVE.md) (Dev Drive and scratch trees) and [AGENTS.md](AGENTS.md)
 (rules for contributors and coding agents).
 
 ## License
