@@ -135,7 +135,7 @@ function Purge-Cache {
 
 # Everything this run prints lands in a log beside the record, because an elevated window
 # that closes takes its console with it.
-$logPath = Join-Path $repo 'bench\windowsdmin.log'
+$logPath = Join-Path $repo 'bench\windows\admin.log'
 Start-Transcript -Path $logPath -Force | Out-Null
 Write-Output 'admin: elevated, starting'
 
@@ -215,7 +215,7 @@ if (-not $SkipWatch) {
     $log = Join-Path $Root 'watch.log'
     $errLog = Join-Path $Root 'watch.err'
     $bash = (Get-Command bash.exe -ErrorAction SilentlyContinue).Source
-    if (-not $bash) { $bash = 'C:\Program Files\Gitinash.exe' }
+    if (-not $bash) { $bash = 'C:\Program Files\Git\bin\bash.exe' }
     $binBash = $Bin.Replace('', '/')
     $rootBash = $watchRoot.Replace('', '/')
     $logBash = $log.Replace('', '/')
