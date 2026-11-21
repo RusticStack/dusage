@@ -1,4 +1,12 @@
-//! Change feed for `--watch` on macOS, over kqueue.
+//! Change feed for `--watch` on macOS: FSEvents for the feed, kqueue as the fallback.
+//!
+//! [`ChangeSource`] is what the engine sees. It opens the FSEvents stream
+//! ([`crate::mac::fsevents`]) first, which watches a hierarchy from one stream and so has no
+//! directory budget at all; only when that stream cannot be created or started does it fall
+//! back to the kqueue feed below, which is still tested and still correct, just descriptor
+//! bound. That ordering is the point of the module: the 4096-directory ceiling is what used
+//! to decide whether `--watch` worked, and now it decides nothing unless FSEvents is
+//! unavailable.
 //!
 //! `EVFILT_VNODE` is registered once per directory on a single kqueue, so one descriptor
 //! covers the whole watch: the event's `ident` is the descriptor of the directory that
@@ -14,13 +22,13 @@
 //! `struct kevent` is pinned by the `const` assertions at the bottom of this file, which
 //! run during a cross-check from Linux as well as on a Mac.
 //!
-//! # Watch budget and what it costs
+//! # The kqueue fallback, and its budget
 //!
 //! A kqueue watch is per-descriptor: every watched directory holds an open file
 //! descriptor in this process. A tree of 100k directories cannot be watched that way at
 //! all, and the default `RLIMIT_NOFILE` on macOS is far below it, so the feed admits at
 //! most [`MAX_WATCHED_DIRS`] directories. When a tree reaches that ceiling
-//! [`ChangeSource::open`] returns `None` rather than watching a prefix of it: a partial
+//! [`Kqueue::open`] returns `None` rather than watching a prefix of it: a partial
 //! watch would silently never report half the tree, while no watch at all falls back to
 //! the full rescan the caller already implements. This is a behaviour change from Linux,
 //! whose inotify feed covers every directory or gives up entirely; on macOS a tree larger
@@ -124,7 +132,7 @@ pub fn resolve_root(root: &Path) -> PathBuf {
     std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
-pub struct ChangeSource {
+pub struct Kqueue {
     kq: OwnedFd,
     /// Descriptor of a watched directory -> its path, and the descriptor it holds open.
     dirs: HashMap<RawFd, (OwnedFd, PathBuf)>,
@@ -133,7 +141,7 @@ pub struct ChangeSource {
     root: PathBuf,
 }
 
-impl ChangeSource {
+impl Kqueue {
     /// `None` when kqueue is unavailable or the tree is larger than the watch budget; the
     /// caller then rescans the whole tree every interval.
     pub fn open(root: &Path) -> Option<Self> {
@@ -150,7 +158,7 @@ impl ChangeSource {
         }
         // SAFETY: `raw` was just returned by `kqueue` and is owned from here on.
         let kq = unsafe { OwnedFd::from_raw_fd(raw) };
-        let mut s = ChangeSource {
+        let mut s = Kqueue {
             kq,
             dirs: HashMap::new(),
             watched: HashSet::new(),
@@ -340,6 +348,44 @@ impl ChangeSource {
     }
 }
 
+/// The change feed the engine holds: FSEvents when it starts, kqueue when it does not.
+///
+/// Both answer the same contract — block for the first change, drain the burst, and return
+/// `Err` when the feed has lost events so the caller rescans everything — so nothing above
+/// this type knows which one is running.
+pub enum ChangeSource {
+    Events(crate::mac::fsevents::FsEvents),
+    Kqueue(Kqueue),
+}
+
+impl ChangeSource {
+    /// `None` when neither feed is usable, which the caller already turns into a full rescan
+    /// every interval. Nothing here writes to the watched tree.
+    pub fn open(root: &Path) -> Option<Self> {
+        match crate::mac::fsevents::FsEvents::open(root) {
+            Some(events) => Some(ChangeSource::Events(events)),
+            None => Kqueue::open(root).map(ChangeSource::Kqueue),
+        }
+    }
+
+    /// Like `open`, but says why: the FSEvents stream's failure is lost when kqueue is what
+    /// answers instead, so this reports the fallback's own reason, which is what a user can
+    /// act on.
+    pub fn open_err(root: &Path) -> io::Result<Self> {
+        match crate::mac::fsevents::FsEvents::open(root) {
+            Some(events) => Ok(ChangeSource::Events(events)),
+            None => Kqueue::open_err(root).map(ChangeSource::Kqueue),
+        }
+    }
+
+    pub fn poll(&mut self, interval: Duration) -> io::Result<Vec<PathBuf>> {
+        match self {
+            ChangeSource::Events(events) => events.poll(interval),
+            ChangeSource::Kqueue(kqueue) => kqueue.poll(interval),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,7 +425,7 @@ mod tests {
     fn reports_created_and_removed_entries() {
         let root = tmp("create");
         std::fs::create_dir(root.join("sub")).unwrap();
-        let mut src = ChangeSource::open(&root).expect("kqueue available");
+        let mut src = Kqueue::open(&root).expect("kqueue available");
         assert!(src.poll(Duration::from_millis(10)).unwrap().is_empty());
         std::fs::write(root.join("sub/new.bin"), b"x").unwrap();
         let got = names(&src.poll(Duration::from_millis(2000)).unwrap(), &root);
@@ -394,7 +440,7 @@ mod tests {
     fn a_change_in_the_root_reports_its_children() {
         let root = tmp("rootchurn");
         std::fs::write(root.join("a.txt"), b"x").unwrap();
-        let mut src = ChangeSource::open(&root).expect("kqueue available");
+        let mut src = Kqueue::open(&root).expect("kqueue available");
         std::fs::write(root.join("b.txt"), b"x").unwrap();
         let got = names(&src.poll(Duration::from_millis(2000)).unwrap(), &root);
         // The parent is named because kqueue reports the directory, never the entry.
@@ -406,7 +452,7 @@ mod tests {
     #[test]
     fn a_new_directory_is_watched() {
         let root = tmp("newdir");
-        let mut src = ChangeSource::open(&root).expect("kqueue available");
+        let mut src = Kqueue::open(&root).expect("kqueue available");
         let late = root.join("late");
         std::fs::create_dir(&late).unwrap();
         let got = names(&src.poll(Duration::from_millis(2000)).unwrap(), &root);
@@ -425,7 +471,7 @@ mod tests {
     fn poll_reports_paths_in_the_spelling_the_caller_gave() {
         let root = tmp("spelling");
         std::fs::create_dir(root.join("sub")).unwrap();
-        let mut src = ChangeSource::open(&root).expect("kqueue available");
+        let mut src = Kqueue::open(&root).expect("kqueue available");
         std::fs::write(root.join("sub/a.bin"), b"x").unwrap();
         let got = src.poll(Duration::from_millis(2000)).unwrap();
         assert!(!got.is_empty(), "the write must be seen");
@@ -446,7 +492,7 @@ mod tests {
     #[test]
     fn poll_honours_its_timeout() {
         let root = tmp("timeout");
-        let mut src = ChangeSource::open(&root).unwrap();
+        let mut src = Kqueue::open(&root).unwrap();
         let t = Instant::now();
         assert!(src.poll(Duration::from_millis(120)).unwrap().is_empty());
         assert!(
@@ -460,7 +506,7 @@ mod tests {
     #[test]
     fn a_tree_past_the_budget_refuses_the_whole_feed() {
         let root = tmp("budget");
-        let mut s = ChangeSource::open(&root).unwrap();
+        let mut s = Kqueue::open(&root).unwrap();
         // Fill the budget by hand rather than on disk: the point is what `add` answers
         // once it is spent.
         for i in 0..MAX_WATCHED_DIRS {

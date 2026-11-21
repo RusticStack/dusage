@@ -50,7 +50,8 @@ src/unix/watch.rs     change feed for --watch (inotify)
 src/mac/sys.rs        Darwin struct layouts, kqueue/stat/unlink declarations
 src/mac/enumerate.rs  readdir$INODE64 + fstatat enumeration, symlink and mount helpers
 src/mac/delete.rs     unlink/rmdir delete, never follows symlinks
-src/mac/watch.rs      change feed for --watch (kqueue EVFILT_VNODE)
+src/mac/watch.rs      change feed for --watch (FSEvents, kqueue fallback)
+src/mac/fsevents.rs   the FSEvents stream and its CoreServices/CoreFoundation FFI
 src/bin/dusage.rs     thin CLI: cmd::dispatch + cmd::finish
 src/bin/fastdel.rs    thin CLI over cmd::prune
 tests/                dusage_cli.rs, fastdel_cli.rs, search_cli.rs (run the built binaries)
@@ -349,7 +350,16 @@ explicit-stack walk as Linux's.
 
 ### mac::watch (`src/mac/watch.rs`)
 
-One `kqueue()`, one `EVFILT_VNODE` registration per directory with `EV_CLEAR`, `NOTE_WRITE`
+`ChangeSource` is FSEvents first and kqueue second. The FSEvents stream watches a hierarchy
+from one stream — `FSEventStreamCreate` with `WatchRoot` and without `UseCFTypes`, scheduled on
+a dispatch queue so no run loop thread is owned — and its callback folds each batch into a
+`Mutex<Buffer>` + `Condvar` that `poll` drains through the same quiet window inotify uses.
+`MustScanSubDirs`, `EventIdsWrapped` and `RootChanged` become `Err`, which the caller already
+turns into a full rescan; that is the fallback the owner required, and it is why the kqueue
+feed staying as a second implementation is safe rather than load-bearing.
+
+The kqueue feed is the fallback, unchanged in behaviour: one `kqueue()`, one `EVFILT_VNODE`
+registration per directory with `EV_CLEAR`, `NOTE_WRITE`
 and the rest. `poll` blocks for the first event then drains until nothing is ready. kqueue
 names the directory, never the entry, so the reported path is the changed directory, which
 `top_for` attributes to the top-level entry containing it; for the root itself the children
