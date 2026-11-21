@@ -8,7 +8,7 @@ every improvement: `docs/ROADMAP.md`.
 ## Layout
 
 ```text
-src/lib.rs            module list; re-exports queue::par_for_each; `native` = win or unix
+src/lib.rs            module list; re-exports queue::par_for_each; `native` = win, unix or mac
 src/queue.rs          par_for_each: condvar work queue (one mutex, panic-safe)
 src/cli.rs            arg parser, human units (sizes, ages), thread default
 src/guard.rs          protected-root guard, one implementation per platform
@@ -44,7 +44,7 @@ src/bin/fastdel.rs    thin CLI over cmd::prune
 tests/                dusage_cli.rs, fastdel_cli.rs, search_cli.rs (run the built binaries)
 ```
 
-The two platform modules expose the same small surface, which is all `scan.rs`,
+The three platform modules expose the same small surface, which is all `scan.rs`,
 `prune.rs` and `guard.rs` see through `crate::native`:
 
 ```rust
@@ -69,8 +69,8 @@ enqueued via `push`. It stops when the queue is empty and nothing is active.
 - Lint: `cargo clippy --all-targets -- -D warnings`
 - Test: `cargo test` (tests needing admin skip themselves)
 - Build: `cargo build --release`
-- CI (`.github/workflows/ci.yml`): the same four steps on `windows-latest` and
-  `ubuntu-latest`, plus a Linux smoke test that compares a `/usr` scan with
+- CI (`.github/workflows/ci.yml`): the same four steps on `windows-latest`,
+  `ubuntu-latest`, `macos-15-intel` and `macos-15` (arm64), plus a Linux smoke test that compares a `/usr` scan with
   `find -printf '%s'`. Run them locally before finishing.
 - Install to PATH: `cargo install --path .` → `%CARGO_HOME%\bin` / `~/.cargo/bin`
 - Cross-check the other platform without a toolchain VM:
@@ -175,10 +175,10 @@ walk plus a parallel content scanner) and the single binary with subcommands
 (`dusage scan|big|search|find|prune`, `fastdel` and `del` aliases for `prune`,
 presets for the pruner). Search limits are listed in `docs/ROADMAP.md`.
 
-Also done on the macOS branch: the macOS port, `src/mac/` as the third `crate::native`
+Also done, and merged to `main`: the macOS port, `src/mac/` as the third `crate::native`
 arm — `readdir$INODE64`/`fstatat` enumeration, `unlink`/`rmdir` deletion, a kqueue
 `EVFILT_VNODE` change feed and a macOS guard — cross-checked for `x86_64-apple-darwin`
-from Linux, with a `macos-15-intel` CI leg. See the open item below for what that does
+and `aarch64-apple-darwin` from Linux, with `macos-15-intel` and `macos-15` CI legs. See the open item below for what that does
 not prove.
 
 Open:

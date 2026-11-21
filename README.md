@@ -99,7 +99,8 @@ fastdel /var/tmp --age 7d --log prune.log    # do it, with a log
 ```
 
 With Rust installed you can also build and install both tools with
-`cargo install --git https://github.com/RusticStack/dusage`.
+`cargo install --git https://github.com/RusticStack/dusage`. On macOS that is the only route
+for now: the release page has no macOS binaries.
 
 ## dusage
 
@@ -256,7 +257,7 @@ the built-in preset of the same name.
 
 `dusage search` reads file contents, the way `grep` and `rg` do, and `dusage find` lists
 paths, the way `find` does. Both walk a tree once, skip the same directories, and behave the
-same on Windows and Linux. `grep` and `rg` are aliases for `search`, `ls` for `find`,
+same on Windows, Linux and macOS. `grep` and `rg` are aliases for `search`, `ls` for `find`,
 `fastdel` and `del` for `prune`.
 
 ```text
@@ -347,7 +348,7 @@ refused in every spelling.
 The defaults are more aggressive than ripgrep's: the cache list applies everywhere (outside a
 git repository too) and `.gitignore` is honoured outside a repository as well. What you get
 back for that: one binary that also scans, prunes and prints du totals, the same behaviour on
-Windows and Linux, UTF-16 and Latin-1 reading, `--json`, and a regex engine with no
+Windows, Linux and macOS, UTF-16 and Latin-1 reading, `--json`, and a regex engine with no
 dependencies at all.
 
 ## Benchmarks
@@ -471,9 +472,10 @@ cargo fmt --check
 On Windows the C runtime is linked statically (`.cargo/config.toml`), so the exes run on a
 clean install. The MFT and change-journal tests need an elevated shell and skip themselves
 otherwise; the Linux inotify and hardlink tests need nothing special. CI runs the full set on
-`windows-latest` and `ubuntu-latest`, plus a Linux smoke test that compares a `/usr` scan
-against `find`. Pushing a `v*` tag builds, tests and publishes Windows and Linux releases
-(`.github/workflows/release.yml`).
+`windows-latest`, `ubuntu-latest`, `macos-15-intel` and `macos-15` (Apple Silicon), plus a
+Linux smoke test that compares a `/usr` scan against `find`. Pushing a `v*` tag builds, tests
+and publishes Windows and Linux releases (`.github/workflows/release.yml`); there is no macOS
+release artifact yet.
 
 ```text
 src/

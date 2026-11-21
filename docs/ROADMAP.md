@@ -2,7 +2,7 @@
 
 **Origin.** This began as a research report written from `src/lib.rs`, `src/bin/dusage.rs` and `src/bin/fastdel.rs` before any change (four research lanes plus skeptic verdicts; refuted items dropped or corrected, unconfirmed items marked unverified). The "Problem" and "Fix" text below describes the original code and is kept as written; the status line under each item says what was built. Gains stay unmeasured unless stated: no benchmark has been run on the implementation.
 
-**Status (branch `improve/roadmap`, after wave 3).** Items 1-8 are done, 9 and 10 are partially done (implemented, not validated on a real volume), 11 is open. The benchmark questions in section 4 are answered on a real Windows volume (2026-11-21);
+**Status (items 1-11, on `main`).** Items 1-10 are done, 9 and 10 validated on real volumes in an elevated shell; 11 is open. The benchmark questions in section 4 are answered on a real Windows volume (2026-11-21);
 the elevated half of that run and the Linux sweeps are named where they are still owed.
 
 **Status 0.5.0 (search).** `dusage` is a search tool as well: `search` (contents,
