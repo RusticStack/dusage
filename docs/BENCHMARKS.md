@@ -139,6 +139,12 @@ df subcommands (#92, #93) and the search buffer work of #95. Nothing in this doc
 branch changes code: the branch adds `dusage tree`, `dusage df`, their bench cases and this
 prose, so the tables describe the compiler output of that main and nothing else.
 
+Two changes have landed on `main` since that measurement and are not in its code: the
+Windows benchmark records (#99, #101), whose section below is their own run on a real NTFS
+volume, and the macOS port (#94), which adds a Darwin platform module and does not touch the
+Linux paths these tables time. The macOS rows are therefore absent rather than guessed: when
+the port's owner regenerates the tables with a Mac in the loop, they land beside these.
+
 Two earlier records sit beside this one in `bench/records/` — `20261120T230616Z-48a92f6-before`
 and `20261120T232911Z-2cdb809-after`, the pair behind #95's own before/after claim. The record
 for this run is `...-1f3331e-tree-df`, and it is the first one that carries the `tree` and

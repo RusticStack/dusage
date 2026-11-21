@@ -1,7 +1,7 @@
-//! dusage: dependency-free disk tooling for Windows and Linux.
+//! dusage: dependency-free disk tooling for Windows, Linux and macOS.
 
-#[cfg(not(any(windows, target_os = "linux")))]
-compile_error!("dusage supports Windows (NTFS) and Linux only.");
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+compile_error!("dusage supports Windows (NTFS), Linux and macOS only.");
 
 pub mod archive;
 pub mod archive_brotli;
@@ -30,11 +30,15 @@ pub mod search;
 pub mod simd;
 pub mod unicode;
 
+#[cfg(target_os = "macos")]
+pub mod mac;
 #[cfg(target_os = "linux")]
 pub mod unix;
 #[cfg(windows)]
 pub mod win;
 
+#[cfg(target_os = "macos")]
+pub use mac as native;
 #[cfg(target_os = "linux")]
 pub use unix as native;
 #[cfg(windows)]

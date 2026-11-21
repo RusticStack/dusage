@@ -2522,10 +2522,13 @@ fn scan_file(
 fn open_scan(path: &Path, kind: Kind) -> io::Result<Option<File>> {
     let mut opts = File::options();
     opts.read(true);
-    #[cfg(target_os = "linux")]
+    // A FIFO or a device must not block the open: without `O_NONBLOCK` the guard below
+    // never runs and the scanner hangs on the first one it meets. The flag's value is the
+    // platform's own, so it is reached through the native layer rather than written out.
+    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(crate::unix::sys::O_NONBLOCK);
+        opts.custom_flags(crate::native::sys::O_NONBLOCK);
     }
     let f = opts.open(path)?;
     if kind == Kind::File {

@@ -50,14 +50,14 @@ fn make_old(p: &Path) {
         o.access_mode(0x100).custom_flags(0x0200_0000);
         o.open(p).unwrap().set_modified(t).unwrap();
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         // Opening a directory read-only is enough to set its times when we own it.
         fs::File::open(p).unwrap().set_modified(t).unwrap();
     }
 }
 
-/// A directory link: a junction on Windows, a symlink on Linux.
+/// A directory link: a junction on Windows, a symlink on Linux and macOS.
 fn link_dir(link: &Path, target: &Path) {
     #[cfg(windows)]
     {
@@ -69,7 +69,7 @@ fn link_dir(link: &Path, target: &Path) {
             .unwrap();
         assert!(o.status.success(), "mklink failed");
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link).unwrap();
     }
@@ -207,11 +207,11 @@ fn bad_args_exit_2() {
 fn protected_roots_refused() {
     #[cfg(windows)]
     let mut roots = vec!["C:\\".to_string()];
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut roots = vec!["/".to_string()];
     #[cfg(windows)]
     roots.extend(std::env::var("USERPROFILE"));
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     roots.extend(std::env::var("HOME").ok());
     for r in &roots {
         // The prefix matches nothing, so even a guard bug could not delete real data.
@@ -221,6 +221,54 @@ fn protected_roots_refused() {
             let o = fastdel(&args);
             assert_eq!(code(&o), 2, "{r} {extra:?}: {}", stderr(&o));
             assert!(stderr(&o).contains("refusing"), "{}", stderr(&o));
+        }
+    }
+}
+
+/// Every root the macOS guard protects, including the spellings that only answer after
+/// canonicalisation: `/etc`, `/bin` and `/sbin` are symlinks into `/private` on a stock
+/// system, so the plain spelling is the interesting one.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_every_protected_root_is_refused() {
+    let mut roots: Vec<String> = [
+        "/",
+        "/System",
+        "/System/Library",
+        "/Library",
+        "/usr",
+        "/usr/bin",
+        "/bin",
+        "/bin/sh",
+        "/sbin",
+        "/etc",
+        "/etc/hosts",
+        "/private",
+        "/private/etc/hosts",
+        "/Applications",
+        "/cores",
+        "/dev",
+        "/Users",
+        "/Volumes",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if let Some(h) = std::env::var_os("HOME") {
+        let home = Path::new(&h);
+        roots.push(h.to_string_lossy().into_owned());
+        if let Some(parent) = home.parent() {
+            roots.push(parent.to_string_lossy().into_owned());
+        }
+    }
+    for r in &roots {
+        // The prefix matches nothing, so even a guard bug could not delete real data.
+        for extra in [&["--dry"][..], &[][..]] {
+            let mut args = vec![r.as_str(), "-1", "zzz_no_such_prefix_"];
+            args.extend(extra);
+            let o = fastdel(&args);
+            assert_eq!(code(&o), 2, "{r} {extra:?}: {}", stderr(&o));
+            assert!(stderr(&o).contains("refusing"), "{r}: {}", stderr(&o));
         }
     }
 }
@@ -302,7 +350,7 @@ fn reparse_root_refused() {
     cleanup(&base);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn symlink_to_protected_dir_refused() {
     let base = fixture("lnkprot");

@@ -779,7 +779,7 @@ mod tests {
     }
 
     /// Create `link` as a directory link to `target` (junction on Windows, symlink on
-    /// Linux). Returns false when the platform refuses.
+    /// Linux and macOS). Returns false when the platform refuses.
     fn link_dir(link: &Path, target: &Path) -> bool {
         #[cfg(windows)]
         {
@@ -791,7 +791,7 @@ mod tests {
                 .map(|o| o.status.success())
                 .unwrap_or(false)
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             std::os::unix::fs::symlink(target, link).is_ok()
         }
@@ -833,7 +833,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(windows))]
     #[test]
     fn top_mapping() {
         let root = Path::new("/data");
@@ -994,9 +994,9 @@ mod tests {
         assert_eq!(r.total.bytes, 10);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(windows))]
     #[test]
-    fn streams_are_zero_on_linux() {
+    fn streams_are_zero_off_windows() {
         let f = Fixture::new("ads");
         f.file("a.txt", 10);
         let mut o = opts(&f, Backend::Batched);

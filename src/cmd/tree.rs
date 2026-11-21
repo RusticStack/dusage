@@ -593,10 +593,10 @@ fn human_bytes(bytes: u64, base: u64) -> String {
     }
 }
 
-/// Allocated bytes of a path whose metadata is already in hand: `st_blocks * 512` on Linux.
-/// Windows' `std` metadata carries the EndOfFile size and not AllocationSize, so a start
-/// point's own blocks are `None` there and count 0 — the limitation `du` documents too.
-#[cfg(target_os = "linux")]
+/// Allocated bytes of a path whose metadata is already in hand: `st_blocks * 512` on Linux
+/// and macOS. Windows' `std` metadata carries the EndOfFile size and not AllocationSize, so a
+/// start point's own blocks are `None` there and count 0 — the limitation `du` documents too.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn path_alloc(md: &fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     Some(md.blocks() * 512)

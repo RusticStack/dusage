@@ -16,9 +16,13 @@
 //! once per process with `is_x86_feature_detected!`, so no instruction is executed on a CPU
 //! that does not advertise it, and every path falls back to the portable loop.
 
+// The feature-level machinery exists for the x86 loops; on any other architecture the
+// portable fallback is the only path, so nothing below would have a reader.
+#[cfg(target_arch = "x86_64")]
 use std::sync::OnceLock;
 
 /// The widest loop this CPU can run.
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Level {
     Portable,
@@ -28,6 +32,7 @@ enum Level {
     Avx2,
 }
 
+#[cfg(target_arch = "x86_64")]
 fn level() -> Level {
     static LEVEL: OnceLock<Level> = OnceLock::new();
     *LEVEL.get_or_init(detect)
@@ -42,11 +47,6 @@ fn detect() -> Level {
     } else {
         Level::Portable
     }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn detect() -> Level {
-    Level::Portable
 }
 
 /// The first `needle` in `hay` at or after `from`.
@@ -177,6 +177,7 @@ impl Prefilter {
     }
 
     /// The first candidate among the byte positions `mask` flags, counting from `base`.
+    #[cfg(target_arch = "x86_64")]
     #[inline]
     fn first_in_mask(&self, hay: &[u8], base: usize, mut mask: u32) -> Option<(usize, usize)> {
         while mask != 0 {
