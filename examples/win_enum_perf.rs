@@ -10,11 +10,6 @@
 //! kernel was asked. Cache state is the caller's business: run it twice for warm, and
 //! after a cache purge for cold.
 
-use dusage::model::ErrorCounts;
-use dusage::win::enumerate::{read_plain, read_plain_ex, DirReader, Entry};
-use std::path::{Path, PathBuf};
-use std::time::Instant;
-
 #[cfg(not(windows))]
 fn main() {
     eprintln!("win_enum_perf measures Windows enumeration only");
@@ -22,6 +17,8 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
+    use std::path::PathBuf;
+
     let mut args = std::env::args().skip(1);
     let root: PathBuf = args
         .next()
@@ -91,14 +88,21 @@ fn main() {
     }
 }
 
+#[cfg(windows)]
 enum Backend {
     Walk,
     WalkLargeFetch,
     Batch(usize),
 }
 
-/// One whole-tree walk. Returns (elapsed ms, files, dirs).
-fn walk(root: &Path, backend: &Backend) -> (f64, f64, u64, u64) {
+/// One whole-tree walk. Returns (elapsed ms, read() ms, files, dirs).
+#[cfg(windows)]
+fn walk(root: &std::path::Path, backend: &Backend) -> (f64, f64, u64, u64) {
+    use dusage::model::ErrorCounts;
+    use dusage::win::enumerate::{read_plain, read_plain_ex, DirReader, Entry};
+    use std::path::PathBuf;
+    use std::time::Instant;
+
     let mut errs = ErrorCounts::default();
     let mut reader = match backend {
         Backend::Batch(n) => Some(DirReader::with_buffer(*n)),
