@@ -147,6 +147,10 @@ if (-not $SkipProtection) {
     $delTree = Join-Path $Root 'srcA'
     $excluded = $false
     try {
+        if (-not (Get-Command Add-MpPreference -ErrorAction SilentlyContinue)) {
+            Add-Check ([ordered]@{ kind = 'protection'; operation = 'unavailable'; tree = ''; protection = 'unknown'; median_ms = $null; runs = 0; detail = 'Add-MpPreference is not present (no Windows Defender API on this box)' })
+            throw 'skip'
+        }
         foreach ($state in 'on', 'excluded') {
             if ($state -eq 'excluded') {
                 Add-MpPreference -ExclusionPath $Root -ErrorAction Stop
@@ -168,6 +172,9 @@ if (-not $SkipProtection) {
             Add-Row ([ordered]@{ case = "protection-delete-$state"; section = 'protection'; cache = 'warm'; role = 'primary'; tool = 'dusage'; command = "fastdel $Root\run --age -1 --threads 16 (protection $state)"; median_ms = $delMs; min_ms = $delMs; max_ms = $delMs; runs = 1 })
             Add-Check ([ordered]@{ kind = 'protection'; operation = 'delete 50k files'; tree = 'srcA'; protection = $state; median_ms = $delMs; runs = 1 })
         }
+    }
+    catch {
+        if ("$_" -notmatch 'skip') { Write-Output ("admin: protection section failed: " + $_) }
     }
     finally {
         if ($excluded) {
