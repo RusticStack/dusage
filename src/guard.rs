@@ -339,11 +339,10 @@ mod macos {
     /// in the system temp directory cannot do the job it exists for. This is the shape
     /// Linux has, where `/var` is refused and `/var/tmp` is not.
     ///
-    /// Every mounted volume root belongs in this set too, and the volumes a person
-    /// mounts are the ones `/Volumes` lists. `getmntinfo` would name the rest, but its
-    /// `struct statfs` is not bound in this crate, so a volume mounted outside `/Volumes`
-    /// is not refused as a volume root — only the device comparison in the prune stops it
-    /// being walked into.
+    /// Every mounted volume root belongs in this set too, and the list comes from the
+    /// kernel's mount table (`getmntinfo`, through the native layer) rather than from the
+    /// `/Volumes` directory: a filesystem mounted outside `/Volumes` is a volume root as
+    /// much as a disk image is, and reading the directory could not see it.
     fn data_dirs() -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = ["/Users", "/opt", "/Volumes", "/private/tmp", "/private/var"]
             .iter()
@@ -354,11 +353,9 @@ mod macos {
                 v.push(p);
             }
         }
-        if let Ok(entries) = std::fs::read_dir("/Volumes") {
-            for e in entries.flatten() {
-                if let Some(p) = lexical(&e.path()) {
-                    v.push(p);
-                }
+        for root in crate::native::enumerate::mount_roots() {
+            if let Some(p) = lexical(&root) {
+                v.push(p);
             }
         }
         v
@@ -553,6 +550,35 @@ mod macos_tests {
                 !is_protected_root(&home.join("scratch/x")),
                 "inside HOME is prunable"
             );
+        }
+    }
+
+    /// Every root in the kernel's mount table is a volume root, wherever it is mounted.
+    /// Reading `/Volumes` instead was a blind spot: a filesystem mounted at `/srv/data` or
+    /// under `/private/var/folders` never appeared there.
+    #[test]
+    fn a_mount_outside_volumes_is_refused_as_a_volume_root() {
+        let roots = crate::native::enumerate::mount_roots();
+        assert!(!roots.is_empty(), "the kernel reported no mounts");
+        assert!(
+            roots.iter().any(|r| r == Path::new("/")),
+            "the root is missing from {roots:?}"
+        );
+        let outside: Vec<&std::path::PathBuf> = roots
+            .iter()
+            .filter(|r| !r.starts_with("/Volumes") && *r != Path::new("/"))
+            .collect();
+        if outside.is_empty() {
+            println!(
+                "skipped the outside-/Volumes case: this machine lists {} mounts and every \
+                 non-root one is under /Volumes",
+                roots.len()
+            );
+            return;
+        }
+        for r in outside {
+            assert!(prot(&r.to_string_lossy()), "{r:?} is a mount root");
+            assert!(is_protected_root(r), "{r:?} lexically");
         }
     }
 

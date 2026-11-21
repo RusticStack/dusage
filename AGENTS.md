@@ -176,15 +176,15 @@ Open:
   is measured at 13 interleaved rounds on a 4-vCPU container (one thread per core is
   fastest for `scan` and `search`; 4x cores costs 35-58%), so what remains is `io_uring`
   batching, which the zero-dependency and read-only rules both argue against.
-- Verify the rest of the macOS port on a real Mac. x86_64 has now built and run there
-  (the `macos-15-intel` leg), which confirms the `$INODE64` bindings and the `struct`
-  layouts; arm64 has not, and it binds the plain symbols instead because Apple exports them
-  at 64-bit width there. FSEvents is deferred (CoreFoundation against zero dependencies);
-  the kqueue feed stops at 4096 watched directories and gives up wholesale past that;
-  `getmntinfo` is unbound on this branch, so only the mounts `/Volumes` lists are refused as
-  volume roots and `-fstype` answers nothing. The guard matches both the lexical and the
-  canonical spelling of a path, because `/etc`, `/tmp`, `/bin`, `/sbin` and `/var` are
-  symlinks into `/private` there. Details in `docs/ROADMAP.md`.
+- Verify arm64 for macOS. x86_64 has built and run on a real Mac (the `macos-15-intel`
+  leg), which confirms the `$INODE64` bindings and the `struct` layouts; arm64 has not, and
+  it binds the plain symbols instead because Apple exports them at 64-bit width there.
+  FSEvents is deferred (CoreFoundation against zero dependencies) and the kqueue feed stops
+  at 4096 watched directories, which MRI-13 tracks. `getmntinfo` and `struct statfs` are
+  bound, so a volume root is refused wherever it is mounted and `-fstype` answers from the
+  kernel's table. The guard matches both the lexical and the canonical spelling of a path,
+  because `/etc`, `/tmp`, `/bin`, `/sbin` and `/var` are symlinks into `/private` there.
+  Details in `docs/ROADMAP.md`.
 
 ## Style
 
